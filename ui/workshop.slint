@@ -1,0 +1,141 @@
+import { Button, LineEdit, StandardListView, TextEdit, Palette } from "std-widgets.slint";
+
+global Ink {
+    out property <color> text: #203449;
+    out property <color> muted: #526778;
+    out property <color> rail: #eaf0f4;
+    out property <color> page: #fbfcfd;
+    out property <color> edge: #c5d2dc;
+    out property <color> accent: #155a83;
+}
+component Caption inherits Text { color: Ink.muted; font-size: 13px; vertical-alignment: center; }
+component Heading inherits Text { color: Ink.text; font-size: 25px; font-weight: 600; overflow: elide; }
+component Rule inherits Rectangle { height: 1px; background: Ink.edge; }
+
+export component Desk inherits Window {
+    title: project == "" ? "Workshop" : project + " · Workshop";
+    preferred-width: 1020px; preferred-height: 710px;
+    min-width: 800px; min-height: 640px;
+    background: Ink.page;
+    default-font-family: "Segoe UI";
+    in property <string> project;
+    in property <string> milestone;
+    in property <[StandardListViewItem]> rows;
+    in-out property <int> selection: -1;
+    in property <string> task;
+    in property <string> state-label;
+    in property <string> action;
+    in property <string> patch;
+    in property <string> revision;
+    in property <bool> can-review;
+    in property <bool> can-discard;
+    in property <bool> can-resume;
+    in property <bool> can-retry;
+    in property <bool> has-check;
+    in property <bool> busy;
+    in property <bool> running;
+    in-out property <string> draft;
+    in-out property <string> direction;
+    in property <string> notice;
+    callback open-project();
+    callback select-row(int);
+    callback operate(string);
+    init => { Palette.color-scheme = light; }
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: Ink.page; height: 78px;
+            HorizontalLayout {
+                padding-left: 26px; padding-right: 26px; padding-top: 22px; padding-bottom: 22px; spacing: 18px;
+                Text { text: "Workshop"; width: 157px; color: Ink.accent; font-family: "Georgia"; font-size: 31px; vertical-alignment: center; }
+                if root.project != "": Rectangle { width: 1px; background: Ink.edge; }
+                Text { text: root.project; color: Ink.text; font-size: 17px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                if root.project != "": Button { text: "Open folder…"; width: 108px; enabled: !root.busy; clicked => { root.open-project(); } }
+            }
+        }
+        Rule {}
+        if root.project == "": VerticalLayout {
+            alignment: center; padding: 64px; spacing: 16px;
+            Heading { text: "Open a project"; }
+            Caption { text: "Choose a Git repository or a new folder to start its first snapshot."; wrap: word-wrap; }
+            HorizontalLayout { alignment: start; Button { text: "Choose folder…"; primary: true; enabled: !root.busy; clicked => { root.open-project(); } } }
+        }
+        if root.project != "": HorizontalLayout {
+            spacing: 0px;
+            Rectangle {
+                width: 220px; background: Ink.rail;
+                VerticalLayout {
+                    padding: 18px; padding-top: 26px; spacing: 12px;
+                    Caption { text: "Active milestone"; }
+                    Text { text: root.milestone; font-size: 19px; font-weight: 600; color: Ink.text; wrap: word-wrap; }
+                    Rectangle { height: 10px; }
+                    Rule {}
+                    HorizontalLayout {
+                        Caption { text: "Tasks"; }
+                        Button { text: "New task"; enabled: !root.busy; clicked => { root.select-row(-1); } }
+                    }
+                    if root.rows.length == 0: Caption { text: "No tasks yet"; }
+                    StandardListView {
+                        model: root.rows; current-item: root.selection; enabled: !root.busy;
+                        current-item-changed(i) => { root.select-row(i); }
+                    }
+                }
+            }
+            Rectangle { width: 1px; background: Ink.edge; }
+            VerticalLayout {
+                padding: 26px; spacing: 12px;
+                if root.selection < 0: VerticalLayout {
+                    spacing: 14px;
+                    Heading { text: "Assign a task"; }
+                    Caption { text: "What should Codex change in this project?"; }
+                    TextEdit { text <=> root.draft; accessible-label: "Task description"; placeholder-text: "Describe the change and how to check it."; enabled: !root.busy; height: 132px; }
+                    HorizontalLayout { alignment: start;
+                        Button { text: "Start task"; primary: true; enabled: !root.busy && root.draft != ""; clicked => { root.operate("submit"); } }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+                if root.selection >= 0: VerticalLayout {
+                    spacing: 10px;
+                    Caption { text: root.state-label; }
+                    Text { text: root.task; font-size: 19px; font-weight: 600; color: Ink.text; wrap: word-wrap; overflow: elide; max-height: 76px; }
+                    Caption { text: root.action; wrap: word-wrap; max-height: 75px; overflow: elide; }
+                    Rectangle { height: 6px; }
+                    Rule {}
+                    HorizontalLayout {
+                        Text { text: "Change review"; font-size: 17px; font-weight: 600; color: Ink.text; vertical-alignment: center; }
+                        Caption { text: root.revision; font-family: "Consolas"; horizontal-alignment: right; }
+                    }
+                    if root.patch != "": TextEdit { text: root.patch; accessible-label: "Saved Git patch"; read-only: true; font-family: "Consolas"; font-size: 13px; wrap: no-wrap; }
+                    if root.patch == "": Rectangle {
+                        vertical-stretch: 1;
+                        Caption { text: root.running ? "Edits will appear here when the run stops." : "This attempt has no saved changes."; wrap: word-wrap; }
+                    }
+                    if root.can-review || root.has-check: HorizontalLayout {
+                        alignment: start; spacing: 8px;
+                        if root.can-review: Button { text: "Accept change"; primary: true; enabled: !root.busy; clicked => { root.operate("accept"); } }
+                        if root.has-check: Button { text: "Run Luau check"; enabled: !root.busy; clicked => { root.operate("check"); } }
+                    }
+                    if root.running || root.can-resume: HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { text <=> root.direction; accessible-label: "Agent direction"; placeholder-text: "Give Codex direction…"; }
+                        Button { text: root.running ? "Send direction" : "Resume"; enabled: root.running ? root.direction != "" : !root.busy; clicked => { root.operate(root.running ? "steer" : "resume"); } }
+                    }
+                    HorizontalLayout {
+                        alignment: start; spacing: 8px;
+                        if root.running: Button { text: "Cancel run"; clicked => { root.operate("cancel"); } }
+                        if root.can-retry: Button { text: "Retry task"; enabled: !root.busy; clicked => { root.operate("retry"); } }
+                        if root.can-discard: Button {
+                            text: "Discard"; enabled: !root.busy; clicked => { root.operate("discard"); }
+                        }
+                    }
+                }
+            }
+        }
+        if root.notice != "": Rectangle {
+            background: Ink.rail;
+            VerticalLayout { padding-left: 26px; padding-right: 26px; padding-top: 9px; padding-bottom: 9px;
+                Caption { text: root.notice; wrap: word-wrap; max-height: 68px; overflow: elide; }
+            }
+        }
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["ui", "src"],
+  "canonicalMap": "DESIGN.md",
+  "requiredCapabilities": ["Form", "Select/Listbox", "Scrollbar", "CRUD"],
+  "evidence": {
+    "crudFullFlow": "docs/h1-verification.md",
+    "failurePaths": "tests/recovery.rs"
+  }
+}
