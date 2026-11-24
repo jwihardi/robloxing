@@ -335,6 +335,18 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
     } else {
         w.assignment.files.join(", ")
     };
+    let mut stats = vec![scope];
+    if w.tries > 1 {
+        let retries = w.tries - 1;
+        stats.push(if retries == 1 {
+            "1 retry".into()
+        } else {
+            format!("{retries} retries")
+        });
+    }
+    if let Some(tokens) = w.tokens {
+        stats.push(format!("{tokens} tokens"));
+    }
     WorkerRow {
         id: w.id as i32,
         title: w.assignment.title.into(),
@@ -350,16 +362,11 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
         }
         .into(),
         running: w.state == "running",
-        detail: format!("{}\n{}", w.assignment.deliverable, w.detail).into(),
-        stats: format!(
-            "{} · {} retries{}",
-            scope,
-            w.tries.saturating_sub(1),
-            w.tokens
-                .map(|t| format!(" · {t} tokens"))
-                .unwrap_or_default()
-        )
-        .into(),
+        assignment: w.assignment.deliverable.into(),
+        detail: w.detail.into(),
+        criteria: w.assignment.acceptance.into(),
+        dependencies: w.assignment.depends_on.join(", ").into(),
+        stats: stats.join(" · ").into(),
     }
 }
 impl App {
@@ -441,7 +448,6 @@ impl App {
             .into_iter()
             .map(worker_row)
             .collect();
-        let mut visible_workers = std::collections::HashSet::new();
         let mut rows = Vec::new();
         if !more {
             rows.extend(self.preceding_shots(store, Some(attempt.id))?);
@@ -470,7 +476,6 @@ impl App {
                 for id in message.dispatched_workers {
                     if let Some(worker) = workers.iter().find(|w| i64::from(w.id) == id) {
                         batch.push(worker.clone());
-                        visible_workers.insert(worker.id);
                     }
                 }
                 turn.dispatch_id = message.id as i32;
@@ -478,12 +483,7 @@ impl App {
             }
             rows.push(turn);
         }
-        // Keep workers from older pages and pre-dispatch-history chats accessible.
-        let other_workers: Vec<_> = workers
-            .into_iter()
-            .filter(|w| !visible_workers.contains(&w.id))
-            .collect();
-        ui.set_workers(ModelRc::new(VecModel::from(other_workers)));
+        ui.set_workers(ModelRc::new(VecModel::from(workers)));
         self.turns.set_vec(rows);
         if follow && before == i64::MAX {
             Self::scroll_after_layout(&ui);
@@ -762,6 +762,23 @@ impl App {
         ui.set_chat_choices(choices);
         Ok(())
     }
+    fn select_chat(&self, selected: Option<i64>) {
+        if selected == self.id.get() {
+            return;
+        }
+        let ui = self.ui.unwrap();
+        let mut drafts = self.drafts.borrow_mut();
+        drafts.insert(self.id.get(), ui.get_draft().to_string());
+        self.session.take();
+        self.id.set(selected);
+        self.render_attachments();
+        self.displayed.set(None);
+        ui.set_draft(drafts.remove(&selected).unwrap_or_default().into());
+        ui.set_notice("".into());
+        if let Err(e) = self.render() {
+            ui.set_notice(format!("{e:#}").into());
+        }
+    }
     fn render(&self) -> Result<()> {
         let ui = self.ui.unwrap();
         let slot = self.store.borrow();
@@ -935,6 +952,7 @@ impl App {
                     }
                 }
                 Update::Opened(store) => {
+                    ui.invoke_reset_chat_navigation();
                     self.task_overrides.borrow_mut().clear();
                     self.close_inspector();
                     self.studio_cancel.take();
@@ -1242,6 +1260,13 @@ fn main() -> Result<()> {
     if project.as_deref() == Some(std::ffi::OsStr::new("--headless")) {
         return workshop::cli::execute(std::iter::once("workshop --headless".into()).chain(args));
     }
+    if std::env::var_os("WORKSHOP_HEADLESS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return workshop::cli::execute(
+            std::iter::once("workshop".into())
+                .chain(project)
+                .chain(args),
+        );
+    }
     let ui = Desk::new()?;
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
@@ -1412,6 +1437,52 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
+    ui.on_find_chats(move |query| {
+        if query.trim().is_empty() {
+            return Default::default();
+        }
+        let slot = a.store.borrow();
+        let Some(store) = slot.as_ref() else {
+            return Default::default();
+        };
+        match store.search_chats(&query) {
+            Ok(rows) => ModelRc::new(VecModel::from(
+                rows.into_iter()
+                    .map(|(id, prompt)| PickerOption {
+                        value: id.to_string().into(),
+                        label: prompt.lines().next().unwrap_or("Untitled chat").into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Err(error) => {
+                a.ui.unwrap().set_notice(error.to_string().into());
+                Default::default()
+            }
+        }
+    });
+    let a = app.clone();
+    ui.on_select_hit(move |value| {
+        let ui = a.ui.unwrap();
+        if ui.get_busy() {
+            return;
+        }
+        let result = (|| -> Result<()> {
+            let id = value.parse::<i64>()?;
+            let position = a
+                .store
+                .borrow()
+                .as_ref()
+                .context("Open a project first")?
+                .chat_position(id)?;
+            a.chat_offset.set(position / 40 * 40);
+            a.select_chat(Some(id));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            ui.set_notice(error.to_string().into());
+        }
+    });
+    let a = app.clone();
     ui.on_select_row(move |i| {
         if a.ui.unwrap().get_busy() {
             return;
@@ -1419,21 +1490,7 @@ fn main() -> Result<()> {
         let selected = usize::try_from(i)
             .ok()
             .and_then(|i| a.attempts.borrow().get(i).map(|r| r.id));
-        if selected == a.id.get() {
-            return;
-        }
-        let ui = a.ui.unwrap();
-        let mut drafts = a.drafts.borrow_mut();
-        drafts.insert(a.id.get(), ui.get_draft().to_string());
-        a.session.take();
-        a.id.set(selected);
-        a.render_attachments();
-        a.displayed.set(None);
-        ui.set_draft(drafts.remove(&selected).unwrap_or_default().into());
-        ui.set_notice("".into());
-        if let Err(e) = a.render() {
-            ui.set_notice(format!("{e:#}").into());
-        }
+        a.select_chat(selected);
     });
     let a = app.clone();
     ui.on_operate(move |op| {

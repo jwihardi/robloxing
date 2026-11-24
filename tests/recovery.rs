@@ -37,6 +37,30 @@ impl Case {
     }
 }
 #[test]
+fn chat_search_can_reopen_a_match_beyond_the_current_history_page() -> Result<()> {
+    let case = Case::new()?;
+    let store = case.open()?;
+    let db = rusqlite::Connection::open(store.dir.join("workshop.sqlite"))?;
+    db.execute_batch(
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<42)
+         INSERT INTO tasks(id,milestone,prompt) SELECT i,1,'Draft ' || i FROM n;
+         INSERT INTO attempts(id,task,state,action,head,model)
+         SELECT id,id,'accepted','','','' FROM tasks;
+         UPDATE tasks SET prompt='First 100% complete' WHERE id=1;",
+    )?;
+    let hits = store.search_chats("100% COMPLETE")?;
+    assert_eq!(hits, [(1, "First 100% complete".to_string())]);
+    assert_eq!(store.search_chats("Draft")?.len(), 40);
+    let position = store.chat_position(hits[0].0)?;
+    assert_eq!(position, 41);
+    assert_eq!(
+        store.attempts_page(position / 40 * 40, 40)?[position % 40].id,
+        hits[0].0
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "sends two messages through the locally signed-in Codex provider"]
 fn live_followup_reuses_the_session_and_streams_both_replies() -> Result<()> {
     use std::time::Instant;

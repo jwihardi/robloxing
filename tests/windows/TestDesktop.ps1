@@ -21,6 +21,8 @@ $request = Import-Clixml -LiteralPath ([Text.Encoding]::Unicode.GetString([Conve
 try {
     . $request.Helper
     if ([TestDesktop]::CurrentName() -ne $request.Desktop) { throw 'Could not isolate the UI test desktop.' }
+    # The isolated child deliberately tests the UI even when the caller uses CLI-only mode.
+    Remove-Item Env:WORKSHOP_HEADLESS -ErrorAction SilentlyContinue
     $params = $request.Parameters
     & $request.Script @params *>&1 | Out-File -LiteralPath $request.Log -Encoding utf8
     exit 0

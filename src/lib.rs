@@ -268,6 +268,23 @@ impl Store {
     pub fn attempts_page(&self, offset: usize, limit: usize) -> Result<Vec<Attempt>> {
         self.attempt_range(None, limit.clamp(1, 101) as i64, offset as i64)
     }
+    pub fn search_chats(&self, query: &str) -> Result<Vec<(i64, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT a.id, t.prompt FROM attempts a JOIN tasks t ON t.id=a.task
+            WHERE instr(lower(t.prompt),lower(?1)) > 0 ORDER BY a.id DESC LIMIT 40",
+        )?;
+        Ok(stmt
+            .query_map([query.trim()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn chat_position(&self, id: i64) -> Result<usize> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT count(*) FROM attempts WHERE id > ?1",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
     fn attempt_range(&self, id: Option<i64>, limit: i64, offset: i64) -> Result<Vec<Attempt>> {
         let db = self.db.lock().unwrap();
         let filter = if id.is_some() {

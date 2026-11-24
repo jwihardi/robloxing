@@ -13,6 +13,7 @@ using System;
 using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -138,10 +139,44 @@ try {
     try { $graphics.FillRectangle([Drawing.Brushes]::SteelBlue, 30, 25, 60, 40) } finally { $graphics.Dispose() }
     $surface.Save($env:WORKSHOP_TEST_CAPTURE_IMAGE, [Drawing.Imaging.ImageFormat]::Png)
 } finally { $surface.Dispose() }
+$automation = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--project `"$project`" list")
+$automation.UseShellExecute = $false
+$automation.CreateNoWindow = $true
+$automation.RedirectStandardError = $true
+$automation.EnvironmentVariables['WORKSHOP_HEADLESS'] = '1'
+$headless = [Diagnostics.Process]::Start($automation)
+try {
+    if (!$headless.WaitForExit(10000)) { $headless.Kill(); throw 'Automation mode opened the desktop app' }
+    if ($headless.ExitCode -ne 0) { throw $headless.StandardError.ReadToEnd() }
+} finally { $headless.Dispose() }
 $proc = [TestDesktop]::StartApp($fixtureApp, $project)
 try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
+    $rail = (Named 'Game studio').Current.BoundingRectangle
+    $search = (Named 'Search chats').Current.BoundingRectangle
+    if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
+    Click 'Explore project'
+    $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -like 'Give me a tour*' } 'editable starter prompt'
+    Click 'Hide sidebar'
+    Wait-For { (Named 'Show sidebar') -and !(Named 'Search chats') } 'hidden chat sidebar'
+    Click 'Show sidebar'
+    Wait-For { Named 'Search chats' } 'restored chat sidebar'
+    $normal = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,800,650,0x16)
+    Wait-For { Named 'Show sidebar' } 'compact layout'
+    Click 'Show sidebar'
+    Wait-For { Named 'Search chats' } 'chat drawer'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+    Wait-For { (Named 'Show sidebar') -and !(Named 'Search chats') } 'Escape closes chat drawer'
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$normal.Width,[int]$normal.Height,0x16)
+    Wait-For { Named 'Search chats' } 'full-width chat sidebar'
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('missing chat')
+    Wait-For { Named 'No matching chats' } 'empty chat search'
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('')
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('')
     Click 'Message Codex'
     Click 'Chat model and effort'
     Wait-For { Named 'Chat reasoning effort' } 'first-click effort picker'
@@ -189,6 +224,9 @@ try {
     (Named 'Filter list').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
     Click 'Official marketplaces'
     Wait-For { Named 'Sample plugin' } 'marketplace catalog'
+    if (Named 'Plugin source') { throw 'Manual install form should start collapsed' }
+    Click 'Install from source'
+    Wait-For { Named 'Plugin source' } 'manual plugin install'
     (Named 'Plugin source').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('sample@fixture')
     Click 'Install'
     Wait-For { Named 'Uninstall' } 'installed plugin'
@@ -200,6 +238,7 @@ try {
     $skill = Join-Path $root 'sample-skill'
     [void](New-Item -ItemType Directory -Path $skill)
     Set-Content (Join-Path $skill 'SKILL.md') "---`nname: sample-skill`ndescription: Test skill`n---"
+    Click 'Install from source'
     Wait-For { Named 'Skill source' } 'skill installer'
     (Named 'Skill source').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($skill)
     Click 'Install'
@@ -247,6 +286,10 @@ try {
     Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
     Click 'Retry run'
     Wait-For { Named 'Attach to chat' } 'image job ready after retry'
+    Click 'Details'
+    Wait-For { Named 'Run details' } 'selected run metadata'
+    Click 'Preview'
+    Wait-For { !(Named 'Run details') } 'selected image preview'
     $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
     if ($request.model -ne 'fixture-deep' -or $request.effort -ne 'high') { throw 'Retry lost the image model or effort override' }
     Remove-Item -LiteralPath (Join-Path $root 'record-inference')
@@ -357,7 +400,14 @@ try {
     if (($wire.input | Where-Object type -eq 'localImage').path -ne $image) { throw 'Provider did not receive the image' }
     if (($wire | ConvertTo-Json -Depth 12) -match 'capture\.png|/screenshot|shot-[A-Za-z0-9]+[/\\]') {throw 'Local screenshot entered model input'}
     if ($wire.input[0].text -notlike "*$project*") { throw 'Provider did not receive the selected folder' }
-    'Composer, attachments and provider settings passed'
+    Wait-For { Named 'Dispatched 2 subagents' } 'inline dispatch receipt'
+    Click 'Activity'
+    Wait-For { (Named 'Session activity') -and (Named 'Write left') } 'team activity panel'
+    Click 'Write left'
+    Wait-For { Named 'Acceptance · File contains its name' } 'worker acceptance criteria'
+    Click 'Close activity'
+    Wait-For { !(Named 'Session activity') } 'return to transcript'
+    'Headless mode, navigation, composer, Studio, provider settings and agent activity passed'
 } finally {
     [TestDesktop]::CloseApp($proc, $appWindow)
 }

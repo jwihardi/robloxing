@@ -1,9 +1,10 @@
 import { Theme, Action } from "common.slint";
+import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
 import { Studio, StudioPage } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
 
-export struct WorkerRow { id: int, title: string, state: string, detail: string, stats: string, running: bool }
+export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
 export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
@@ -15,7 +16,7 @@ export struct PickerData {
     current-model: string, current-effort: string
 }
 
-enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs }
+enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs, activity }
 
 component Flyout inherits FocusScope {
     callback escape();
@@ -83,14 +84,17 @@ component WorkerGroup inherits VerticalLayout {
                 Rectangle { y: 18px; width: parent.width; height: 1px; background: Theme.line; }
             }
             VerticalLayout { spacing: 0px;
-                HorizontalLayout {
+                HorizontalLayout { spacing: 7px;
                     Action { label: agent.title; horizontal-stretch: 1; selected: root.expanded-worker == agent.id;
-                        activate => {root.choose-worker(agent.id);}
+                        accessible-expanded: root.expanded-worker == agent.id; activate => {root.choose-worker(agent.id);}
                     }
                     Text { text: agent.state; color: agent.running ? Theme.accent : Theme.muted; vertical-alignment: center; font-size: 13px; }
                 }
                 if root.expanded-worker == agent.id: VerticalLayout { padding-left: 10px; padding-bottom: 9px; spacing: 5px;
-                    Text { text: agent.detail; color: Theme.text; font-size: 14px; wrap: word-wrap; }
+                    Text { text: agent.assignment; color: Theme.text; font-size: 14px; wrap: word-wrap; }
+                    if agent.detail != "" && agent.detail != agent.assignment: Text { text: agent.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+                    if agent.criteria != "": Text { text: "Acceptance · " + agent.criteria; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+                    if agent.dependencies != "": Text { text: "Depends on · " + agent.dependencies; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     Text { text: agent.stats; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                     if agent.running: Action { label: "Stop worker"; activate => {root.stop-worker(agent.id);} }
                 }
@@ -315,8 +319,8 @@ component Composer inherits Rectangle {
     in property <bool> custom-subagents;
     forward-focus: input;
     private property <length> attachment-height: min(2,root.attachments.length) * 32px;
-    height: 74px + min(108px, max(38px, input.preferred-height)) + root.attachment-height; border-radius: 27px; background: Theme.surface;
-    border-width: 1px; border-color: input.has-focus ? #727272 : Theme.line;
+    height: 74px + min(108px, max(38px, input.preferred-height)) + root.attachment-height; border-radius: 23px; background: Theme.surface;
+    border-width: 1px; border-color: input.has-focus ? Theme.accent.mix(Theme.line,0.55) : Theme.line;
     public function focus-input() { input.focus(); }
     public function focus-add() { plus.focus(); }
     public function paste-text() { input.focus(); input.paste(); }
@@ -404,6 +408,7 @@ export component Desk inherits Window {
     in-out property <string> settings-query;
     changed settings-query => {root.confirm-id = ""; root.search-settings(root.settings-query);}
     private property <string> source-input;
+    private property <bool> source-open;
     private property <string> confirm-id;
     changed settings-open => { root.confirm-id = ""; }
     callback load-settings();
@@ -412,7 +417,7 @@ export component Desk inherits Window {
     function visit-settings(tab: string, provider: string) {
         root.confirm-id = "";
         if tab != root.settings-tab || provider != root.settings-provider {
-            root.settings-query = ""; root.source-input = ""; root.browse-plugins = false;
+            root.settings-query = ""; root.source-input = ""; root.source-open = false; root.browse-plugins = false;
         }
         root.settings-tab = tab; root.settings-provider = provider;
         root.load-settings();
@@ -471,6 +476,7 @@ export component Desk inherits Window {
     in property <bool> running;
     in-out property <string> draft;
     in property <string> notice;
+    private property <string> feedback-text: root.notice != "" ? root.notice : root.catalog-status;
     callback open-project();
     callback select-row(int);
     callback operate(string);
@@ -514,6 +520,7 @@ export component Desk inherits Window {
             composer.focus-subagents();
         } else if root.open-panel == OpenPanel.add { composer.focus-add(); }
         else if root.open-panel == OpenPanel.usage { usage-button.focus(); }
+        else if root.open-panel == OpenPanel.activity { activity-button.focus(); }
         else if root.open-panel == OpenPanel.options { options.focus(); }
         else if root.open-panel == OpenPanel.outputs { outputs-button.focus(); }
         root.open-panel = OpenPanel.closed;
@@ -534,61 +541,82 @@ export component Desk inherits Window {
             root.operate(root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
-    function new-chat() {root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
+    function new-chat() {root.chat-query=""; root.compact-context=false; root.open-panel=OpenPanel.closed; root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
     public function open-asset-draft() {
         root.studio-open = false;
         if !root.writable { root.new-chat(); }
         composer.focus-input();
     }
+
+    private property <bool> compact: root.width < 940px;
+    private property <bool> hide-context;
+    private property <bool> compact-context;
+    private property <bool> chat-screen: !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
+    private property <bool> has-context: (root.project != "" || root.settings-open) && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting);
+    private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
+    private property <string> chat-query;
+    private property <[PickerOption]> search-hits;
+    callback find-chats(string) -> [PickerOption];
+    callback select-hit(string);
+    changed chat-query => {root.search-hits = root.find-chats(root.chat-query);}
+    public function reset-chat-navigation() {root.chat-query = ""; root.compact-context = false;}
+    changed compact => {root.compact-context = false;}
+    function toggle-context() {
+        if root.compact {
+            root.compact-context = !root.compact-context;
+            if root.compact-context { context.focus(); }
+        } else {root.hide-context = !root.hide-context;}
+        root.open-panel = OpenPanel.closed;
+    }
+    function visit(where: string) {
+        root.open-panel = OpenPanel.closed; root.viewing-shot = "";
+        root.studio-open = where == "studio"; root.settings-open = where == "settings"; root.album-open = where == "album";
+        root.compact-context = false;
+        if root.studio-open {Studio.command("refresh");}
+        if root.settings-open {root.visit-settings(root.settings-tab,root.settings-provider);}
+        if root.album-open {root.refresh-album();}
+    }
     init => { Palette.color-scheme = dark; }
     rail := Rectangle {
-        x: 0px; y: 0px; width: root.width < 880px ? 192px : 224px; height: root.height; background: Theme.sidebar;
-        VerticalLayout {
-            padding-left: 14px; padding-right: 14px; padding-top: 22px; padding-bottom: 14px; spacing: 6px;
-            HorizontalLayout { padding-left: 8px; height: 44px; spacing: 9px;
-                Text { text: "Workshop"; color: Theme.text; font-weight: 600; font-size: 22px; vertical-alignment: center; }
+        x: 0px; y: 0px; width: nav.width + (root.context-visible && !root.compact ? context.width : 0px); height: root.height;
+        nav := Rectangle { x: 0px; y: 0px; width: 76px; height: root.height; background: Theme.rail;
+            VerticalLayout { padding-left: 6px; padding-right: 6px; padding-top: 15px; padding-bottom: 10px; spacing: 4px;
+                Rectangle { height: 42px; WorkshopMark { x: (parent.width - self.width) / 2; } }
+                if root.project != "": RailAction { caption: "New chat"; label: "New chat"; symbol: "\u{e710}"; enabled: !root.busy; activate => {root.new-chat();} }
+                RailAction { caption: "Chats"; label: "Chats"; symbol: "\u{e8bd}"; selected: root.chat-screen;
+                    activate => {if root.chat-screen {root.toggle-context();} else {root.visit("chat");}} }
+                if root.project != "": RailAction { caption: "Studio"; label: "Game studio"; symbol: "\u{e7b8}"; selected: root.studio-open;
+                    activate => {root.visit(root.studio-open ? "chat" : "studio");} }
+                RailAction { caption: "Album"; label:"Screenshots"; symbol: "\u{e91b}"; selected: root.album-open;
+                    activate => {root.visit(root.album-open ? "chat" : "album");} }
+                Rectangle { vertical-stretch: 1; }
+                sidebar-switch := RailAction { visible: root.has-context; height: self.visible ? 56px : 0px; caption: "Sidebar"; label: root.context-visible ? "Hide sidebar" : "Show sidebar";
+                    symbol: "\u{e700}"; accessible-expanded: root.context-visible; activate => {root.toggle-context();} }
+                settings := RailAction { caption: "Settings"; label: "Settings"; symbol: "\u{e713}"; selected: root.settings-open;
+                    activate => {root.visit(root.settings-open ? "chat" : "settings");} }
+                RailAction { caption: "Project"; label: root.project == "" ? "Open project…" : root.project; symbol: "\u{e8b7}";
+                    enabled: !root.busy; accessible-description: "Choose a project folder"; activate => {root.open-project();} }
             }
-            if root.project != "": Action { label: "New chat"; glyph: "\u{e710}"; height: 40px; border-radius: 20px;
-                enabled: !root.busy; activate => {root.new-chat();} }
-            if root.rows.length > 0: HorizontalLayout { height: 41px; padding-left: 10px;
-                Text { text: "Chats"; color: Theme.muted; font-size: 12px; vertical-alignment: bottom; }
-            }
-            ListView {
-                for chat[i] in root.rows: Action { label: chat; selected: i == root.selection;
-                    enabled: !root.busy; activate => {root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(i);} }
-            }
-            if root.older-chats || root.newer-chats: HorizontalLayout {
-                if root.newer-chats: Action { label: "Newer chats"; enabled: !root.busy; activate => {root.page(true,false);} }
-                if root.older-chats: Action { label: "Older chats"; enabled: !root.busy; activate => {root.page(true,true);} }
-            }
-            if root.project != "": Action { label: "Game studio"; glyph: "\u{e7fc}"; selected: root.studio-open;
-                activate => {root.studio-open = !root.studio-open; root.album-open = false; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.studio-open {Studio.command("refresh");}} }
-            Action { label: "Screenshots"; glyph: "\u{e722}"; selected: root.album-open;
-                activate => {root.studio-open = false; root.album-open = !root.album-open; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.album-open {root.refresh-album();}} }
-            settings := Action {
-                label: "Settings"; glyph: "\u{e713}"; selected: root.settings-open;
-                activate => { root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = !root.settings-open;
-                    if root.settings-open { root.open-panel = OpenPanel.closed; root.visit-settings(root.settings-tab,root.settings-provider); } }
-            }
-            Rectangle { height: 1px; background: Theme.line; }
-            Action { label: root.project == "" ? "Open project…" : root.project; glyph: "\u{e8b7}"; enabled: !root.busy; activate => {root.open-project();} }
         }
     }
     pane := Rectangle {
         visible: !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
         x: rail.width; width: root.width - self.x; height: root.height;
-        private property <length> measure: min(720px, self.width - 56px);
-        private property <length> folder-button-y: self.height / 2 - 32px;
+        private property <length> measure: min(760px, self.width - (self.width < 610px ? 32px : 72px));
+        Rectangle { y:55px; width:parent.width; height:1px; background: Theme.line; visible:root.project!=""; }
         HorizontalLayout {
             visible: root.project != ""; x: 24px; y: 10px; width: parent.width - 48px; height: 40px; spacing: 14px;
-            Text { text: root.selection >= 0 ? root.rows[root.selection] : "";
+            Text { text: root.selection >= 0 ? root.rows[root.selection] : "New conversation";
                 color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; min-width: 0px; horizontal-stretch: 1; vertical-alignment: center; }
             if !root.writable && root.model-name != "" && pane.width > 720px: Text { text: root.model-name; color: Theme.muted;
                 font-size: 13px; vertical-alignment: center; }
             usage-button := UsageSummary { context: root.context-meter; windows: root.usage-meters;
                 open => { root.show-panel(OpenPanel.usage, self.absolute-position.x, self.absolute-position.y, self.width, self.height); } }
+            activity-button := Action { visible:!root.home; label:"Activity"; glyph:"\u{e9d9}"; icon-only:pane.width < 720px;
+                width: !self.visible ? 0px : self.icon-only ? 34px : 96px; selected:root.open-panel == OpenPanel.activity;
+                activate=>{if root.open-panel == OpenPanel.activity {root.dismiss-panel();} else {root.show-panel(OpenPanel.activity,self.absolute-position.x,self.absolute-position.y,self.width,self.height);}} }
             options := Action {
-                visible: !root.home && !root.busy; width: 36px; label: "Chat options"; glyph: "\u{e712}"; icon-only: true;
+                visible: !root.home && !root.busy; width: self.visible ? 36px : 0px; label: "Chat options"; glyph: "\u{e712}"; icon-only: true;
                 activate => {root.show-panel(OpenPanel.options, self.absolute-position.x, self.absolute-position.y, self.width, self.height);}
             }
             outputs-button := Action {
@@ -597,33 +625,26 @@ export component Desk inherits Window {
                 activate => {if root.open-panel == OpenPanel.outputs { root.dismiss-panel(); } else { root.show-outputs(); }}
             }
         }
-        if root.home && root.turns.length == 0: Text {
-            x: composer.x + 2px; y: root.project == "" ? pane.folder-button-y - 72px : (composer.y - self.height) / 2;
-            width: pane.measure; height: 55px;
-            text: root.project == "" ? "Open a project to chat" : "What are we building?";
-            horizontal-alignment: center; vertical-alignment: center; color: Theme.text; font-weight: 600;
-            font-size: pane.width < 600px ? 29px : 34px;
-        }
-        if root.project == "": Action {
-            x: composer.x; y: pane.folder-button-y; width: 145px;
-            label: "Choose folder…"; glyph: "\u{e8b7}"; selected: true; enabled: !root.busy; activate => {root.open-project();}
-        }
-        team := ScrollView {
-            x: (parent.width - self.width) / 2; y: 55px; width: pane.measure;
-            visible: !root.home && root.workers.length > 0;
-            height: self.visible ? min(team-body.preferred-height, parent.height * 0.32) : 0px;
-            content-width: self.visible-width; content-height: team-body.preferred-height;
-            team-body := WorkerGroup {
-                width: team.visible-width;
-                label: "Codex lead  ·  " + root.workers.length + (root.workers.length == 1 ? " worker" : " workers");
-                workers: root.workers; open: root.show-workers; expanded-worker: root.expanded-worker;
-                toggle => { root.show-workers = !root.show-workers; }
-                choose-worker(id) => { root.toggle-worker(id); }
-                stop-worker(id) => { root.stop-worker(id); }
+
+        if root.home && root.turns.length == 0: VerticalLayout {
+            x: (parent.width - self.width) / 2; width: min(pane.measure, 590px);
+            height: self.preferred-height; y: max(58px, ((root.project == "" ? pane.height : composer.y) - self.height) / 2);
+            alignment: start; spacing: 13px;
+            HorizontalLayout { alignment: start; height: 41px; WorkshopMark { width: 38px; height:38px; } }
+            Text { text: root.project == "" ? "Open a project" : "What are we building?"; font-size: pane.width < 580px ? 29px : 36px;
+                color: Theme.text; font-weight: 600; wrap:word-wrap; }
+            Text { text: root.project == "" ? "Choose a folder to start a chat with Codex and keep your project’s work together." :
+                    "Ask Codex about the project, plan a change, or give the team a task."; color:Theme.muted; font-size:15px; wrap:word-wrap; }
+            HorizontalLayout { alignment:start; spacing:10px; height:38px;
+                if root.project == "": Action { label:"Choose folder…"; glyph:"\u{e8b7}"; primary:true; width:145px; enabled:!root.busy; activate=>{root.open-project();} }
+                if root.project != "" && root.draft == "": Action { label:"Explore project"; glyph:"\u{e8b7}"; width:147px; selected:true;
+                    activate=>{root.draft="Give me a tour of this project and point me to the main entry points."; composer.focus-input();} }
+                if root.project != "" && root.draft == "": Action { label:"Plan a change"; glyph:"\u{e9d5}"; width:146px; selected:true;
+                    activate=>{root.draft="Help me plan this change: "; composer.focus-input();} }
             }
         }
         transcript := ScrollView {
-            visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: team.y + team.height + 11px; width: pane.measure;
+            visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: 61px; width: pane.measure;
             height: max(50px, (root.writable ? composer.y : closed.y) - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
@@ -658,9 +679,10 @@ export component Desk inherits Window {
                         }
                     }
                 }
-                if !root.home && !root.later-messages && root.checkpoint != "": VerticalLayout {
-                    Action { label: "Project handoff"; glyph: root.show-checkpoint ? "\u{e70d}" : "\u{e76c}"; activate => {root.show-checkpoint=!root.show-checkpoint;} }
-                    if root.show-checkpoint: Text { text: root.checkpoint; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+                if !root.home && !root.later-messages && root.can-review: VerticalLayout { spacing: 4px;
+                    Text { text:root.checkpoint-only ? "Decisions ready for review" : "Changes ready for review"; font-size:16px; color:Theme.text; font-weight:600; }
+                    Text { text:root.checkpoint-only ? "Accept the handoff to keep these decisions for the project." : "Accept the agent’s changes to apply them to your project."; color:Theme.muted; font-size:14px; wrap:word-wrap; }
+                    HorizontalLayout { alignment:start; Action { label:root.checkpoint-only ? "Accept decisions" : "Accept change"; width:146px; selected:true; enabled:!root.busy; activate=>{root.operate("accept");} } }
                 }
                 if !root.home && root.later-messages: Action { label: "Newer messages"; activate => {root.page(false,false);} }
                 if !root.later-messages && root.running && root.partial != "": TextInput {
@@ -693,14 +715,17 @@ export component Desk inherits Window {
                 Action { label: "New chat"; glyph: "\u{e70f}"; enabled: !root.busy; selected: true; activate => {root.new-chat();} }
             }
         }
-        feedback := Text {
-            x: (parent.width - self.width) / 2; width: pane.measure; height: self.text == "" ? 0px : min(54px, self.preferred-height + 8px);
-            y: parent.height - self.height - 5px; text: root.notice != "" ? root.notice : root.catalog-status; color: Theme.muted; wrap: word-wrap; overflow: elide; font-size: 13px;
+        feedback := ScrollView {
+            x: (parent.width - self.width) / 2; width: pane.measure; height: root.feedback-text == "" ? 0px : min(78px, feedback-copy.preferred-height + 6px);
+            y: parent.height - self.height - 5px; content-width: self.visible-width; content-height: feedback-copy.preferred-height;
+            feedback-copy := TextInput { width: feedback.width - 18px; height: self.preferred-height; read-only: true; single-line: false;
+                text: root.feedback-text; color: Theme.muted; wrap: word-wrap; font-size: 13px; accessible-label: "Status message"; }
+
         }
     }
     // Disable the outside hit area during the press so Slint delivers that same
     // event to the newly uncovered control. The opener itself toggles on release.
-    if root.studio-open && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; }
+    if root.studio-open && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; navigation-hidden: !root.context-visible; browse=>{root.toggle-context();} }
     if root.studio-open && Studio.editing-run: Rectangle {
         x:rail.width; width:root.width - self.x; height:root.height; background:Theme.canvas;
         VerticalLayout { x:(parent.width - self.width)/2; width:min(520px,parent.width - 40px); y:24px; height:parent.height - 48px; spacing:16px;
@@ -714,10 +739,18 @@ export component Desk inherits Window {
     if root.album-open && root.viewing-shot == "": Rectangle {
         x: rail.width; width: root.width - self.x; height: root.height;
         VerticalLayout { x: 28px; y: 28px; width: parent.width - 56px; height: parent.height - 48px; spacing: 20px;
-            Text { text: "Screenshots"; color: Theme.text; font-size: 26px; font-weight: 600; }
-            if root.album.length == 0 || root.album-error != "": Text { text: root.album-error != "" ? root.album-error : "Screenshots you send from a chat appear here."; color: Theme.muted; wrap: word-wrap; font-size: 15px; }
-            gallery := ListView { vertical-stretch: 1;
-                private property <int> columns: self.visible-width > 760px ? 3 : 2;
+            HorizontalLayout { height: 44px; spacing: 12px;
+                Text { text: "Screenshot album"; color: Theme.text; font-size: 28px; font-weight: 600; horizontal-stretch:1; vertical-alignment:center; }
+                if root.album.length > 0: Text { text:root.album.length + (root.album.length == 1 ? " screenshot" : " screenshots"); color:Theme.muted; vertical-alignment:center; font-size:13px; }
+            }
+            Rectangle { height:1px; background:Theme.line; }
+            if root.album.length == 0 || root.album-error != "": VerticalLayout { vertical-stretch:1; alignment:center; spacing:10px;
+                Text { text: root.album-error != "" ? "Couldn’t load screenshots" : "No screenshots yet"; horizontal-alignment:center; color: Theme.text; font-weight:600; font-size:22px; }
+                Text { text: root.album-error != "" ? root.album-error : "In a chat, choose + and Take screenshot. Captures from every project appear here."; horizontal-alignment:center; color: Theme.muted; wrap: word-wrap; font-size: 15px; }
+                if root.album-error != "": HorizontalLayout { alignment:center; Action { label:"Try again"; selected:true; width:96px; activate=>{root.refresh-album();} } }
+            }
+            if root.album.length > 0 && root.album-error == "": gallery := ListView { vertical-stretch: 1;
+                private property <int> columns: clamp(floor(self.visible-width / 248px), 1, 4);
                 for row[i] in ceil(root.album.length / gallery.columns): Rectangle {
                     height: 186px; width: gallery.visible-width;
                     for col[j] in gallery.columns: Rectangle {
@@ -748,13 +781,9 @@ export component Desk inherits Window {
             x: (parent.width - self.width) / 2; width: min(710px, parent.width - 48px);
             y: 25px; height: parent.height - 45px; spacing: 12px;
             HorizontalLayout { height: 40px;
-                Text { text: "Settings"; font-size: 26px; font-weight: 600; vertical-alignment: center; color: Theme.text; horizontal-stretch: 1; }
+                Text { text: root.settings-tab == "Tasks" ? "Task settings" : root.settings-tab; font-size: 28px; font-weight: 600; vertical-alignment: center; color: Theme.text; horizontal-stretch: 1; }
+                if !root.context-visible: Action { label:"Settings sections"; glyph:"\u{e700}"; width:152px; activate=>{root.toggle-context();} }
                 Action { label: "Close settings"; icon-only: true; glyph: "\u{e711}"; width: 38px; activate => {root.settings-open = false; settings.focus();} }
-            }
-            HorizontalLayout { height: 36px; spacing: 5px; alignment: start;
-                for tab in ["Providers", "Plugins", "Skills", "Tasks"]: Action { label: tab; width: tab == "Providers" ? 88px : 73px;
-                    selected: root.settings-tab == tab; enabled: !root.settings-working;
-                    activate => {root.visit-settings(tab,root.settings-provider);} }
             }
             Rectangle { height: 1px; background: Theme.line; }
             if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 36px; spacing: 4px;
@@ -762,11 +791,13 @@ export component Desk inherits Window {
                     selected: provider == root.settings-provider; enabled: !root.settings-working;
                     activate => {root.visit-settings(root.settings-tab,provider);} }
                 Rectangle { horizontal-stretch: 1; }
+                Action { label: "Install from source"; width: 145px; selected: root.source-open; accessible-expanded: root.source-open;
+                    activate => {root.source-open = !root.source-open;} }
                 if root.settings-tab == "Plugins": Action { label: root.browse-plugins ? "Installed plugins" : "Browse plugins"; width: 125px;
                     enabled: !root.settings-working; activate => {root.browse-plugins = !root.browse-plugins; root.settings-query = ""; root.load-settings();} }
             }
             if root.settings-tab == "Providers": Text { text: "Sign in through your provider. Workshop uses Codex for chat."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
-            if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 36px; spacing: 6px;
+            if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
                 LineEdit { horizontal-stretch: 1; text <=> root.source-input; accessible-label: root.settings-tab == "Skills" ? "Skill source" : "Plugin source";
                     placeholder-text: root.settings-tab == "Skills" ? "GitHub skill folder URL" : "Plugin ID or marketplace source"; }
                 Action { label: "Install"; selected: true; width: 66px; enabled: root.source-input != "" && !root.settings-working;
@@ -813,6 +844,63 @@ export component Desk inherits Window {
                 }
             }
             if root.settings-tab != "Tasks": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
+        }
+    }
+
+    if root.compact && root.context-visible: TouchArea {
+        x: nav.width; width: root.width - self.x; height: root.height;
+        Rectangle { background: #08090c88; }
+        clicked => {root.compact-context = false;}
+    }
+    context := FocusScope {
+        visible: root.context-visible; x: nav.width; width: root.compact ? 228px : 218px; height: root.height;
+        capture-key-pressed(e) => {
+            if root.compact-context && e.text == Key.Escape {
+                root.compact-context = false;
+                sidebar-switch.focus();
+                return accept;
+            }
+            return reject;
+        }
+        Rectangle { background: Theme.sidebar; }
+        Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: Theme.line; }
+        if root.studio-open: StudioNavigation {
+            x: 14px; y: 15px; width: parent.width - 29px; height: parent.height - 28px;
+            picked => { root.compact-context = false; }
+        }
+        if root.settings-open: VerticalLayout {
+            padding: 14px; padding-top: 19px; alignment: start; spacing: 5px;
+            Text { text: "Settings"; height: 36px; color: Theme.text; font-size: 20px; font-weight: 600; }
+            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks"]: Action {
+                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}"][i]; selected: root.settings-tab == tab;
+                enabled: !root.settings-working; activate => {root.visit-settings(tab,root.settings-provider);root.compact-context=false;}
+            }
+        }
+        if root.chat-screen: VerticalLayout {
+            padding: 14px; padding-top: 18px; spacing: 9px;
+            Text { text: "Project"; color: Theme.muted; font-size: 12px; height: 16px; }
+            Action { label: root.project == "" ? "Choose folder…" : root.project; accessible-label:"Switch project"; enabled: !root.busy; height:32px;
+                activate=>{root.open-project();}
+                Text { x: parent.width - 20px; text:"\u{e70d}"; font-family:"Segoe MDL2 Assets"; color:Theme.muted; font-size:11px; vertical-alignment:center; }
+            }
+            Rectangle { height:1px; background:Theme.line; }
+            Text { text: "Chats"; color: Theme.text; font-size: 18px; font-weight: 600; height: 31px; vertical-alignment: bottom; }
+            if root.project != "": LineEdit { height: 34px; placeholder-text: "Search chats"; accessible-label: "Search chats"; text <=> root.chat-query; }
+            if root.chat-query != "" && root.search-hits.length == 0: Text { text:"No matching chats"; color:Theme.muted; font-size:13px; wrap:word-wrap; }
+            if root.project != "" && root.chat-query == "" && root.rows.length == 0: Text { text:"Your conversations appear here."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
+            if root.chat-query == "": ListView { vertical-stretch: 1;
+                for chat[i] in root.rows: Action { label: chat; selected: i == root.selection;
+                    enabled: !root.busy; activate => {root.compact-context=false; root.select-row(i);} }
+            }
+            if root.chat-query != "": ListView { vertical-stretch: 1;
+                for hit in root.search-hits: Action { label: hit.label; enabled: !root.busy;
+                    activate => {root.select-hit(hit.value); root.chat-query=""; root.compact-context=false;} }
+            }
+            if root.chat-query != "" && root.search-hits.length == 40: Text { text: "Showing the newest 40 matches."; color: Theme.muted; wrap:word-wrap; font-size:12px; }
+            if root.chat-query == "" && (root.older-chats || root.newer-chats): HorizontalLayout {
+                if root.newer-chats: Action { label: "Newer chats"; enabled: !root.busy; activate => {root.page(true,false);} }
+                if root.older-chats: Action { label: "Older chats"; enabled: !root.busy; activate => {root.page(true,true);} }
+            }
         }
     }
     TouchArea {
@@ -866,6 +954,33 @@ export component Desk inherits Window {
             Rectangle { height: 1px; background: Theme.line; }
             Action { label: "View all screenshots"; glyph: "\u{e8b9}"; height: 34px;
                 activate => {root.dismiss-panel(); root.album-open = true; root.refresh-album();} }
+        }
+    }
+
+    if root.open-panel == OpenPanel.activity: Flyout {
+        width: min(386px,pane.width - 18px); x: clamp(root.anchor-right - self.width, rail.width + 8px, root.width - self.width - 8px);
+        y: root.anchor-bottom + 5px; height: min(activity-stack.preferred-height + 32px, root.height - self.y - 16px);
+        escape=>{root.dismiss-panel();} init=>{self.focus();}
+        Rectangle { background: Theme.popup; border-width:1px; border-color:Theme.line; border-radius:17px; }
+        scroll := ScrollView { x:16px; y:14px; width:parent.width - 32px; height:parent.height - 28px;
+            content-width:self.visible-width; content-height:activity-stack.preferred-height;
+            activity-stack := VerticalLayout { width:scroll.visible-width - 5px; spacing:10px; alignment:start;
+                HorizontalLayout { height:30px;
+                    Text { text:"Session activity"; color:Theme.text; font-size:18px; font-weight:600; vertical-alignment:center; horizontal-stretch:1; }
+                    Action { label:"Close activity"; glyph:"\u{e711}"; icon-only:true; width:30px; height:30px; activate=>{root.dismiss-panel();} }
+                }
+                Text { text:root.running ? "Codex is working" : root.state-label; color:Theme.accent; font-size:14px; font-weight:600; }
+                if root.action != "": Text { text:root.action; color:Theme.muted; wrap:word-wrap; font-size:14px; }
+                if root.workers.length > 0: Rectangle { height:1px; background:Theme.line; }
+                if root.workers.length > 0: WorkerGroup { label:"Subagents (" + root.workers.length + ")"; workers:root.workers;
+                    open:root.show-workers; expanded-worker:root.expanded-worker; toggle=>{root.show-workers=!root.show-workers;}
+                    choose-worker(id)=>{root.toggle-worker(id);} stop-worker(id)=>{root.stop-worker(id);} }
+                if root.workers.length == 0: Text { text:root.running ? "No subagents dispatched yet." : "No subagents were dispatched."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
+                if root.checkpoint != "": Rectangle { height:1px; background:Theme.line; }
+                if root.checkpoint != "": Action { label:"Project handoff"; glyph:root.show-checkpoint ? "\u{e70d}" : "\u{e76c}";
+                    accessible-expanded:root.show-checkpoint; activate=>{root.show-checkpoint=!root.show-checkpoint;} }
+                if root.checkpoint != "" && root.show-checkpoint: Text { text:root.checkpoint; wrap:word-wrap; color:Theme.text; font-size:14px; }
+            }
         }
     }
     if root.open-panel == OpenPanel.usage: Flyout {

@@ -1,25 +1,26 @@
 ---
 version: alpha
 name: Workshop
-description: A dark Windows chat window for talking to a project agent.
+description: A native dark workspace for project conversations, agents and assets.
 colors:
-  canvas: "#202020"
-  sidebar: "#181818"
-  surface: "#303030"
-  selected: "#3b3b3b"
-  line: "#474747"
-  text: "#f5f5f5"
-  muted: "#b5b5b5"
-  accent: "#eeeeee"
+  rail: "#101217"
+  sidebar: "#14161b"
+  canvas: "#191c22"
+  surface: "#252a33"
+  selected: "#303643"
+  line: "#393e49"
+  text: "#f0f1f5"
+  muted: "#aeb5c3"
+  accent: "#b9c9ff"
 typography:
   sans: { fontFamily: "Segoe UI" }
   display: { fontFamily: "Segoe UI" }
 rounded:
-  composer: "27px"
-  message: "14px"
+  composer: "23px"
+  action: "9px"
 spacing:
-  reading-gutter: "28px"
-  sidebar: "12px"
+  rail: "76px"
+  sidebar: "218px"
 components:
   composer: {}
   action: {}
@@ -27,19 +28,25 @@ components:
 
 # Workshop
 
-A single sidebar holds New chat, conversation history and the project picker. The composer sits at the bottom in both new and existing chats. The opening question is centered in the space above it. Multiline drafts expand upward to a fixed scrollable height. A pill beside Send shows the current model and effort. It opens a rounded panel where the effort title and model name share a full-width button above the stepped slider. This button opens the scrollable model list. Each stop corresponds to a level supported by that model. In a conversation, the chat title identifies the transcript and its menu offers retry, accept and discard as the conversation state allows.
+The far-left rail holds the destinations that apply across the project. A second column holds whatever you can browse in the current destination, such as chats, Studio runs or settings sections. At widths below 940 logical pixels the second column becomes a drawer. The reading area, composer and output preview get that space back. The Sidebar control opens or closes the column at either size. This arrangement draws on the separation of navigation and sessions in KiroCrew and Linear’s sidebar hierarchy. [KiroCrew session view](https://github.com/kirodotdev/KiroCrew/blob/main/.github/screenshots/25249/composer-meter-after-model-switch-dark.png) · [Linear UI refresh](https://linear.app/changelog/2026-03-12-ui-refresh)
 
-Right-align the creator's messages on a soft graphite surface. Set Codex replies directly on the canvas and let both be selected and copied. Keep messages in time order within a 720-pixel reading column. This arrangement takes inspiration from the [KiroCrew session screen](https://github.com/kirodotdev/KiroCrew/blob/main/.github/screenshots/25249/composer-meter-after-model-switch-dark.png).
+## Conversations
 
-Delegating adds an expandable worker tree above the transcript. Each branch pairs an assignment title with its current state. Opening a branch reveals activity, scope, retries, usage and the running worker’s stop action. The tree stays visible while the transcript scrolls and has its own height limit. Direct chats use the full reading space. The persistent rows and per-worker controls take inspiration from KiroCrew. [SubagentProgressBar](https://github.com/kirodotdev/KiroCrew/blob/f4ed7c1fe7e857a533381f9f852b8a17fdee6eca/website/src/pages/chat/SubagentProgressBar.tsx)
+Keep the composer at the bottom in a new chat and throughout a conversation. The two shortcuts on the welcome screen fill in editable drafts. The project navigator searches saved chat prompts across history pages. The reading column tops out at 760 logical pixels. Right-align the user's messages on a raised surface and place selectable assistant replies directly on the canvas.
 
-The sidebar narrows from 224 to 192 logical pixels on smaller windows. Segoe UI carries the conversation. The wordmark and opening question use the same family at semibold weight. Neutral charcoal surfaces frame the reading column. The bright slider fill and checkmark identify the selected effort and model. The `Theme` global in `ui/common.slint` owns the runtime tokens.
+Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs opens screenshots for this chat and links to the album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)
 
-Game studio follows KiroCrew’s pattern of pairing a task-specific interface with persistent project work. One sidebar entry opens Images, Models and Ghidra. Each tab places creation controls above a project library, with the selected image, mesh render or decompiler listing beside the run history. A creator can export the selected result or bring it into chat. The chat and studio share the palette, typography and keyboard-accessible actions in `ui/common.slint`. [KiroCrew](https://github.com/kirodotdev/KiroCrew)
+## Studio, settings and album
+
+Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins and skills. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.
+
+## Components
+
+`Theme` in `ui/common.slint` owns the colors. Segoe UI carries both headings and conversation text. The rail is the darkest surface, the workspace is brighter, and selected actions and focused controls use a pale periwinkle accent. Capacity meters pair their green-to-red scale with numeric values. Use a labeled action for every icon-only control and keep advanced information available by keyboard.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|
-| Form | Composer | Local draft and selected provider session | Start a chat, steer, follow up | Enter sends, Shift+Enter inserts a newline |
-| Select/Listbox | InferencePicker, EffortTrack and history ListView | Codex model catalog, project defaults and selected chat | Composer and worker settings share the model and effort controls | Each model exposes its supported effort levels and selections survive reopening |
-| Scrollbar | Slint scroll and list widgets | Available pane height | History, messages and composer | Long conversations scroll above the composer |
-| CRUD | Store and Desk | SQLite attempt state and saved patch | New chat, stop, retry, accept and discard | Recovery and transcript tests |
+| Form | Composer, StudioPage and TaskEditor | Draft, selected run and saved task policy | Chat, task briefs, global and per-run settings | Windows picker suite exercises draft editing, attachments and task overrides |
+| Select/Listbox | InferencePicker, EffortTrack and history ListView | Provider catalog, project store, Studio history | Chat and worker policies, chat navigation and Studio run selection | Picker suite exercises focus, model switching, effort and library search |
+| Scrollbar | Slint ScrollView, ListView and TextEdit | Pane dimensions and content size | Transcript, activity, catalog, settings and run details | Long content can scroll independently of the composer |
+| CRUD | Store and Desk | SQLite attempt state and saved patch | New chat, stop, retry, accept and discard | Recovery tests and private desktop cancellation suite |

@@ -1,6 +1,6 @@
 # Workshop
 
-Workshop is a Windows desktop chat for working on a Git project with Codex. The lead can reply directly or assign parts of a task to workers. Replies stream into the conversation. Enter sends and Shift+Enter adds a line. Reopen a chat from the sidebar to continue it. The desktop app keeps a successful direct chat connected for follow-ups and releases its connection when you switch chats, review changes or close the window.
+Workshop is a Windows desktop chat for working on a Git project with Codex. The lead can reply directly or assign parts of a task to workers. Replies stream into the conversation. Enter sends and Shift+Enter adds a line. Use **Chats** to search the current project’s conversations and reopen one. **Sidebar** toggles the chat list and opens it as a drawer in a narrow window. The desktop app keeps a successful direct chat connected for follow-ups and releases its connection when you switch chats, review changes or close the window.
 
 ## Run on Windows
 
@@ -12,7 +12,7 @@ cargo run --locked --bin workshop
 
 Use **Choose folder** for an existing repository root or a folder for a new project. For a new project, Workshop initializes Git and snapshots its contents, respecting Git ignores. The next launch opens the most recent project. You can also pass its folder as the first argument.
 
-For automation, pass `--headless` first to run a command in the desktop executable without opening a window. It accepts the same commands, arguments and exit codes as `workshop-cli`. This example lists the project’s chats.
+For automation, pass `--headless` first to run a command in the desktop executable without opening a window. It accepts the same commands, arguments and exit codes as `workshop-cli`. Set `WORKSHOP_HEADLESS=1` in a test process to make every invocation of `workshop.exe` there use the command-line interface. This example lists the project’s chats.
 
 ```powershell
 .\target\release\workshop.exe --headless --project . list | Out-Host
@@ -28,7 +28,7 @@ Open the model and effort pill beside Send. Select the header showing the effort
 
 Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
-Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Screenshots** in the sidebar. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
+Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Album** in the navigation rail. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
 
 ## Provider settings
 
@@ -36,15 +36,15 @@ Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screensho
 
 In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
-**Plugins** lists the selected provider's installed plugins. Browse its marketplaces, install by `plugin@marketplace`, or enter a marketplace repository and choose **Add marketplace**. **Skills** installs a local folder containing `SKILL.md` or a GitHub URL pointing to that folder. Removing a user skill moves it to a sibling `removed-skills` directory for recovery. Fresh provider sessions pick up changes.
+**Plugins** lists the selected provider's installed plugins. Browse its marketplaces, choose **Install from source** to install by `plugin@marketplace`, or enter a marketplace repository and choose **Add marketplace**. **Skills** installs a local folder containing `SKILL.md` or a GitHub URL pointing to that folder. Removing a user skill moves it to a sibling `removed-skills` directory for recovery. Fresh provider sessions pick up changes.
 
-When the lead delegates, its workers appear underneath it. Select a worker to see its assignment, file scope, latest activity, retries and reported token usage. **Stop worker** interrupts that assignment while its sibling can continue. **Stop response** interrupts the whole team. Start a new chat to use delegation on projects with conversations created before H2.
+When the lead delegates, expand its dispatch in the conversation or open **Activity** in the chat header to see all workers. Select a worker to see its assignment, acceptance criteria, dependencies, file scope, latest activity and reported usage. **Stop worker** interrupts that assignment while its sibling can continue. **Stop response** interrupts the whole team. Start a new chat to use delegation on projects with conversations created before H2.
 
-Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
+Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
 
 ## Game studio
 
-Open **Game studio** in the project sidebar. Each tab keeps a searchable history of its runs and outputs. Select **Reuse settings** to start a variation from an earlier brief, seed or source file. You can continue chatting during a run, cancel it, and retry a failed or interrupted run. Reopening a project restores its library.
+Open **Studio** in the navigation rail. Select Images, Models or Ghidra in the adjacent sidebar. Each tool has a searchable run history beside its editor and preview. Select **Reuse settings** to start a variation from an earlier brief, seed or source file. You can continue chatting during a run, cancel it, and retry a failed or interrupted run. Reopening a project restores its library.
 
 | Area | What you can make | Requirements |
 |---|---|---|
