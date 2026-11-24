@@ -35,7 +35,7 @@ required-features = ["desktop"]
 
 [[bin]]
 name = "workshop-cli"
-path = "src/cli.rs"
+path = "src/bin/workshop-cli.rs"
 
 [profile.dev]
 debug = 0

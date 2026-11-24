@@ -1237,6 +1237,11 @@ impl App {
     }
 }
 fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    let project = args.next();
+    if project.as_deref() == Some(std::ffi::OsStr::new("--headless")) {
+        return workshop::cli::execute(std::iter::once("workshop --headless".into()).chain(args));
+    }
     let ui = Desk::new()?;
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
@@ -1436,7 +1441,7 @@ fn main() -> Result<()> {
             a.ui.unwrap().set_notice(format!("{e:#}").into());
         }
     });
-    let path = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| {
+    let path = project.map(PathBuf::from).or_else(|| {
         fs::read_to_string(data_dir().ok()?.join("last-project.txt"))
             .ok()
             .map(PathBuf::from)

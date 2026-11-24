@@ -1,5 +1,12 @@
 param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'TestDesktop.ps1')
+if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
+    $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
+    if ($StudioOnly) { $parameters.StudioOnly = $true }
+    Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
+    return
+}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
@@ -7,11 +14,6 @@ using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
-    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref Point p);
-    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
-    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
-    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -64,8 +66,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 
 function Named($name) {
     $proc.Refresh()
-    if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { return }
-    $window = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    if ($appWindow -eq [IntPtr]::Zero) { return }
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $name))
 }
@@ -75,7 +77,7 @@ function Wait-For([scriptblock]$condition, $description) {
         if (& $condition) { return }
         Start-Sleep -Milliseconds 50
     } while ([datetime]::UtcNow -lt $deadline)
-    $window = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     $names = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name } | Where-Object { $_ }
     throw "Timed out waiting for $description. Visible controls: $($names -join ', ')"
 }
@@ -86,7 +88,7 @@ function Click($name, [double]$fraction = 0.5) {
     $point = [WorkshopPointer+Point]::new()
     $point.X = [int]($rect.X + $rect.Width * $fraction)
     $point.Y = [int]($rect.Y + $rect.Height / 2)
-    $handle = $proc.MainWindowHandle
+    $handle = $appWindow
     [void][WorkshopPointer]::ScreenToClient($handle, [ref]$point)
     $pos = [IntPtr](($point.Y -shl 16) -bor ($point.X -band 65535))
     # InvokePattern skips hit testing and would pass even if focus swallowed the press.
@@ -114,9 +116,31 @@ function Choose-Attachment($title,$path) {
     }
     Wait-For { [WorkshopPointer]::Dialog($proc.Id,$title) -eq [IntPtr]::Zero } "$title closing"
 }
-$proc = Start-Process -FilePath $fixtureApp -ArgumentList $project -WindowStyle Normal -PassThru
+# A GUI-subsystem executable must accept automation arguments and finish with redirected output.
+$command = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--headless --project `"$project`" open")
+$command.UseShellExecute = $false
+$command.CreateNoWindow = $true
+$command.RedirectStandardOutput = $true
+$command.RedirectStandardError = $true
+$smoke = [Diagnostics.Process]::Start($command)
 try {
-    [void]$proc.WaitForInputIdle(10000)
+    if (!$smoke.WaitForExit(10000)) { $smoke.Kill(); throw 'Headless command did not exit' }
+    if ($smoke.ExitCode -ne 0 -or $smoke.StandardOutput.ReadToEnd() -notlike "*Opened $project*") {
+        throw "Headless project open failed. $($smoke.StandardError.ReadToEnd())"
+    }
+} finally { $smoke.Dispose() }
+# Exercise the real region picker against a known image without sampling the workstation.
+Add-Type -AssemblyName System.Drawing
+$env:WORKSHOP_TEST_CAPTURE_IMAGE = Join-Path $root 'capture-fixture.png'
+$surface = [Drawing.Bitmap]::new(200, 140)
+try {
+    $graphics = [Drawing.Graphics]::FromImage($surface)
+    try { $graphics.FillRectangle([Drawing.Brushes]::SteelBlue, 30, 25, 60, 40) } finally { $graphics.Dispose() }
+    $surface.Save($env:WORKSHOP_TEST_CAPTURE_IMAGE, [Drawing.Imaging.ImageFormat]::Png)
+} finally { $surface.Dispose() }
+$proc = [TestDesktop]::StartApp($fixtureApp, $project)
+try {
+    $appWindow = [TestDesktop]::WaitForWindow($proc)
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
     Click 'Message Codex'
     Click 'Chat model and effort'
@@ -255,35 +279,24 @@ try {
     Wait-For { Named 'Screenshots you send in this chat appear here.' } 'empty chat outputs'
     Click 'Outputs'
     Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
-    $fixtureWindow = [WorkshopPointer]::Dialog($proc.Id,'project · Workshop')
-    try {
-        [void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-1),10,10,0,0,0x0041)
-        $start = [WorkshopPointer+Point]::new(); $start.X = 380; $start.Y = 160
-        [void][WorkshopPointer]::ClientToScreen($fixtureWindow,[ref]$start)
-        try {Wait-For { [WorkshopPointer]::GetAncestor([WorkshopPointer]::WindowFromPoint($start),2) -eq $fixtureWindow -and $fixtureWindow -ne [IntPtr]::Zero } 'fixture canvas on screen'} catch {
-            throw "Fixture capture requires a visible test window. Window=$fixtureWindow Point=$($start.X),$($start.Y) Hit=$([WorkshopPointer]::WindowFromPoint($start)) Minimized=$([WorkshopPointer]::IsIconic($fixtureWindow))"
-        }
-        (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
-        Click 'Send message'
-        function CaptureWindow {
-            $helper = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='powershell.exe'" | Select-Object -First 1
-            if ($helper) {return [WorkshopPointer]::Dialog($helper.ProcessId,'Select a screenshot area')}
-            return [IntPtr]::Zero
-        }
-        Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'screen region picker'
-        $overlay = CaptureWindow
-        # Select only pixels inside the solid-color fixture.
-        [void][WorkshopPointer]::ScreenToClient($overlay,[ref]$start)
-        $down = ($start.Y -shl 16) -bor $start.X
-        $up = (($start.Y+40) -shl 16) -bor ($start.X+60)
-        [void][WorkshopPointer]::PostMessage($overlay,0x201,1,$down)
-        [void][WorkshopPointer]::PostMessage($overlay,0x200,1,$up)
-        [void][WorkshopPointer]::PostMessage($overlay,0x202,0,$up)
-        Wait-For { Named 'Sent screenshot' } 'local chat receipt'
-        $saved = Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png
-        $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
-        try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(30,20).ToArgb() -ne [Drawing.Color]::FromArgb(32,32,32).ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
-    } finally {[void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-2),0,0,0,0,3)}
+    (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
+    Click 'Send message'
+    function CaptureWindow {
+        $helper = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='powershell.exe'" | Select-Object -First 1
+        if ($helper) {return [WorkshopPointer]::Dialog($helper.ProcessId,'Select a screenshot area')}
+        return [IntPtr]::Zero
+    }
+    Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'screen region picker'
+    $overlay = CaptureWindow
+    $down = (25 -shl 16) -bor 30
+    $up = (65 -shl 16) -bor 90
+    [void][WorkshopPointer]::PostMessage($overlay,0x201,1,$down)
+    [void][WorkshopPointer]::PostMessage($overlay,0x200,1,$up)
+    [void][WorkshopPointer]::PostMessage($overlay,0x202,0,$up)
+    Wait-For { Named 'Sent screenshot' } 'local chat receipt'
+    $saved = Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png
+    $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
+    try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::SteelBlue.ToArgb() -or $bitmap.GetPixel(59,39).ToArgb() -ne [Drawing.Color]::SteelBlue.ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
     Wait-For { Named 'Open screenshot 1' } 'new screenshot in the top-right panel'
     $header = (Named 'Outputs').Current.BoundingRectangle
     $thumbnail = (Named 'Open screenshot 1').Current.BoundingRectangle
@@ -294,7 +307,7 @@ try {
     Wait-For { Named 'Open screenshot 1' } 'return to Outputs'
     Click 'View all screenshots'
     Wait-For { Named 'project' } 'album opened'
-    $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     Wait-For { $albumWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.Name -like 'View screenshot *'} } 'saved album image'
     Click 'Screenshots'
     Click 'Sent screenshot'
@@ -346,8 +359,5 @@ try {
     if ($wire.input[0].text -notlike "*$project*") { throw 'Provider did not receive the selected folder' }
     'Composer, attachments and provider settings passed'
 } finally {
-    if (!$proc.HasExited) {
-        [void]$proc.CloseMainWindow()
-        if (!$proc.WaitForExit(5000)) { $proc.Kill(); $proc.WaitForExit() }
-    }
+    [TestDesktop]::CloseApp($proc, $appWindow)
 }

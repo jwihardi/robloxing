@@ -19,7 +19,7 @@ public class WorkshopSnip : Form {
         AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        Bounds = SystemInformation.VirtualScreen;
+        Bounds = new Rectangle(SystemInformation.VirtualScreen.Location, desktop.Size);
         TopMost = true;
         ShowInTaskbar = false;
         DoubleBuffered = true;
@@ -67,8 +67,12 @@ public class WorkshopSnip : Form {
     public static void Run() {
         SetThreadDpiAwarenessContext(new IntPtr(-4));
         Rectangle screen = SystemInformation.VirtualScreen;
-        using (var desktop = new Bitmap(screen.Width, screen.Height, PixelFormat.Format24bppRgb)) {
-            using (var g = Graphics.FromImage(desktop)) g.CopyFromScreen(screen.Location,Point.Empty,screen.Size);
+        string fixture = Environment.GetEnvironmentVariable("WORKSHOP_TEST_CAPTURE_IMAGE");
+        using (var desktop = String.IsNullOrEmpty(fixture)
+            ? new Bitmap(screen.Width, screen.Height, PixelFormat.Format24bppRgb) : new Bitmap(fixture)) {
+            if (String.IsNullOrEmpty(fixture)) {
+                using (var g = Graphics.FromImage(desktop)) g.CopyFromScreen(screen.Location,Point.Empty,screen.Size);
+            }
             Rectangle area;
             using (var overlay = new WorkshopSnip(desktop)) {
                 if (overlay.ShowDialog() != DialogResult.OK) return;

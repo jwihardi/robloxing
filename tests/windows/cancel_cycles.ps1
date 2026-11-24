@@ -1,10 +1,18 @@
 param([string]$Binary = ".\target\release\workshop.exe")
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'TestDesktop.ps1')
+if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
+    $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
+    Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
+    return
+}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $exe = (Resolve-Path -LiteralPath $Binary).Path
 $root = Join-Path $env:TEMP ("ws-cycles-" + [guid]::NewGuid())
 $project = Join-Path $root 'project'
 [void](New-Item -ItemType Directory -Path $project -Force)
+$fixtureApp = Join-Path $root 'Workshop-test.exe'
+Copy-Item -LiteralPath $exe -Destination $fixtureApp
 $env:WORKSHOP_HOME = Join-Path $root 'data'
 $env:WORKSHOP_PROBE_DIR = $root
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
@@ -12,12 +20,12 @@ $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 [void](New-Item -ItemType File -Path (Join-Path $root 'left.hold'))
 $ready = Join-Path $root 'left.ready'
-$proc = Start-Process -FilePath $exe -ArgumentList $project -WindowStyle Normal -PassThru
+$proc = [TestDesktop]::StartApp($fixtureApp, $project)
 $ip = [System.Windows.Automation.InvokePattern]::Pattern
 $vp = [System.Windows.Automation.ValuePattern]::Pattern
 function Named([string]$name) {
     $proc.Refresh()
-    $window = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,$name)
     $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
 }
@@ -40,7 +48,7 @@ function Children {
     $ids
 }
 try {
-    [void]$proc.WaitForInputIdle(10000)
+    $appWindow = [TestDesktop]::WaitForWindow($proc)
     Wait-For { Named 'Message Codex' } 'composer'
     foreach ($cycle in 1..10) {
         if (Test-Path -LiteralPath $ready) { Remove-Item -LiteralPath $ready }
@@ -57,5 +65,5 @@ try {
         [pscustomobject]@{cycle=$cycle; descendants_released=$ids.Count; private_mib=[math]::Round($proc.PrivateMemorySize64/1MB,2)} | ConvertTo-Json -Compress
     }
 } finally {
-    if (!$proc.HasExited) { [void]$proc.CloseMainWindow(); [void]$proc.WaitForExit(5000) }
+    [TestDesktop]::CloseApp($proc, $appWindow)
 }

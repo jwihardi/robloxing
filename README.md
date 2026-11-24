@@ -12,6 +12,12 @@ cargo run --locked --bin workshop
 
 Use **Choose folder** for an existing repository root or a folder for a new project. For a new project, Workshop initializes Git and snapshots its contents, respecting Git ignores. The next launch opens the most recent project. You can also pass its folder as the first argument.
 
+For automation, pass `--headless` first to run a command in the desktop executable without opening a window. It accepts the same commands, arguments and exit codes as `workshop-cli`. This example lists the project’s chats.
+
+```powershell
+.\target\release\workshop.exe --headless --project . list | Out-Host
+```
+
 ## Working with agents
 
 The Codex lead chooses how to split a task. New projects allow two workers at once. For example, the lead can assign a settings screen and a file importer in parallel, then start importer tests as soon as the importer passes its checks, even while work on the screen continues. Tasks that edit overlapping paths run in order.
@@ -105,4 +111,13 @@ Project records live under `%LOCALAPPDATA%\Robloxing\Workshop`. Override the par
 
 Run `cargo test --locked --all-targets` for the offline recovery and scheduler tests. The Windows records cover the provider, Studio, native desktop and process cleanup. [H1 verification](docs/h1-verification.md) · [H2 verification](docs/h2-verification.md)
 
-After a release build, run `.\tests\windows\picker_clicks.ps1 -StudioOnly` for the native game studio controls, including cancellation, retry, search, settings reuse, file export and chat attachments. The suite uses a local fixture provider. Omit the switch to include the desktop screenshot and composer regressions, which require the test window to be visible on screen.
+After a release build, run the Windows UI tests from PowerShell.
+
+```powershell
+.\tests\windows\picker_clicks.ps1
+.\tests\windows\cancel_cycles.ps1
+```
+
+Each test runs on its own private Windows desktop. The tests exercise Workshop, its native file dialogs, and its screenshot picker there. The screenshot test selects pixels from a generated image. Use `-StudioOnly` with `picker_clicks.ps1` for the shorter Studio suite.
+
+For an ad hoc UI check, dot-source `tests/windows/TestDesktop.ps1` and call `Invoke-WorkshopUiTest -Script .\my-check.ps1`. Inside the check, use `[TestDesktop]::StartApp($absoluteWorkshopExe, $absoluteProjectPath)` and `[TestDesktop]::WaitForWindow($process)` to drive the window on the private desktop. Script output and failures return to the caller.

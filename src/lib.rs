@@ -1,4 +1,5 @@
 mod check;
+pub mod cli;
 mod git;
 pub mod provider;
 pub mod screenshots;

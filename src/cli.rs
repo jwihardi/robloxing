@@ -1,13 +1,13 @@
+use crate::{
+    Attempt, Store, data_dir,
+    provider::{self, Control},
+    studio::{Recipe, reports::Archive},
+};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::{
     io::{self, BufRead, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-};
-use workshop::{
-    Attempt, Store, data_dir,
-    provider::{self, Control},
-    studio::{Recipe, reports::Archive},
 };
 
 #[derive(Parser)]
@@ -159,7 +159,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
     };
     let mut settings = None;
     if let Some((area, agent)) = agent {
-        let mut value = workshop::studio::settings::TaskSettings::defaults(&home, area)?;
+        let mut value = crate::studio::settings::TaskSettings::defaults(&home, area)?;
         if let StudioAction::Decompile {
             function_limit,
             seconds_per_function,
@@ -284,8 +284,8 @@ fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
     drop(tx);
     result
 }
-fn main() -> Result<()> {
-    let args = Args::parse();
+pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
+    let args = Args::parse_from(args);
     if let Action::Studio { action } = args.command {
         return studio(&args.project, action);
     }
