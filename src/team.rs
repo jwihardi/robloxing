@@ -198,11 +198,13 @@ impl Store {
         Ok(())
     }
     fn child_store(&self, lead: i64, worker: i64) -> Result<Store> {
-        Store::open_role(
+        let mut child = Store::open_role(
             &self.work(lead),
             &self.dir.join("workers").join(worker.to_string()),
             true,
-        )
+        )?;
+        child.archive_dir.clone_from(&self.archive_dir);
+        Ok(child)
     }
     fn queue(&self, lead: i64, assignments: &[Assignment]) -> Result<()> {
         ensure!(
@@ -370,16 +372,25 @@ impl Store {
     }
 }
 
-pub(crate) fn tools() -> Value {
+pub(crate) fn tools(worker: bool) -> Value {
     let string = json!({"type":"string"});
     let strings = json!({"type":"array","items":string});
-    json!([
+    let mut available = vec![
+        json!({"type":"function","name":"workshop_find_reports","description":"Search this project's saved decompilation history before requesting another analysis. Search by binary name, filter, symbol, entry point or input SHA-256. Each matching function lists its report byte offset, address and name. Empty query lists recent runs.","inputSchema":{"type":"object","properties":{"query":string,"before":{"type":"integer","description":"Optional next_before from the preceding page."}},"required":["query"],"additionalProperties":false}}),
+        json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
+    ];
+    if worker {
+        return Value::Array(available);
+    }
+    let lead_tools = json!([
         {"type":"function","name":"workshop_find_assets","description":"Find ready game art in this project's Game studio when the creator asks to use an existing image or model. Use the returned ID with workshop_import_asset to copy it into the review.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
         {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
         {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
         {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
-    ])
+    ]);
+    available.extend(lead_tools.as_array().unwrap().iter().cloned());
+    Value::Array(available)
 }
 
 impl Store {
@@ -644,6 +655,26 @@ pub(crate) async fn dispatch(
     notify: &dyn Fn(provider::ReplyUpdate<'_>),
 ) -> Result<String> {
     let args = &request["arguments"];
+    match request["tool"].as_str() {
+        Some("workshop_find_reports") => {
+            return Ok(serde_json::to_string(&store.report_archive()?.search(
+                args["query"].as_str().context("Provide a search query.")?,
+                args["before"].as_i64(),
+            )?)?);
+        }
+        Some("workshop_read_report") => {
+            let offset = match args.get("offset") {
+                Some(v) => v.as_u64().context("Choose a nonnegative byte offset.")?,
+                None => 0,
+            };
+            return Ok(serde_json::to_string(&store.report_archive()?.read(
+                args["id"].as_i64().context("Provide a run ID.")?,
+                args["part"].as_str().context("Choose report or log.")?,
+                offset,
+            )?)?);
+        }
+        _ => ensure!(!store.worker, "This worker can only read archived reports."),
+    }
     match request["tool"].as_str() {
         Some("workshop_find_assets") => {
             let area = args["area"].as_str().context("Select Images or Models")?;

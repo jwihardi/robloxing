@@ -16,6 +16,113 @@ fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
 }
 
 #[test]
+fn lead_and_worker_can_find_and_page_preexisting_reports() -> Result<()> {
+    let tmp = tempdir()?;
+    let project = tmp.path().join("game");
+    let data = tmp.path().join("data");
+    let store = Store::open(&project, &data)?;
+    let binary = project.join("tile.o");
+    fs::write(&binary, b"original input")?;
+    let recipe = crate::studio::Recipe::Decompile {
+        binary: binary.clone(),
+        filter: "tile".into(),
+    };
+    let id = store.start_studio_job(&recipe)?;
+    let dir = store.studio_job(id)?.folder(&store);
+    fs::create_dir_all(&dir)?;
+    let second = "/* 00002000 */\nint tile_cost(int n) { return n + 1; }\n";
+    let report = format!(
+        "/* 00001000 */\nint tile_count() {{ return 0; }}\n/*{}*/\n{second}",
+        "é".repeat(10_000)
+    );
+    fs::write(dir.join("functions.c"), &report)?;
+    fs::write(dir.join("tool.log"), "Original import completed")?;
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE studio_jobs SET state='Ready' WHERE id=?", [id])?;
+    let incomplete = store.start_studio_job(&recipe)?;
+    drop(store);
+    fs::remove_file(binary)?;
+    let store = Store::open(&project, &data)?;
+    let lead = store.prepare("Look up the saved tile report", "", None)?;
+    let worker = store.child_store(lead.id, 77)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for reader in [&store, &worker] {
+        let call = |name: &str, args: Value| -> Result<Value> {
+            Ok(serde_json::from_str(&rt.block_on(dispatch(
+                reader,
+                &lead,
+                &json!({"tool":name,"arguments":args}),
+                &|_| {},
+            ))?)?)
+        };
+        let found = call("workshop_find_reports", json!({"query":"TILE_COST"}))?;
+        assert_eq!(found["reports"][0]["id"], id);
+        let offset = found["reports"][0]["functions"][0]["offset"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            call(
+                "workshop_read_report",
+                json!({"id":id,"part":"report","offset":offset})
+            )?["text"],
+            second
+        );
+        let first = call("workshop_read_report", json!({"id":id,"part":"report"}))?;
+        let rest = call(
+            "workshop_read_report",
+            json!({"id":id,"part":"report","offset":first["next_offset"]}),
+        )?;
+        assert_eq!(
+            format!(
+                "{}{}",
+                first["text"].as_str().unwrap(),
+                rest["text"].as_str().unwrap()
+            ),
+            report
+        );
+        assert_eq!(
+            call("workshop_read_report", json!({"id":id,"part":"log"}))?["text"],
+            "Original import completed"
+        );
+        assert!(
+            call(
+                "workshop_read_report",
+                json!({"id":incomplete,"part":"log"})
+            )?["text"]
+                .as_str()
+                .unwrap()
+                .contains("Interrupted")
+        );
+        assert!(
+            call(
+                "workshop_read_report",
+                json!({"id":incomplete,"part":"report"})
+            )
+            .is_err()
+        );
+        if reader.worker {
+            assert_eq!(tools(true).as_array().unwrap().len(), 2);
+            assert!(call("workshop_delegate", json!({"tasks":[]})).is_err());
+        }
+    }
+    assert_eq!(
+        store
+            .find_studio_jobs("Ghidra", "tile_cost", false, None)?
+            .len(),
+        1
+    );
+    let other = Store::open(&tmp.path().join("other"), &data)?;
+    assert!(other.report_archive()?.search("", None)?.reports.is_empty());
+    assert!(other.report_archive()?.read(id, "report", 0).is_err());
+    Ok(())
+}
+
+#[test]
 fn studio_import_survives_replay_and_requires_review() -> Result<()> {
     let tmp = tempdir()?;
     let project = tmp.path().join("p");

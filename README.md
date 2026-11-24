@@ -50,6 +50,10 @@ In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/�
 
 Use **Locate Blender** to select the executable or **Locate Ghidra** to select the installation root. Workshop remembers these choices across projects. You can also set `WORKSHOP_BLENDER` to an executable and `WORKSHOP_GHIDRA` to an installation root. Standard Windows and Steam installations of Blender are detected automatically.
 
+In **Ghidra**, search the project history by binary name, function, entry point, filter or input SHA-256. **Run log** shows the progress of the selected run, including which functions were saved or skipped, any failure and whether Workshop reused an earlier result. **Report** opens the saved pseudocode. Both remain available after restarting Workshop or moving the original binary. Older runs retain their original tool logs.
+
+Repeating a request for the same binary contents and normalized filter reuses a completed report after checking its SHA-256. The new run records the source run ID. **Run fresh** runs the selected analysis again, for example after updating Ghidra. Reports created before input fingerprints were recorded remain searchable and readable.
+
 **Save as…** exports the PNG, GLB or C report to a destination you choose. **Attach to chat** adds the selected file to the composer for your next message. In a new chat, you can also ask the lead to find a finished image or model by title and use it in a reviewable project change. Studio originals stay in the project’s Workshop data folder.
 
 ## CLI
@@ -66,6 +70,17 @@ $cli = ".\target\debug\workshop-cli.exe"
 ```
 
 The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
+
+`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. The read-only commands below also work while the desktop project is open. Codex leads and workers can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
+
+```text
+workshop-cli --project . studio reports tile_cost
+workshop-cli --project . studio read-report 12 --part functions
+workshop-cli --project . studio read-report 12 --offset 480
+workshop-cli --project . studio read-report 12 --part log
+```
+
+Search returns run IDs and up to eight matching function locations per run. Use the saved byte offset to jump to a function, `next_offset` to continue a long report, and `next_before` with `reports --before` for older runs. The full Ghidra process output is available under `--part tool-log` for runs that launched Ghidra.
 
 `run --model MODEL "task"` selects a provider model. Each run streams structured events to stdout. Type a direction or `/cancel` on stdin while it runs. Use `resume ID "direction"` to continue the same session in the same working copy. `retry ID` makes a fresh attempt from the project's current files. `discard ID` records the decision and retains the previous output. To run a project-specific command in the reviewed copy, use `check ID -- COMMAND [ARGS...]`. Close the desktop project before opening the same project in the CLI.
 

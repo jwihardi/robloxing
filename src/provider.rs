@@ -171,14 +171,27 @@ async fn open_thread(stdin: &mut ChildStdin, store: &Store, a: &Attempt) -> Resu
         params["developerInstructions"] = json!(format!(
             "You are the lead Codex agent in Workshop. Work inside this isolated project. When the user asks for subagents or workers, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Otherwise handle simple requests directly. For substantial divisible work, choose a parallel, sequential, or mixed plan. Submit all known assignments together in one workshop_delegate call. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model, and an empty max_effort means uncapped. Optionally choose model and effort per assignment within this policy; omit either to use its default. Leave depends_on empty for independent work. To order steps, list the prerequisite keys on each dependent task. If the next assignment needs a result to define its scope, delegate it after that result returns. Give every worker a stable key, short title, exact relative edit paths ([] for read-only), relevant interfaces in its deliverable and acceptance criteria. Workshop schedules these assignments and integrates their changes. Retry a blocked worker using its original key and failure feedback; report an unresolved blocker instead of creating a replacement key. Use workshop_checkpoint for design decisions and next unfinished work on substantial tasks. Project handoff:\n{context}"
         ));
-        if a.session.is_empty() {
-            params["dynamicTools"] = team::tools();
-        }
     } else {
         params["developerInstructions"] = json!(
             "You are a Workshop Codex worker in a private copy. Complete only the assigned deliverable within the declared edit scope, verify it and report the result. The lead integrates your edits. Do not delegate."
         );
     }
+    let mut instructions = params["developerInstructions"].as_str().unwrap().to_owned();
+    instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
+    if a.session.is_empty() {
+        params["dynamicTools"] = team::tools(store.worker);
+    } else if let Some(cli) = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("workshop-cli{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|p| p.is_file())
+        && let Ok(project) = store.report_archive().and_then(|archive| archive.project())
+    {
+        instructions.push_str(&format!(" If those tools are unavailable, use the read-only Workshop CLI at {}. Supply the project path {project} via --project for both studio reports QUERY and studio read-report ID --offset BYTE.",cli.display()));
+    }
+    params["developerInstructions"] = json!(instructions);
     if !a.model.is_empty() {
         params["model"] = json!(a.model);
     }
@@ -453,7 +466,6 @@ async fn exchange(
                 if let Some(method) = v["method"].as_str() {
                     if method == "item/tool/call"
                         && !v["id"].is_null()
-                        && !store.worker
                         && v["params"]["threadId"] == session.as_str()
                         && !cancelling
                     {

@@ -92,6 +92,15 @@ impl App {
     fn select_studio_job(&self, store: &Store, job: Option<&Job>) -> Result<()> {
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
+        let next = job.map_or(0, |j| j.id);
+        if i64::from(studio.get_selected().id) != next {
+            studio.set_show_log(job.is_some_and(|j| j.state != "Ready"));
+        }
+        if let Some(report) = job.filter(|j| j.recipe.area() == "Ghidra") {
+            studio.set_run_log(workshop::studio::reports::log_tail(report, store)?.into());
+        } else {
+            studio.set_run_log("".into());
+        }
         if studio.get_inspecting()
             && job.is_none_or(|j| j.id != i64::from(studio.get_selected().id) || j.state != "Ready")
         {
@@ -144,6 +153,21 @@ impl App {
         }
         let selected = || store.studio_job(studio.get_selected().id.into());
         match cmd {
+            "log-tick" => {
+                let job = selected()?;
+                if job.state == "Running" && studio.get_selected().state == "Queued" {
+                    self.refresh_studio(&store, Some(job.id))?;
+                }
+                let log = workshop::studio::reports::log_tail(&job, &store)?;
+                if job.state == "Running"
+                    && let Some((_, event)) = log.lines().last().and_then(|s| s.split_once("  "))
+                {
+                    studio.set_message(event.into());
+                }
+                if log != studio.get_run_log().as_str() {
+                    studio.set_run_log(log.into());
+                }
+            }
             "inspect" => {
                 let job = selected()?;
                 ensure!(
@@ -161,13 +185,13 @@ impl App {
             "refresh" | "search" => {
                 self.refresh_studio(&store, Some(studio.get_selected().id.into()))?
             }
-            "run" | "retry" | "rebuild" => {
+            "run" | "retry" | "rebuild" | "fresh" => {
                 ensure!(
                     !studio.get_working(),
                     "Wait for the active run or cancel it."
                 );
                 let request = match cmd {
-                    "retry" => selected()?.recipe,
+                    "retry" | "fresh" => selected()?.recipe,
                     "rebuild" => Recipe::Blend {
                         source: selected()?.folder(&store).join("model.blend"),
                     },
@@ -181,8 +205,9 @@ impl App {
                 studio.set_message(format!("Running in {}…", request.area()).into());
                 let tx = self.updates.clone();
                 let worker = Arc::clone(&store);
+                let fresh = cmd == "fresh";
                 std::thread::spawn(move || {
-                    let result = worker.run_studio_job(id, cancel);
+                    let result = worker.run_studio_job_with_refresh(id, cancel, fresh);
                     let _ = tx.send(Update::StudioFinished(worker.project.clone(), id, result));
                 });
                 self.refresh_studio(&store, Some(id))?;

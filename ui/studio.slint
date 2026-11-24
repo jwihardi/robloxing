@@ -22,6 +22,8 @@ export global Studio {
     in property <StudioItem> selected;
     in property <image> preview;
     in property <string> code;
+    in property <string> run-log;
+    in-out property <bool> show-log;
     in property <string> message;
     in property <bool> working;
     in property <bool> inspecting;
@@ -156,6 +158,9 @@ export component StudioPage inherits Rectangle {
     private property <bool> ready: Studio.selected.state == "Ready";
     private property <string> run-label: tile ? "Make tile" : images ? "Generate image" : import-scene ? "Export scene" : models ? "Create model" : "Decompile";
     background: Theme.canvas;
+    Timer { interval: 750ms; running: root.binary && Studio.working && Studio.show-log &&
+        (Studio.selected.state == "Running" || Studio.selected.state == "Queued");
+        triggered => { Studio.command("log-tick"); } }
     if Studio.inspecting: ModelInspector {}
     if !Studio.inspecting: VerticalLayout {
         x: (root.width - self.width) / 2; y: 20px; width: min(920px,root.width - 40px); height: root.height - 36px; spacing: 9px;
@@ -203,7 +208,8 @@ export component StudioPage inherits Rectangle {
         HorizontalLayout { height: 32px; spacing: 10px;
             Text { text: root.images ? "Project images" : root.models ? "Project models" : "Decompilations";
                 horizontal-stretch: 1; vertical-alignment: center; font-weight: 600; color: Theme.text; font-size: 17px; }
-            if Studio.jobs.length > 0 || Studio.query != "": LineEdit { width: 152px; accessible-label: "Search assets"; placeholder-text: "Search assets"; text <=> Studio.query; }
+            if Studio.jobs.length > 0 || Studio.query != "": LineEdit { width: root.binary ? 199px : 152px;
+                accessible-label: root.binary ? "Search reports" : "Search assets"; placeholder-text: root.binary ? "Find binary or function" : "Search assets"; text <=> Studio.query; }
         }
         if Studio.jobs.length == 0: Text {
             text: Studio.query != "" ? "No matching assets." : root.images ? "Your generated images and seamless tiles will appear here." : root.models ? "Describe a prop, choose a starter mesh, or export a Blender scene to glTF." : "Choose a compiled game module to recover its functions as C pseudocode.";
@@ -216,7 +222,7 @@ export component StudioPage inherits Rectangle {
                     width: history.visible-width; height: 51px; selected: Studio.selected.id == job.id;
                     VerticalLayout { padding-left: 10px; padding-right: 8px; spacing: 2px; alignment: center;
                         Text { text: job.title; color: Theme.text; overflow: elide; font-size: 14px; }
-                        Text { text: job.state == "Ready" ? job.date : job.state; color: Theme.muted; font-size: 12px; overflow: elide; }
+                        Text { text: (root.binary ? "#" + job.id + " · " : "") + (job.state == "Ready" ? job.date : job.state); color: Theme.muted; font-size: 12px; overflow: elide; }
                     }
                     activate => {Studio.select(job.id);}
                 }
@@ -231,9 +237,16 @@ export component StudioPage inherits Rectangle {
                     }
                     activate => { Studio.command("inspect"); }
                 }
-                if root.ready && root.binary: TextEdit { x: 6px; y: 6px; width: parent.width - 12px; height: parent.height - 12px;
-                    text: Studio.code; read-only: true; font-family: "Consolas"; font-size: 12px; accessible-label: "Recovered functions"; }
-                if !root.ready: Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px;
+                if root.binary: VerticalLayout { padding: 6px; spacing: 5px;
+                    HorizontalLayout { height: 30px; spacing: 4px; alignment: start;
+                        Action { label: "Report"; width: 66px; height: 30px; enabled: root.ready; selected: root.ready && !Studio.show-log; activate => {Studio.show-log=false;} }
+                        Action { label: "Run log"; width: 74px; height: 30px; selected: Studio.show-log || !root.ready; activate => {Studio.show-log=true;} }
+                    }
+                    TextEdit { text: (Studio.show-log || !root.ready) ? Studio.run-log : Studio.code;
+                        read-only: true; font-family: "Consolas"; font-size: 12px; vertical-stretch: 1;
+                        accessible-label: (Studio.show-log || !root.ready) ? "Decompilation log" : "Recovered functions"; }
+                }
+                if !root.ready && !root.binary: Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px;
                     text: Studio.selected.detail != "" ? Studio.selected.detail : Studio.selected.state; wrap: word-wrap; overflow: elide; vertical-alignment: center; color: Theme.muted; font-size: 13px; }
             }
         }
@@ -248,7 +261,8 @@ export component StudioPage inherits Rectangle {
             if root.ready && root.models: Action { label: "Re-export"; width: 81px; enabled: !Studio.working; activate => {Studio.command("rebuild");} }
             if Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted": Action {
                 label: "Retry run"; width: 88px; enabled: !Studio.working; activate => {Studio.command("retry");} }
-            if !root.ready && Studio.selected.state == "Failed": Action { label: "Show files"; width: 90px; activate => {Studio.command("files");} }
+            if root.ready && root.binary: Action { label: "Run fresh"; width: 85px; enabled: !Studio.working; activate => {Studio.command("fresh");} }
+            if root.binary || (!root.ready && Studio.selected.state == "Failed"): Action { label: "Show files"; width: 90px; activate => {Studio.command("files");} }
         }
     }
 }

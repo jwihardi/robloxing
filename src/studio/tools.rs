@@ -1,4 +1,4 @@
-use super::Recipe;
+use super::{Recipe, reports};
 use crate::{Store, provider};
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::OptionalExtension;
@@ -170,10 +170,43 @@ pub(super) async fn model(store: &Store, cwd: &Path, recipe: &Recipe) -> Result<
 }
 pub(super) async fn decompile(
     store: &Store,
+    id: i64,
     cwd: &Path,
     binary: &Path,
     filter: &str,
+    fresh: bool,
 ) -> Result<String> {
+    let log = |message: &str| reports::log(&store.db.lock().unwrap(), cwd, message);
+    let binary = dunce::canonicalize(binary)?;
+    log("Reading the input fingerprint and checking this project's archived reports.")?;
+    let path = binary.clone();
+    let (mut input, sha) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1); // Keep the analyzed bytes stable while Ghidra reads the original path.
+        }
+        let mut file = options.open(path)?;
+        let sha = reports::fingerprint(&mut file, std::io::sink())?;
+        Ok((file, sha))
+    })
+    .await??;
+    let key = filter.trim().to_lowercase();
+    store.db.lock().unwrap().execute(
+        "INSERT INTO decompile_records(job,input_sha,filter_key,format) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![id, sha, key, reports::FORMAT],
+    )?;
+    log(&format!("Input SHA-256 {sha}"))?;
+    if !fresh && let Some(detail) = reports::reuse(store, id, cwd, &sha, &key)? {
+        return Ok(detail);
+    }
+    log(if fresh {
+        "Fresh analysis requested. Starting Ghidra."
+    } else {
+        "Starting Ghidra headless import and analysis."
+    })?;
     let ghidra = store.studio_tool("Ghidra")?;
     let jar = ghidra.join("Ghidra/Framework/Utility/lib/Utility.jar");
     let java = env::var_os("JAVA_HOME")
@@ -196,7 +229,6 @@ pub(super) async fn decompile(
         include_str!("WorkshopGameFunctions.java"),
     )?;
     fs::write(script.join("filter.txt"), filter.trim())?;
-    let binary = dunce::canonicalize(binary)?;
     let props = fs::read_to_string(ghidra.join("support/launch.properties"))?;
     let platform = if cfg!(windows) {
         "VMARGS_WINDOWS="
@@ -233,13 +265,25 @@ pub(super) async fn decompile(
         script.to_str().unwrap(),
         "-postScript",
         "WorkshopGameFunctions.java",
+        cwd.to_str().context("Invalid report folder")?,
         "-deleteProject",
     ]);
     run(&java, &args, cwd).await?;
-    let summary = fs::read_to_string(script.join("summary.txt")).context(
+    let summary = fs::read_to_string(cwd.join("summary.txt")).context(
         "Ghidra produced no report. Check the binary format, Java version and tool.log.",
     )?;
-    ensure!(script.join("functions.c").is_file(), "{summary}");
-    fs::copy(script.join("functions.c"), cwd.join("functions.c"))?;
+    ensure!(cwd.join("functions.c").is_file(), "{summary}");
+    input.rewind()?;
+    ensure!(
+        reports::fingerprint(input, std::io::sink())? == sha,
+        "The input changed during analysis. Run again on the current binary."
+    );
+    let output_sha =
+        reports::fingerprint(fs::File::open(cwd.join("functions.c"))?, std::io::sink())?;
+    let symbols = fs::read_to_string(cwd.join("symbols.tsv"))?;
+    store.db.lock().unwrap().execute(
+        "UPDATE decompile_records SET report_sha=?2,symbols=?3 WHERE job=?1",
+        rusqlite::params![id, output_sha, symbols],
+    )?;
     Ok(summary)
 }

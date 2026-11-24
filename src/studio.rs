@@ -1,4 +1,5 @@
 //! Project-scoped game asset jobs. Only finished runs expose deliverables.
+pub mod reports;
 mod textures;
 mod tools;
 
@@ -221,7 +222,10 @@ impl Store {
     ) -> Result<Vec<Job>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs
-            WHERE area=?1 AND instr(lower(title),lower(?2))>0 AND (?3=0 OR state='Ready') ORDER BY id DESC LIMIT ?4")?;
+            WHERE area=?1 AND (instr(lower(title),lower(?2))>0 OR (area='Ghidra' AND
+            (instr(lower(json_extract(request,'$.filter')),lower(?2))>0 OR EXISTS(
+            SELECT 1 FROM decompile_records r WHERE r.job=id AND (instr(lower(r.symbols),lower(?2))>0 OR instr(r.input_sha,lower(?2))>0)))))
+            AND (?3=0 OR state='Ready') ORDER BY id DESC LIMIT ?4")?;
         Ok(q.query_map(
             params![area, query, ready_only, limit.map(i64::from).unwrap_or(-1)],
             row,
@@ -245,6 +249,14 @@ impl Store {
         Ok(db.last_insert_rowid())
     }
     pub fn run_studio_job(&self, id: i64, cancel: oneshot::Receiver<()>) -> Result<()> {
+        self.run_studio_job_with_refresh(id, cancel, false)
+    }
+    pub fn run_studio_job_with_refresh(
+        &self,
+        id: i64,
+        cancel: oneshot::Receiver<()>,
+        fresh: bool,
+    ) -> Result<()> {
         ensure!(
             self.db.lock().unwrap().execute(
                 "UPDATE studio_jobs SET state='Running' WHERE id=?1 AND state='Queued'",
@@ -257,6 +269,21 @@ impl Store {
         let run = || -> Result<String> {
             fs::create_dir_all(folder.parent().context("Missing job directory")?)?;
             fs::create_dir(&folder)?;
+            if let Recipe::Decompile { binary, filter } = &job.recipe {
+                reports::log(
+                    &self.db.lock().unwrap(),
+                    &folder,
+                    &format!(
+                        "Started run #{id} · {}\nFilter: {} · up to 64 matching functions",
+                        binary.display(),
+                        if filter.trim().is_empty() {
+                            "all"
+                        } else {
+                            filter.trim()
+                        }
+                    ),
+                )?;
+            }
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -264,7 +291,7 @@ impl Store {
                 tokio::select! {
                     biased;
                     _ = cancel => bail!("Cancelled"),
-                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job.recipe, &folder)) =>
+                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job, &folder,fresh)) =>
                         result.context("The tool timed out after 15 minutes")?,
                 }
             })
@@ -279,9 +306,21 @@ impl Store {
             "UPDATE studio_jobs SET state=?2,detail=?3 WHERE id=?1",
             params![id, state, detail],
         )?;
+        if job.recipe.area() == "Ghidra" && folder.is_dir() {
+            reports::log(
+                &self.db.lock().unwrap(),
+                &folder,
+                &if detail.is_empty() {
+                    state.to_owned()
+                } else {
+                    format!("{state} · {detail}")
+                },
+            )?;
+        }
         result.map(|_| ())
     }
-    async fn build_asset(&self, recipe: &Recipe, folder: &Path) -> Result<String> {
+    async fn build_asset(&self, job: &Job, folder: &Path, fresh: bool) -> Result<String> {
+        let recipe = &job.recipe;
         match recipe {
             Recipe::Image { brief, style } => {
                 provider::generate_image(folder, brief, style).await?
@@ -291,7 +330,7 @@ impl Store {
                 return tools::model(self, folder, recipe).await;
             }
             Recipe::Decompile { binary, filter } => {
-                return tools::decompile(self, folder, binary, filter).await;
+                return tools::decompile(self, job.id, folder, binary, filter, fresh).await;
             }
         }
         let img = image::open(folder.join("image.png"))?;

@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::{
-    io::{self, BufRead, Write},
-    path::PathBuf,
+    io::{self, BufRead, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
 };
 use workshop::{
     Attempt, Store, data_dir,
     provider::{self, Control},
-    studio::Recipe,
+    studio::{Recipe, reports::Archive},
 };
 
 #[derive(Parser)]
@@ -102,12 +102,33 @@ enum StudioAction {
         binary: PathBuf,
         #[arg(long, default_value = "")]
         filter: String,
+        /// Run Ghidra even when an identical archived report exists.
+        #[arg(long)]
+        fresh: bool,
+    },
+    /// Search archived runs by binary, filter, fingerprint or function.
+    Reports {
+        #[arg(default_value = "")]
+        query: String,
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Read saved pseudocode or logs. Offsets are bytes.
+    ReadReport {
+        id: i64,
+        #[arg(long,default_value="report",value_parser=["report","functions","log","tool-log"])]
+        part: String,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
     },
     History {
         area: String,
     },
 }
-fn studio(store: &Store, action: StudioAction) -> Result<()> {
+fn studio(project: &Path, action: StudioAction) -> Result<()> {
+    let home = data_dir()?;
+    let archive = || Archive::open(&Store::project_data_dir(project, &home)?);
+    let fresh = matches!(action, StudioAction::Decompile { fresh: true, .. });
     let recipe = match action {
         StudioAction::Image { brief, style } => Recipe::Image { brief, style },
         StudioAction::Texture { material, seed } => Recipe::Texture { material, seed },
@@ -116,25 +137,62 @@ fn studio(store: &Store, action: StudioAction) -> Result<()> {
         StudioAction::Blend { source } => Recipe::Blend {
             source: dunce::canonicalize(source)?,
         },
-        StudioAction::Decompile { binary, filter } => Recipe::Decompile {
+        StudioAction::Decompile { binary, filter, .. } => Recipe::Decompile {
             binary: dunce::canonicalize(binary)?,
             filter,
         },
         StudioAction::History { area } => {
+            let store = Store::open(project, &home)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&store.studio_history(&area)?)?
             );
             return Ok(());
         }
+        StudioAction::Reports { query, before } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&archive()?.search(&query, before)?)?
+            );
+            return Ok(());
+        }
+        StudioAction::ReadReport { id, part, offset } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&archive()?.read(id, &part, offset)?)?
+            );
+            return Ok(());
+        }
     };
+    let store = Store::open(project, &home)?;
     let id = store.start_studio_job(&recipe)?;
     let (_keep, cancel) = tokio::sync::oneshot::channel();
-    store.run_studio_job(id, cancel)?;
+    if recipe.area() == "Ghidra" {
+        let path = store.studio_job(id)?.folder(&store).join("activity.log");
+        std::thread::scope(|scope| -> Result<()> {
+            let task = scope.spawn(|| store.run_studio_job_with_refresh(id, cancel, fresh));
+            let mut offset = 0;
+            loop {
+                let finished = task.is_finished();
+                if let Ok(mut file) = std::fs::File::open(&path) {
+                    file.seek(SeekFrom::Start(offset))?;
+                    offset += io::copy(&mut file, &mut io::stderr())?;
+                }
+                if finished {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            task.join()
+                .map_err(|_| anyhow::anyhow!("The decompilation worker stopped unexpectedly."))?
+        })?;
+    } else {
+        store.run_studio_job(id, cancel)?;
+    }
     let job = store.studio_job(id)?;
     println!(
         "{}",
-        serde_json::json!({"id":id,"title":job.title,"detail":job.detail,"folder":job.folder(store),"file":job.filename()})
+        serde_json::json!({"id":id,"title":job.title,"detail":job.detail,"folder":job.folder(&store),"file":job.filename()})
     );
     Ok(())
 }
@@ -168,9 +226,12 @@ fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Action::Studio { action } = args.command {
+        return studio(&args.project, action);
+    }
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
-        Action::Studio { action } => studio(&store, action)?,
+        Action::Studio { .. } => unreachable!(),
         Action::Agents { id } => {
             println!("{}", serde_json::to_string_pretty(&store.workers(id)?)?);
             println!("{}", store.handoff(id)?);

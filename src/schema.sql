@@ -38,3 +38,9 @@ CREATE TABLE IF NOT EXISTS studio_jobs(
     created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS studio_jobs_area ON studio_jobs(area,id);
+CREATE TABLE IF NOT EXISTS decompile_records(
+    job INTEGER PRIMARY KEY REFERENCES studio_jobs(id), input_sha TEXT NOT NULL DEFAULT '',
+    filter_key TEXT NOT NULL DEFAULT '', format INTEGER NOT NULL DEFAULT 0,
+    report_sha TEXT NOT NULL DEFAULT '', symbols TEXT NOT NULL DEFAULT '',
+    reused_from INTEGER REFERENCES studio_jobs(id));
+CREATE INDEX IF NOT EXISTS decompile_cache ON decompile_records(input_sha, filter_key, format);

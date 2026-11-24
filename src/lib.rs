@@ -50,6 +50,7 @@ pub struct Attempt {
 pub struct Store {
     pub project: PathBuf,
     pub dir: PathBuf,
+    archive_dir: PathBuf,
     db: Mutex<Connection>,
     _lock: File,
     worker: bool,
@@ -132,6 +133,13 @@ impl Store {
     pub fn open(folder: &Path, home: &Path) -> Result<Self> {
         Self::open_role(folder, home, false)
     }
+    pub fn project_data_dir(folder: &Path, home: &Path) -> Result<PathBuf> {
+        let path = dunce::canonicalize(folder)?;
+        let key = path.to_string_lossy();
+        #[cfg(windows)]
+        let key = key.to_lowercase();
+        Ok(home.join(digest(key.as_bytes())))
+    }
     fn open_role(folder: &Path, home: &Path, worker: bool) -> Result<Self> {
         fs::create_dir_all(folder)?;
         fs::create_dir_all(home)?;
@@ -141,13 +149,10 @@ impl Store {
             !home.starts_with(&folder) && !folder.starts_with(&home),
             "Choose a project folder outside Workshop's data directory."
         );
-        let key = folder.to_string_lossy().to_string();
-        #[cfg(windows)]
-        let key = key.to_lowercase();
         let dir = if worker {
             home.clone()
         } else {
-            home.join(digest(key.as_bytes()))
+            Self::project_data_dir(&folder, &home)?
         };
         fs::create_dir_all(&dir)?;
         let lock = OpenOptions::new()
@@ -188,6 +193,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        studio::reports::recover(&dir, &mut db)?;
         db.execute("UPDATE studio_jobs SET state='Interrupted', detail='Workshop closed during this run.' WHERE state IN ('Running','Queued')", [])?;
         db.execute(
             "INSERT OR IGNORE INTO projects(id,path) VALUES(1,?1)",
@@ -196,6 +202,7 @@ impl Store {
         db.execute("INSERT OR IGNORE INTO milestones(id,project,name) VALUES(1,1,'One recoverable change')", [])?;
         let store = Self {
             project,
+            archive_dir: dir.clone(),
             dir,
             db: Mutex::new(db),
             _lock: lock,
