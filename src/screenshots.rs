@@ -17,19 +17,23 @@ pub struct AlbumEntry {
     pub created: String,
 }
 
+impl AlbumEntry {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            key: row.get(0)?,
+            project: row.get(1)?,
+            created: row.get(2)?,
+        })
+    }
+}
+
 pub fn album(home: &Path) -> Result<Vec<AlbumEntry>> {
     std::fs::create_dir_all(home)?;
     let db = Connection::open(home.join("preferences.sqlite"))?;
     ensure_schema(&db, "screenshots")?;
     let mut q = db.prepare("SELECT key,project,datetime(created,'localtime') FROM screenshots ORDER BY created DESC,rowid DESC")?;
-    Ok(q.query_map([], |r| {
-        Ok(AlbumEntry {
-            key: r.get(0)?,
-            project: r.get(1)?,
-            created: r.get(2)?,
-        })
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+    Ok(q.query_map([], AlbumEntry::from_row)?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 impl Store {
@@ -57,6 +61,21 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn chat_screenshots(&self, attempt: Option<i64>) -> Result<Vec<AlbumEntry>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare(
+            "SELECT key,project,
+                    (CASE date(created,'localtime') WHEN date('now','localtime') THEN 'Today'
+                     ELSE date(created,'localtime') END) || ' · ' || strftime('%H:%M',created,'localtime')
+             FROM preferences.screenshots
+             WHERE project=?1 AND attempt IS ?2 ORDER BY created DESC,rowid DESC",
+        )?;
+        Ok(q.query_map(
+            params![self.project.to_string_lossy(), attempt],
+            AlbumEntry::from_row,
+        )?
+        .collect::<rusqlite::Result<_>>()?)
+    }
     pub fn preceding_screenshots(&self, attempt: Option<i64>) -> Result<Vec<String>> {
         let db = self.db.lock().unwrap();
         let mut q=db.prepare("SELECT key FROM preferences.screenshots WHERE project=?1 AND attempt IS ?2 AND preceding_prompt=1 ORDER BY rowid")?;
@@ -80,11 +99,27 @@ mod tests {
         let b = Store::open(&t.path().join("second"), &home)?;
         a.post_screenshot(None, "shot-first")?;
         b.post_screenshot(None, "shot-second")?;
+        assert_eq!(a.chat_screenshots(None)?.len(), 1);
         let chat = a.prepare("Review the project", "", None)?;
         a.bind_draft_screenshots(chat.id)?;
         a.post_screenshot(Some(chat.id), "shot-later")?;
+        a.finish(chat.id, "review", "")?;
+        let other_chat = a.prepare("Second chat", "", None)?;
+        a.post_screenshot(Some(other_chat.id), "shot-other")?;
+        a.post_screenshot(None, "shot-draft")?;
+        let keys = |items: Vec<AlbumEntry>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
+        assert_eq!(
+            keys(a.chat_screenshots(Some(chat.id))?),
+            ["shot-later", "shot-first"]
+        );
+        assert_eq!(
+            keys(a.chat_screenshots(Some(other_chat.id))?),
+            ["shot-other"]
+        );
+        assert_eq!(keys(a.chat_screenshots(None)?), ["shot-draft"]);
+        assert_eq!(keys(b.chat_screenshots(None)?), ["shot-second"]);
         assert_eq!(a.preceding_screenshots(Some(chat.id))?, ["shot-first"]);
-        assert!(a.preceding_screenshots(None)?.is_empty());
+        assert_eq!(a.preceding_screenshots(None)?, ["shot-draft"]);
         assert_eq!(b.preceding_screenshots(None)?, ["shot-second"]);
         let events = a.messages_after(chat.id, 0)?;
         assert!(
@@ -93,7 +128,7 @@ mod tests {
                 .any(|m| m.screenshot && m.text == "shot-later")
         );
         assert!(a.task_attachments(chat.task)?.is_empty());
-        assert_eq!(album(&home)?.len(), 3);
+        assert_eq!(album(&home)?.len(), 5);
         Ok(())
     }
 }

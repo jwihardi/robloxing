@@ -22,7 +22,7 @@ Open the model and effort pill beside Send. Select the header showing the effort
 
 Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
-Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. **Screenshots** in the sidebar shows captures across your projects, newest first. Select a thumbnail in either location for the full image. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
+Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Screenshots** in the sidebar. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
 
 ## Provider settings
 

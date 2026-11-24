@@ -296,27 +296,30 @@ impl App {
             })
             .collect())
     }
+    fn screenshot_items(items: Vec<workshop::screenshots::AlbumEntry>) -> ModelRc<AlbumItem> {
+        let items: Vec<_> = items
+            .into_iter()
+            .map(|entry| {
+                let path = std::path::Path::new(&entry.project);
+                AlbumItem {
+                    key: entry.key.into(),
+                    date: entry.created.into(),
+                    project: path
+                        .file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .as_ref()
+                        .into(),
+                }
+            })
+            .collect();
+        ModelRc::new(VecModel::from(items))
+    }
     fn refresh_album(&self) {
         let ui = self.ui.unwrap();
         match data_dir().and_then(|home| workshop::screenshots::album(&home)) {
             Ok(items) => {
-                let items: Vec<_> = items
-                    .into_iter()
-                    .map(|entry| {
-                        let path = std::path::Path::new(&entry.project);
-                        AlbumItem {
-                            key: entry.key.into(),
-                            date: entry.created.into(),
-                            project: path
-                                .file_name()
-                                .unwrap_or(path.as_os_str())
-                                .to_string_lossy()
-                                .as_ref()
-                                .into(),
-                        }
-                    })
-                    .collect();
-                ui.set_album(ModelRc::new(VecModel::from(items)));
+                ui.set_album(Self::screenshot_items(items));
                 ui.set_album_error("".into());
             }
             Err(e) => ui.set_album_error(format!("Could not open the album: {e:#}").into()),
@@ -752,6 +755,9 @@ impl App {
         )));
         let selected = rows.iter().position(|a| Some(a.id) == self.id.get());
         ui.set_selection(selected.map_or(-1, |i| i as i32));
+        ui.set_outputs(Self::screenshot_items(
+            store.chat_screenshots(selected.map(|i| rows[i].id))?,
+        ));
         ui.set_running(false);
         if selected.is_none() {
             self.turns.set_vec(self.preceding_shots(store, None)?);
@@ -832,6 +838,7 @@ impl App {
                                 self.pages.borrow_mut().clear();
                                 ui.set_notice("".into());
                                 self.render()?;
+                                ui.invoke_show_outputs();
                                 Self::scroll_after_layout(&ui);
                             }
                             Ok(false) => {}

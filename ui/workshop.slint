@@ -12,7 +12,7 @@ export struct PickerData {
     current-model: string, current-effort: string
 }
 
-enum OpenPanel { closed, add, effort, models, policy, usage, options }
+enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs }
 
 global Theme {
     out property <color> popup: #2c2c2c;
@@ -330,10 +330,12 @@ component Composer inherits Rectangle {
 
 export component Desk inherits Window {
     in property <[AlbumItem]> album;
+    in property <[AlbumItem]> outputs;
     in property <string> album-error;
     in property <bool> capturing;
     private property <bool> album-open;
     private property <string> viewing-shot;
+    private property <bool> return-to-outputs;
     callback refresh-album();
     callback take-screenshot();
     pure callback shot-image(string,bool) -> image;
@@ -439,6 +441,21 @@ export component Desk inherits Window {
         root.anchor-right = x + w; root.anchor-bottom = y + h;
         root.open-panel = which;
     }
+    public function show-outputs() {
+        if pane.visible && root.project != "" {
+            root.show-panel(OpenPanel.outputs, outputs-button.absolute-position.x, outputs-button.absolute-position.y,
+                outputs-button.width, outputs-button.height);
+        }
+    }
+    function view-shot(key: string) {
+        root.return-to-outputs = root.open-panel == OpenPanel.outputs;
+        root.open-panel = OpenPanel.closed;
+        root.viewing-shot = key;
+    }
+    function close-shot() {
+        root.viewing-shot = "";
+        if root.return-to-outputs { root.show-outputs(); }
+    }
     function dismiss-panel() {
         if root.open-panel == OpenPanel.effort || root.open-panel == OpenPanel.models { composer.focus-picker(); }
         else if root.open-panel == OpenPanel.policy {
@@ -446,6 +463,7 @@ export component Desk inherits Window {
         } else if root.open-panel == OpenPanel.add { composer.focus-add(); }
         else if root.open-panel == OpenPanel.usage { usage-button.focus(); }
         else if root.open-panel == OpenPanel.options { options.focus(); }
+        else if root.open-panel == OpenPanel.outputs { outputs-button.focus(); }
         root.open-panel = OpenPanel.closed;
     }
     function select-model(i: int) {
@@ -513,7 +531,11 @@ export component Desk inherits Window {
             options := Action {
                 visible: !root.home && !root.busy; width: 36px; label: "Chat options"; glyph: "\u{e712}"; icon-only: true;
                 activate => {root.show-panel(OpenPanel.options, self.absolute-position.x, self.absolute-position.y, self.width, self.height);}
-
+            }
+            outputs-button := Action {
+                label: "Outputs"; glyph: "\u{e8b9}"; icon-only: pane.width < 600px;
+                width: self.icon-only ? 36px : 108px; selected: root.open-panel == OpenPanel.outputs;
+                activate => {if root.open-panel == OpenPanel.outputs { root.dismiss-panel(); } else { root.show-outputs(); }}
             }
         }
         if root.home && root.turns.length == 0: Text {
@@ -554,7 +576,7 @@ export component Desk inherits Window {
                         label: "Sent screenshot"; icon-only: true; selected: true;
                         Image { x: 6px; y: 6px; width: parent.width - 12px; height: 130px; source: root.shot-image(turn.shot,false); image-fit: contain; }
                         Text { x: 12px; y: 141px; text: "Sent screenshot"; font-size: 13px; color: Theme.text; }
-                        activate => {root.viewing-shot = turn.shot;} }
+                        activate => {root.view-shot(turn.shot);} }
                     dispatch-group := WorkerGroup {
                         visible: turn.dispatch-id != 0; width: parent.width;
                         height: self.preferred-height; label: turn.body; workers: turn.workers;
@@ -637,7 +659,7 @@ export component Desk inherits Window {
                                 Image { width: parent.width; height: parent.height; source: root.shot-image(item.key,false); image-fit: contain; } }
                             Text { x: 2px; y: 134px; width: parent.width - 4px; height: 20px; text: item.project; overflow: elide; color: Theme.text; font-size: 14px; }
                             Text { x: 2px; y: 155px; width: parent.width - 4px; height: 16px; text: item.date; color: Theme.muted; font-size: 12px; }
-                            activate => {root.viewing-shot = item.key;} }
+                            activate => {root.view-shot(item.key);} }
                     }
                 }
             }
@@ -645,8 +667,8 @@ export component Desk inherits Window {
     }
     if root.viewing-shot != "": Flyout {
         x: rail.width; width: root.width - self.x; height: root.height;
-        escape => {root.viewing-shot = "";} init => {back.focus();}
-        back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.viewing-shot = "";} }
+        escape => {root.close-shot();} init => {back.focus();}
+        back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.close-shot();} }
         Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
             source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
     }
@@ -738,6 +760,36 @@ export component Desk inherits Window {
             Rectangle { height: 1px; background: Theme.line; }
             Action { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
             Action { label: "Take screenshot"; glyph: "\u{e722}"; enabled: !root.capturing; activate => {root.dismiss-panel(); root.take-screenshot();} }
+        }
+    }
+    if root.open-panel == OpenPanel.outputs: Flyout {
+        x: root.anchor-right - self.width; y: root.anchor-bottom + 6px;
+        width: 284px; height: 96px + (root.outputs.length == 0 ? 47px : min(root.outputs.length, 4) * 64px);
+        escape => {root.dismiss-panel();} init => {self.focus();}
+        Rectangle { background: Theme.popup; border-color: Theme.line; border-width: 1px; border-radius: 16px; }
+        VerticalLayout { padding: 8px; spacing: 3px;
+            HorizontalLayout { height: 36px; padding-left: 8px;
+                Text { text: "Outputs"; vertical-alignment: center; font-weight: 600; font-size: 15px; color: Theme.text; } }
+            if root.outputs.length == 0: HorizontalLayout { padding-left: 8px; padding-right: 8px; vertical-stretch: 1;
+                Text { text: "Screenshots you send in this chat appear here."; wrap: word-wrap; font-size: 13px; color: Theme.muted; } }
+            if root.outputs.length > 0: output-list := ListView {
+                vertical-stretch: 1;
+                for item[i] in root.outputs: output-row := Action {
+                    width: output-list.visible-width; height: 64px; icon-only: true;
+                    private property <int> number: root.outputs.length - i;
+                    label: "Open screenshot " + self.number; accessible-description: item.date;
+                    Rectangle { x: 8px; y: 8px; width: 72px; height: 48px; background: Theme.sidebar; border-radius: 7px; clip: true;
+                        Image { width: parent.width; height: parent.height; source: root.shot-image(item.key,false); image-fit: cover; } }
+                    VerticalLayout { x: 92px; y: 0px; width: parent.width - 100px; height: parent.height; alignment: center; spacing: 2px;
+                        Text { text: "Screenshot " + output-row.number; color: Theme.text; font-size: 14px; }
+                        Text { text: item.date; color: Theme.muted; font-size: 12px; }
+                    }
+                    activate => {root.view-shot(item.key);}
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+            Action { label: "View all screenshots"; glyph: "\u{e8b9}"; height: 34px;
+                activate => {root.dismiss-panel(); root.album-open = true; root.refresh-album();} }
         }
     }
     if root.open-panel == OpenPanel.usage: Flyout {

@@ -186,6 +186,10 @@ try {
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
+    Click 'Outputs'
+    Wait-For { Named 'Screenshots you send in this chat appear here.' } 'empty chat outputs'
+    Click 'Outputs'
+    Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
     Add-Type -AssemblyName System.Drawing
     $fixtureWindow = $proc.MainWindowHandle
     try {
@@ -214,7 +218,15 @@ try {
         $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
         try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(30,20).ToArgb() -ne [Drawing.Color]::FromArgb(32,32,32).ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
     } finally {[void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-2),0,0,0,0,3)}
-    Click 'Screenshots'
+    Wait-For { Named 'Open screenshot 1' } 'new screenshot in the top-right panel'
+    $header = (Named 'Outputs').Current.BoundingRectangle
+    $thumbnail = (Named 'Open screenshot 1').Current.BoundingRectangle
+    if ($thumbnail.Top -lt $header.Bottom -or [Math]::Abs($header.Right - $thumbnail.Right) -gt 40) {throw 'Outputs did not open under the top-right button'}
+    Click 'Open screenshot 1'
+    Wait-For { Named 'Back' } 'full-size image from Outputs'
+    Click 'Back'
+    Wait-For { Named 'Open screenshot 1' } 'return to Outputs'
+    Click 'View all screenshots'
     Wait-For { Named 'project' } 'album opened'
     $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
     Wait-For { $albumWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.Name -like 'View screenshot *'} } 'saved album image'
@@ -222,6 +234,10 @@ try {
     Click 'Sent screenshot'
     Wait-For { Named 'Back' } 'full-size screenshot'
     Click 'Back'
+    Click 'Outputs'
+    Wait-For { Named 'Open screenshot 1' } 'reopened chat outputs'
+    Click 'Outputs'
+    Wait-For { !(Named 'View all screenshots') } 'closed chat outputs'
     (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Unsent draft')
     Click 'Add to message'
     Wait-For { Named 'Take screenshot' } 'screenshot menu action'
@@ -229,6 +245,7 @@ try {
     Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'second region picker'
     [void][WorkshopPointer]::PostMessage((CaptureWindow),0x100,27,1)
     Wait-For { (Named 'Send message').Current.IsEnabled } 'cancelled capture'
+    if (Named 'View all screenshots') {throw 'Cancelled capture opened Outputs'}
     if (@(Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png).Count -ne 1 -or
         (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Unsent draft') {throw 'Cancel changed screenshot history or draft'}
     (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
