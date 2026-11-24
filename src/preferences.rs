@@ -172,10 +172,15 @@ fn plugin_rows(value: &Value, browse: bool) -> Result<Vec<Row>> {
             rows.push(Row {
                 id: id.into(),
                 label: item["name"].as_str().unwrap_or(name).into(),
-                detail: format!(
-                    "{state} · {}",
-                    item["marketplaceName"].as_str().unwrap_or(market)
-                ),
+                detail: [
+                    state,
+                    item["marketplaceName"].as_str().unwrap_or(market),
+                    item["description"].as_str().unwrap_or(""),
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · "),
                 action: if item["uninstallable"] == false && present {
                     ""
                 } else if present {
@@ -189,6 +194,18 @@ fn plugin_rows(value: &Value, browse: bool) -> Result<Vec<Row>> {
     }
     rows.sort_by_key(|r| r.label.to_lowercase());
     Ok(rows)
+}
+
+pub fn official_plugin(provider: &str, id: &str) -> bool {
+    let market = id.rsplit_once('@').map(|(_, market)| market);
+    match provider {
+        "Codex" => matches!(
+            market,
+            Some("openai-curated-remote" | "openai-bundled" | "openai-primary-runtime")
+        ),
+        "Claude Code" => market == Some("claude-plugins-official"),
+        _ => false,
+    }
 }
 
 fn skill_roots(p: Provider) -> Result<Vec<PathBuf>> {

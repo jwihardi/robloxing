@@ -1,6 +1,7 @@
 mod check;
 mod git;
 pub mod provider;
+pub mod screenshots;
 pub mod team;
 pub mod usage;
 pub mod worker_policy;
@@ -58,6 +59,7 @@ pub struct Store {
 }
 
 pub struct ChatMessage {
+    pub screenshot: bool,
     pub id: i64,
     pub from_user: bool,
     pub delivery_notice: bool,
@@ -98,7 +100,7 @@ impl Store {
             "SELECT id,kind,summary FROM events
             WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch')
+                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -116,6 +118,7 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
                 from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
                 delivery_notice: matches!(kind.as_str(), "steer/error" | "steer/unavailable"),
@@ -163,6 +166,7 @@ impl Store {
                 [home.join("preferences.sqlite").to_string_lossy()],
             )?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.worker_defaults(id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL)")?;
+            Self::init_screenshots(&db)?;
         }
         let tx = db.transaction()?;
         for (table, column) in [

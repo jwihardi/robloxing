@@ -22,9 +22,13 @@ Open the model and effort pill beside Send. Select the header showing the effort
 
 Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
+Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. **Screenshots** in the sidebar shows captures across your projects, newest first. Select a thumbnail in either location for the full image. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
+
 ## Provider settings
 
 **Settings → Providers** checks the installed Codex and Claude Code CLIs and opens the provider's own sign-in flow. Accounts and extensions are shared with the corresponding CLI. Chat and worker execution currently use Codex. Use `WORKSHOP_CLAUDE` to select a specific Claude Code executable.
+
+In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
 **Plugins** lists the selected provider's installed plugins. Browse its marketplaces, install by `plugin@marketplace`, or enter a marketplace repository and choose **Add marketplace**. **Skills** installs a local folder containing `SKILL.md` or a GitHub URL pointing to that folder. Removing a user skill moves it to a sibling `removed-skills` directory for recovery. Fresh provider sessions pick up changes.
 

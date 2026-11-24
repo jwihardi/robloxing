@@ -7,6 +7,9 @@ using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref Point p);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -151,6 +154,13 @@ try {
     Click 'Plugins'
     Wait-For { Named 'No plugins installed.' } 'installed plugins'
     Click 'Browse plugins'
+    Wait-For { (Named 'Calendar') -and !(Named 'Sample plugin') } 'official catalog'
+    (Named 'Filter list').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('events')
+    Wait-For { Named 'Calendar' } 'search by description'
+    (Named 'Filter list').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('unknown-extension')
+    Wait-For { Named 'No matches' } 'empty official search'
+    (Named 'Filter list').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    Click 'Official marketplaces'
     Wait-For { Named 'Sample plugin' } 'marketplace catalog'
     (Named 'Plugin source').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('sample@fixture')
     Click 'Install'
@@ -176,6 +186,53 @@ try {
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
+    Add-Type -AssemblyName System.Drawing
+    $fixtureWindow = $proc.MainWindowHandle
+    try {
+        [void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-1),10,10,0,0,0x0041)
+        $start = [WorkshopPointer+Point]::new(); $start.X = 380; $start.Y = 160
+        [void][WorkshopPointer]::ClientToScreen($fixtureWindow,[ref]$start)
+        Wait-For { [WorkshopPointer]::WindowFromPoint($start) -eq $fixtureWindow } 'fixture canvas on screen'
+        (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
+        Click 'Send message'
+        function CaptureWindow {
+            $helper = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='powershell.exe'" | Select-Object -First 1
+            if ($helper) {return [WorkshopPointer]::Dialog($helper.ProcessId,'Select a screenshot area')}
+            return [IntPtr]::Zero
+        }
+        Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'screen region picker'
+        $overlay = CaptureWindow
+        # Select only pixels inside the solid-color fixture.
+        [void][WorkshopPointer]::ScreenToClient($overlay,[ref]$start)
+        $down = ($start.Y -shl 16) -bor $start.X
+        $up = (($start.Y+40) -shl 16) -bor ($start.X+60)
+        [void][WorkshopPointer]::PostMessage($overlay,0x201,1,$down)
+        [void][WorkshopPointer]::PostMessage($overlay,0x200,1,$up)
+        [void][WorkshopPointer]::PostMessage($overlay,0x202,0,$up)
+        Wait-For { Named 'Sent screenshot' } 'local chat receipt'
+        $saved = Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png
+        $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
+        try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(30,20).ToArgb() -ne [Drawing.Color]::FromArgb(32,32,32).ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
+    } finally {[void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-2),0,0,0,0,3)}
+    Click 'Screenshots'
+    Wait-For { Named 'project' } 'album opened'
+    $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    Wait-For { $albumWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.Name -like 'View screenshot *'} } 'saved album image'
+    Click 'Screenshots'
+    Click 'Sent screenshot'
+    Wait-For { Named 'Back' } 'full-size screenshot'
+    Click 'Back'
+    (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Unsent draft')
+    Click 'Add to message'
+    Wait-For { Named 'Take screenshot' } 'screenshot menu action'
+    Click 'Take screenshot'
+    Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'second region picker'
+    [void][WorkshopPointer]::PostMessage((CaptureWindow),0x100,27,1)
+    Wait-For { (Named 'Send message').Current.IsEnabled } 'cancelled capture'
+    if (@(Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png).Count -ne 1 -or
+        (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Unsent draft') {throw 'Cancel changed screenshot history or draft'}
+    (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    if (Get-ChildItem $env:WORKSHOP_HOME -Recurse -Filter 'events.jsonl') {throw 'Screenshot started a provider turn'}
     $note = Join-Path $root 'attached note.txt'
     Set-Content $note 'Attachment transport check'
     Click 'Add to message'
@@ -202,6 +259,7 @@ try {
     $wire = Get-Content (Get-ChildItem $root -Filter 'lead-*.json' | Select-Object -First 1).FullName -Raw | ConvertFrom-Json
     if (!(($wire.input | Where-Object type -eq 'text').text -match 'Attachment transport check')) { throw 'Provider did not receive attached text' }
     if (($wire.input | Where-Object type -eq 'localImage').path -ne $image) { throw 'Provider did not receive the image' }
+    if (($wire | ConvertTo-Json -Depth 12) -match 'capture\.png|/screenshot|shot-[A-Za-z0-9]+[/\\]') {throw 'Local screenshot entered model input'}
     if ($wire.input[0].text -notlike "*$project*") { throw 'Provider did not receive the selected folder' }
     'Composer, attachments and provider settings passed'
 } finally {

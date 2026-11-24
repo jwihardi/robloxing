@@ -1,4 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod capture;
 mod preferences;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
@@ -21,9 +22,10 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Desk, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
+    Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged(Result<String>, bool),
     Opened(Arc<Store>),
@@ -284,6 +286,63 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
     }
 }
 impl App {
+    fn preceding_shots(&self, store: &Store, id: Option<i64>) -> Result<Vec<ChatTurn>> {
+        Ok(store
+            .preceding_screenshots(id)?
+            .into_iter()
+            .map(|key| ChatTurn {
+                shot: key.into(),
+                ..Default::default()
+            })
+            .collect())
+    }
+    fn refresh_album(&self) {
+        let ui = self.ui.unwrap();
+        match data_dir().and_then(|home| workshop::screenshots::album(&home)) {
+            Ok(items) => {
+                let items: Vec<_> = items
+                    .into_iter()
+                    .map(|entry| {
+                        let path = std::path::Path::new(&entry.project);
+                        AlbumItem {
+                            key: entry.key.into(),
+                            date: entry.created.into(),
+                            project: path
+                                .file_name()
+                                .unwrap_or(path.as_os_str())
+                                .to_string_lossy()
+                                .as_ref()
+                                .into(),
+                        }
+                    })
+                    .collect();
+                ui.set_album(ModelRc::new(VecModel::from(items)));
+                ui.set_album_error("".into());
+            }
+            Err(e) => ui.set_album_error(format!("Could not open the album: {e:#}").into()),
+        }
+    }
+    fn capture(&self, command: Option<String>) {
+        let ui = self.ui.unwrap();
+        if ui.get_capturing() {
+            return;
+        }
+        let Some(store) = self.store.borrow().clone() else {
+            return;
+        };
+        let attempt = self.id.get();
+        let tx = self.updates.clone();
+        ui.set_capturing(true);
+        std::thread::spawn(move || {
+            let result = capture::take(&store, attempt);
+            let _ = tx.send(Update::Captured(
+                store.project.clone(),
+                attempt,
+                command,
+                result,
+            ));
+        });
+    }
     fn refresh_chat(&self, store: &Store, attempt: &Attempt) -> Result<()> {
         let ui = self.ui.unwrap();
         let switching = self.displayed.get() != Some(attempt.id);
@@ -305,6 +364,7 @@ impl App {
         let mut visible_workers = std::collections::HashSet::new();
         let mut rows = Vec::new();
         if !more {
+            rows.extend(self.preceding_shots(store, Some(attempt.id))?);
             rows.push(ChatTurn {
                 from_user: true,
                 body: attempt.prompt.as_str().into(),
@@ -312,6 +372,13 @@ impl App {
             });
         }
         for message in messages {
+            if message.screenshot {
+                rows.push(ChatTurn {
+                    shot: message.text.into(),
+                    ..Default::default()
+                });
+                continue;
+            }
             let mut turn = ChatTurn {
                 from_user: message.from_user,
                 delivery_notice: message.delivery_notice,
@@ -512,12 +579,22 @@ impl App {
     }
     fn filter_preferences(&self, query: &str) {
         let query = query.to_lowercase();
+        let terms: Vec<_> = query.split_whitespace().collect();
+        let ui = self.ui.unwrap();
+        let official =
+            ui.get_settings_tab() == "Plugins" && ui.get_browse_plugins() && ui.get_official_only();
+        let provider = ui.get_settings_provider();
         let rows: Vec<_> = self
             .settings_rows
             .borrow()
             .iter()
+            .filter(|r| !official || preferences::official_plugin(&provider, &r.id))
             .filter(|r| {
-                r.label.to_lowercase().contains(&query) || r.detail.to_lowercase().contains(&query)
+                if terms.is_empty() {
+                    return true;
+                }
+                let searchable = format!("{} {} {}", r.label, r.id, r.detail).to_lowercase();
+                terms.iter().all(|term| searchable.contains(term))
             })
             .map(|r| SettingRow {
                 id: r.id.as_str().into(),
@@ -677,6 +754,7 @@ impl App {
         ui.set_selection(selected.map_or(-1, |i| i as i32));
         ui.set_running(false);
         if selected.is_none() {
+            self.turns.set_vec(self.preceding_shots(store, None)?);
             ui.set_context_meter(context_meter(ContextUsage::default(), true));
         }
         if let Some(index) = selected {
@@ -734,6 +812,33 @@ impl App {
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             match update {
+                Update::Captured(project, attempt, command, result) => {
+                    ui.set_capturing(false);
+                    if matches!(result, Ok(true)) {
+                        self.refresh_album();
+                    }
+                    if self
+                        .store
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|s| s.project == project)
+                        && self.id.get() == attempt
+                    {
+                        match result {
+                            Ok(true) => {
+                                if command.as_deref() == Some(ui.get_draft().as_str()) {
+                                    ui.set_draft("".into());
+                                }
+                                self.pages.borrow_mut().clear();
+                                ui.set_notice("".into());
+                                self.render()?;
+                                Self::scroll_after_layout(&ui);
+                            }
+                            Ok(false) => {}
+                            Err(e) => ui.set_notice(format!("{e:#}").into()),
+                        }
+                    }
+                }
                 Update::Preferences(generation, rows, message)
                     if generation == self.settings_generation.get() =>
                 {
@@ -951,6 +1056,16 @@ impl App {
     }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
         let ui = self.ui.unwrap();
+        if matches!(op, "submit" | "resume" | "steer") {
+            if ui.get_capturing() {
+                return Ok(());
+            }
+            let draft = ui.get_draft().to_string();
+            if capture::requested(&draft) {
+                self.capture(Some(draft));
+                return Ok(());
+            }
+        }
         if op == "steer" || op == "cancel" {
             let c = if op == "cancel" {
                 Control::Cancel
@@ -1010,6 +1125,9 @@ impl App {
                 } else {
                     a.prompt.as_str().into()
                 };
+                if op == "submit" {
+                    store.bind_draft_screenshots(a.id)?;
+                }
                 events.send(Update::Started(a.id))?;
                 provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
                     let _ = events.send(match message {
@@ -1071,6 +1189,16 @@ fn main() -> Result<()> {
         },
         receiver: rx,
         session: Default::default(),
+    });
+    let a = app.clone();
+    ui.on_take_screenshot(move || a.capture(None));
+    let a = app.clone();
+    ui.on_refresh_album(move || a.refresh_album());
+    ui.on_shot_image(|key, full| {
+        capture::image_path(&key, full)
+            .ok()
+            .and_then(|p| slint::Image::load_from_path(&p).ok())
+            .unwrap_or_default()
     });
     let a = app.clone();
     ui.on_load_settings(move || a.load_preferences(String::new()));

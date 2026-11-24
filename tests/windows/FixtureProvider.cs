@@ -49,7 +49,8 @@ class FixtureProvider {
         if(args.Length > 1 && args[0]=="plugin"){
             string file=Path.Combine(Dir,"sample.plugin");
             var plugin=new {pluginId="sample@fixture",name="Sample plugin",marketplaceName="fixture"};
-            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{plugin} : new object[0],available=new[]{plugin}});return;}
+            var official=new {pluginId="calendar@openai-curated-remote",name="Calendar",marketplaceName="openai-curated-remote",description="Plan events"};
+            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{plugin} : new object[0],available=new object[]{plugin,official}});return;}
             if(args[1]=="add" || args[1]=="install"){File.WriteAllText(file,args[2]);return;}
             if(args[1]=="remove" || args[1]=="uninstall"){File.Delete(file);return;}
         }

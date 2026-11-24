@@ -1,7 +1,8 @@
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, detail: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow] }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string }
+export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string }
 export struct PickerOption { value: string, label: string }
@@ -328,6 +329,15 @@ component Composer inherits Rectangle {
 }
 
 export component Desk inherits Window {
+    in property <[AlbumItem]> album;
+    in property <string> album-error;
+    in property <bool> capturing;
+    private property <bool> album-open;
+    private property <string> viewing-shot;
+    callback refresh-album();
+    callback take-screenshot();
+    pure callback shot-image(string,bool) -> image;
+    in-out property <bool> official-only: true;
     in property <[PickerOption]> attachments;
     callback attach(bool);
     callback remove-attachment(int);
@@ -454,7 +464,7 @@ export component Desk inherits Window {
             root.operate(root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
-    function new-chat() {root.settings-open = false; root.select-row(-1); composer.focus-input();}
+    function new-chat() {root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
     init => { Palette.color-scheme = dark; }
     rail := Rectangle {
         x: 0px; y: 0px; width: root.width < 880px ? 192px : 224px; height: root.height; background: Theme.sidebar;
@@ -470,15 +480,17 @@ export component Desk inherits Window {
             }
             ListView {
                 for chat[i] in root.rows: Action { label: chat; selected: i == root.selection;
-                    enabled: !root.busy; activate => {root.settings-open = false; root.select-row(i);} }
+                    enabled: !root.busy; activate => {root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(i);} }
             }
             if root.older-chats || root.newer-chats: HorizontalLayout {
                 if root.newer-chats: Action { label: "Newer chats"; enabled: !root.busy; activate => {root.page(true,false);} }
                 if root.older-chats: Action { label: "Older chats"; enabled: !root.busy; activate => {root.page(true,true);} }
             }
+            Action { label: "Screenshots"; glyph: "\u{e722}"; selected: root.album-open;
+                activate => {root.album-open = !root.album-open; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.album-open {root.refresh-album();}} }
             settings := Action {
                 label: "Settings"; glyph: "\u{e713}"; selected: root.settings-open;
-                activate => { root.settings-open = !root.settings-open;
+                activate => { root.album-open = false; root.viewing-shot = ""; root.settings-open = !root.settings-open;
                     if root.settings-open { root.open-panel = OpenPanel.closed; root.visit-settings(root.settings-tab,root.settings-provider); } }
             }
             Rectangle { height: 1px; background: Theme.line; }
@@ -486,7 +498,7 @@ export component Desk inherits Window {
         }
     }
     pane := Rectangle {
-        visible: !root.settings-open;
+        visible: !root.settings-open && !root.album-open && root.viewing-shot == "";
         x: rail.width; width: root.width - self.x; height: root.height;
         private property <length> measure: min(720px, self.width - 56px);
         private property <length> folder-button-y: self.height / 2 - 32px;
@@ -504,7 +516,7 @@ export component Desk inherits Window {
 
             }
         }
-        if root.home: Text {
+        if root.home && root.turns.length == 0: Text {
             x: composer.x + 2px; y: root.project == "" ? pane.folder-button-y - 72px : (composer.y - self.height) / 2;
             width: pane.measure; height: 55px;
             text: root.project == "" ? "Open a project to chat" : "What are we building?";
@@ -530,14 +542,19 @@ export component Desk inherits Window {
             }
         }
         transcript := ScrollView {
-            visible: !root.home; x: (parent.width - self.width) / 2; y: team.y + team.height + 11px; width: pane.measure;
+            visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: team.y + team.height + 11px; width: pane.measure;
             height: max(50px, (root.writable ? composer.y : closed.y) - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 8px; padding-bottom: 10px; spacing: 25px; alignment: start;
-                if root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
+                if !root.home && root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
                 for turn in root.turns: Rectangle {
-                    height: turn.dispatch-id != 0 ? dispatch-group.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px);
+                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px);
+                    if turn.shot != "": Action { width: min(248px,parent.width); x: parent.width - self.width; height: parent.height;
+                        label: "Sent screenshot"; icon-only: true; selected: true;
+                        Image { x: 6px; y: 6px; width: parent.width - 12px; height: 130px; source: root.shot-image(turn.shot,false); image-fit: contain; }
+                        Text { x: 12px; y: 141px; text: "Sent screenshot"; font-size: 13px; color: Theme.text; }
+                        activate => {root.viewing-shot = turn.shot;} }
                     dispatch-group := WorkerGroup {
                         visible: turn.dispatch-id != 0; width: parent.width;
                         height: self.preferred-height; label: turn.body; workers: turn.workers;
@@ -547,7 +564,7 @@ export component Desk inherits Window {
                         stop-worker(id) => { root.stop-worker(id); }
                     }
                     bubble := Rectangle {
-                        visible: turn.dispatch-id == 0;
+                        visible: turn.dispatch-id == 0 && turn.shot == "";
                         width: turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
                         x: turn.from-user ? parent.width - self.width : 0px; height: parent.height;
                         background: turn.from-user ? Theme.surface : transparent; border-radius: 14px;
@@ -560,17 +577,17 @@ export component Desk inherits Window {
                         }
                     }
                 }
-                if !root.later-messages && root.checkpoint != "": VerticalLayout {
+                if !root.home && !root.later-messages && root.checkpoint != "": VerticalLayout {
                     Action { label: "Project handoff"; glyph: root.show-checkpoint ? "\u{e70d}" : "\u{e76c}"; activate => {root.show-checkpoint=!root.show-checkpoint;} }
                     if root.show-checkpoint: Text { text: root.checkpoint; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
                 }
-                if root.later-messages: Action { label: "Newer messages"; activate => {root.page(false,false);} }
+                if !root.home && root.later-messages: Action { label: "Newer messages"; activate => {root.page(false,false);} }
                 if !root.later-messages && root.running && root.partial != "": TextInput {
                     text: root.partial; read-only: true; single-line: false; wrap: word-wrap;
                     color: Theme.text; font-size: 16px; accessible-label: "Codex reply";
                 }
                 if !root.later-messages && root.running && root.partial == "": Text { text: "Codex is working…"; color: Theme.muted; font-size: 14px; }
-                if root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled": Text {
+                if !root.home && (root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled"): Text {
                     text: root.action; color: Theme.muted; font-size: 14px; wrap: word-wrap;
                 }
             }
@@ -579,7 +596,7 @@ export component Desk inherits Window {
             visible: root.project != "" && root.writable;
             x: (parent.width - self.width) / 2; width: pane.measure;
             y: parent.height - self.height - feedback.height - 24px;
-            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.has-content(root.draft) || root.attachments.length > 0;
+            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: !root.capturing && (root.has-content(root.draft) || root.attachments.length > 0);
             attachments: root.attachments; remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
@@ -602,6 +619,37 @@ export component Desk inherits Window {
     }
     // Disable the outside hit area during the press so Slint delivers that same
     // event to the newly uncovered control. The opener itself toggles on release.
+    if root.album-open && root.viewing-shot == "": Rectangle {
+        x: rail.width; width: root.width - self.x; height: root.height;
+        VerticalLayout { x: 28px; y: 28px; width: parent.width - 56px; height: parent.height - 48px; spacing: 20px;
+            Text { text: "Screenshots"; color: Theme.text; font-size: 26px; font-weight: 600; }
+            if root.album.length == 0 || root.album-error != "": Text { text: root.album-error != "" ? root.album-error : "Screenshots you send from a chat appear here."; color: Theme.muted; wrap: word-wrap; font-size: 15px; }
+            gallery := ListView { vertical-stretch: 1;
+                private property <int> columns: self.visible-width > 760px ? 3 : 2;
+                for row[i] in ceil(root.album.length / gallery.columns): Rectangle {
+                    height: 186px; width: gallery.visible-width;
+                    for col[j] in gallery.columns: Rectangle {
+                        private property <int> idx: i * gallery.columns + j;
+                        x: j * (parent.width / gallery.columns); width: parent.width / gallery.columns - 12px; height: 173px;
+                        if self.idx < root.album.length: Action { private property <AlbumItem> item: root.album[parent.idx];
+                            width: parent.width; height: parent.height; label: "View screenshot " + item.date; icon-only: true;
+                            Rectangle { x: 0px; y: 0px; width: parent.width; height: 128px; border-radius: 10px; background: Theme.surface; clip: true;
+                                Image { width: parent.width; height: parent.height; source: root.shot-image(item.key,false); image-fit: contain; } }
+                            Text { x: 2px; y: 134px; width: parent.width - 4px; height: 20px; text: item.project; overflow: elide; color: Theme.text; font-size: 14px; }
+                            Text { x: 2px; y: 155px; width: parent.width - 4px; height: 16px; text: item.date; color: Theme.muted; font-size: 12px; }
+                            activate => {root.viewing-shot = item.key;} }
+                    }
+                }
+            }
+        }
+    }
+    if root.viewing-shot != "": Flyout {
+        x: rail.width; width: root.width - self.x; height: root.height;
+        escape => {root.viewing-shot = "";} init => {back.focus();}
+        back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.viewing-shot = "";} }
+        Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
+            source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
+    }
     if root.settings-open: Rectangle {
         x: rail.width; width: root.width - self.x; height: root.height; background: Theme.canvas;
         VerticalLayout {
@@ -635,10 +683,13 @@ export component Desk inherits Window {
                     enabled: !root.settings-working && (root.settings-tab == "Skills" || root.source-input != "");
                     activate => {root.settings-action(root.settings-tab == "Skills" ? "folder" : "marketplace",root.source-input);} }
             }
-            if root.settings-tab != "Providers": LineEdit { height: 34px; text <=> root.settings-query; placeholder-text: "Filter " + (root.settings-tab == "Skills" ? "skills" : "plugins");
-                accessible-label: "Filter list"; }
-            if root.settings-query != "" && root.settings-rows.length == 0 && root.settings-status == "": Text {
-                text: "No matches"; color: Theme.muted; font-size: 13px;
+            if root.settings-tab != "Providers": HorizontalLayout { height: 34px; spacing: 8px;
+                LineEdit { horizontal-stretch: 1; text <=> root.settings-query; placeholder-text: root.settings-tab == "Plugins" && root.browse-plugins ? "Search marketplace plugins" : "Filter " + (root.settings-tab == "Skills" ? "skills" : "plugins"); accessible-label: "Filter list"; }
+                if root.settings-tab == "Plugins" && root.browse-plugins: CheckBox { text: "Official marketplaces"; checked <=> root.official-only;
+                    toggled => {root.search-settings(root.settings-query);} }
+            }
+            if (root.settings-query != "" || root.browse-plugins) && root.settings-rows.length == 0 && root.settings-status == "": Text {
+                text: root.settings-query != "" ? "No matches" : "No plugins from official marketplaces."; color: Theme.muted; font-size: 13px;
             }
             if root.settings-status != "": Text { text: root.settings-status; color: Theme.muted; font-size: 13px; wrap: word-wrap; max-height: 70px; overflow: elide; }
             preference-list := ListView { vertical-stretch: 1;
@@ -686,6 +737,7 @@ export component Desk inherits Window {
             Action { label: "Attach folder…"; glyph: "\u{e8b7}"; activate => {root.dismiss-panel(); root.attach(true);} }
             Rectangle { height: 1px; background: Theme.line; }
             Action { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
+            Action { label: "Take screenshot"; glyph: "\u{e722}"; enabled: !root.capturing; activate => {root.dismiss-panel(); root.take-screenshot();} }
         }
     }
     if root.open-panel == OpenPanel.usage: Flyout {
