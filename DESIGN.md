@@ -38,11 +38,15 @@ Keep the model and stepped effort selector beside Send. Attachments and subagent
 
 ## Studio, settings and album
 
-Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins and skills. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.
+Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.
+
+## Appearance
+
+Each preset has a miniature conversation thumbnail and the active theme has a checkmark. Selecting a row applies it immediately. The custom theme editor previews valid color changes inside a sample conversation so the surrounding editor stays legible. Saving applies the colors to the workspace. The additional presets adapt the source palettes to Workshop’s surfaces and text roles. [Nord](https://www.nordtheme.com/docs/colors-and-palettes/) · [Catppuccin](https://catppuccin.com/palette/) · [Solarized](https://ethanschoonover.com/solarized/)
 
 ## Components
 
-`Theme` in `ui/common.slint` owns the colors. Segoe UI carries both headings and conversation text. The rail is the darkest surface, the workspace is brighter, and selected actions and focused controls use a pale periwinkle accent. Capacity meters pair their green-to-red scale with numeric values. Use a labeled action for every icon-only control and keep advanced information available by keyboard.
+The files in `themes/` own the preset colors. Their CSS custom properties map directly to `ThemeColors` in `ui/common.slint`, which supplies the runtime palette to app components. The values above document Workshop Dark. The canvas brightness also selects the light or dark treatment for standard Slint widgets. Segoe UI carries both headings and conversation text. In Workshop Dark the rail is the darkest surface, the workspace is brighter, and selected actions and focused controls use a pale periwinkle accent. Capacity meters pair their green-to-red scale with numeric values. Use a labeled action for every icon-only control and keep advanced information available by keyboard.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|

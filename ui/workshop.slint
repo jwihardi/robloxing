@@ -1,4 +1,7 @@
-import { Theme, Action } from "common.slint";
+import { Theme, ThemeColors, Action } from "common.slint";
+export { ThemeColors } from "common.slint";
+import { AppearancePage } from "appearance.slint";
+export { Appearance, ThemeChoice } from "appearance.slint";
 import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
 import { Studio, StudioPage } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
@@ -140,11 +143,11 @@ component EffortTrack inherits Rectangle {
     for level[i] in levels: Rectangle {
         x: root.inset + root.span * i / max(1,root.last) - 2.5px;
         y: (parent.height - self.height)/2; width: 5px; height: 5px; border-radius: 3px;
-        background: i <= root.shown ? transparent : #858585;
+        background: i <= root.shown ? transparent : Theme.muted;
     }
     if levels.length > 0 && shown >= 0: Rectangle {
         x: thumb-x - 17px; y: (parent.height - self.height)/2; width: 34px; height: 34px;
-        border-radius: 17px; background: white; border-width: 1px; border-color: #dedede;
+        border-radius: 17px; background: Theme.text; border-width: 1px; border-color: Theme.muted;
     }
     touch := TouchArea {
         enabled: root.enabled && root.levels.length > 1; mouse-cursor: pointer;
@@ -576,7 +579,10 @@ export component Desk inherits Window {
         if root.settings-open {root.visit-settings(root.settings-tab,root.settings-provider);}
         if root.album-open {root.refresh-album();}
     }
-    init => { Palette.color-scheme = dark; }
+    public function apply-colors(colors: ThemeColors, is-light: bool) {
+        Theme.colors = colors;
+        Palette.color-scheme = is-light ? ColorScheme.light : ColorScheme.dark;
+    }
     rail := Rectangle {
         x: 0px; y: 0px; width: nav.width + (root.context-visible && !root.compact ? context.width : 0px); height: root.height;
         nav := Rectangle { x: 0px; y: 0px; width: 76px; height: root.height; background: Theme.rail;
@@ -815,13 +821,14 @@ export component Desk inherits Window {
                 text: root.settings-query != "" ? "No matches" : "No plugins from official marketplaces."; color: Theme.muted; font-size: 13px;
             }
             if root.settings-status != "": Text { text: root.settings-status; color: Theme.muted; font-size: 13px; wrap: word-wrap; max-height: 70px; overflow: elide; }
+            if root.settings-tab == "Appearance": AppearancePage { vertical-stretch: 1; }
             if root.settings-tab=="Tasks": defaults-scroll:=ScrollView {
                 vertical-stretch:1; content-width:self.visible-width; content-height:defaults-editor.preferred-height;
                 defaults-editor:=TaskEditor { width:defaults-scroll.visible-width - 8px;
                     catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
                     reload=>{root.reload-models();} back=>{root.settings-open=false;} }
             }
-            if root.settings-tab!="Tasks": preference-list := ListView { vertical-stretch: 1;
+            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance": preference-list := ListView { vertical-stretch: 1;
                 for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: 60px;
                     HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
                         VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
@@ -843,7 +850,7 @@ export component Desk inherits Window {
                     Rectangle { height: 1px; background: Theme.line; }
                 }
             }
-            if root.settings-tab != "Tasks": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
+            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
         }
     }
 
@@ -871,8 +878,8 @@ export component Desk inherits Window {
         if root.settings-open: VerticalLayout {
             padding: 14px; padding-top: 19px; alignment: start; spacing: 5px;
             Text { text: "Settings"; height: 36px; color: Theme.text; font-size: 20px; font-weight: 600; }
-            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks"]: Action {
-                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}"][i]; selected: root.settings-tab == tab;
+            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance"]: Action {
+                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}","\u{e790}"][i]; selected: root.settings-tab == tab;
                 enabled: !root.settings-working; activate => {root.visit-settings(tab,root.settings-provider);root.compact-context=false;}
             }
         }

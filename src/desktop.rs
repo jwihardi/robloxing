@@ -1,4 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod appearance;
 mod capture;
 mod desktop_studio;
 mod desktop_tasks;
@@ -25,7 +26,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
     StudioFinished(PathBuf, i64, Result<()>),
@@ -641,8 +642,11 @@ impl App {
         self.settings_rows.borrow_mut().clear();
         self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
-        if tab == "Tasks" {
+        if matches!(tab.as_str(), "Tasks" | "Appearance") {
             self.settings_read.take();
+            if tab == "Appearance" {
+                appearance::reload(&ui);
+            }
             ui.set_settings_status("".into());
             return;
         }
@@ -1268,6 +1272,7 @@ fn main() -> Result<()> {
         );
     }
     let ui = Desk::new()?;
+    appearance::connect(&ui);
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {

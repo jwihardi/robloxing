@@ -1,21 +1,42 @@
+export struct ThemeColors {
+    rail: color,
+    brand-fill: color,
+    popup: color,
+    track: color,
+    canvas: color,
+    sidebar: color,
+    surface: color,
+    selected: color,
+    line: color,
+    text: color,
+    muted: color,
+    accent: color,
+    accent-hover: color,
+    disabled: color,
+    ample: color,
+    halfway: color,
+    scarce: color,
+}
+
 export global Theme {
-    out property <color> rail: #101217;
-    out property <color> brand-fill: #343e58;
-    out property <color> popup: #242830;
-    out property <color> track: #484e5c;
-    out property <color> canvas: #191c22;
-    out property <color> sidebar: #14161b;
-    out property <color> surface: #252a33;
-    out property <color> selected: #303643;
-    out property <color> line: #393e49;
-    out property <color> text: #f0f1f5;
-    out property <color> muted: #aeb5c3;
-    out property <color> accent: #b9c9ff;
-    out property <color> accent-hover: #d9e2ff;
-    out property <color> disabled: #373c46;
-    out property <color> ample: #8dcea6;
-    out property <color> halfway: #e4bc73;
-    out property <color> scarce: #ed827e;
+    in-out property <ThemeColors> colors;
+    out property <color> rail: colors.rail;
+    out property <color> brand-fill: colors.brand-fill;
+    out property <color> popup: colors.popup;
+    out property <color> track: colors.track;
+    out property <color> canvas: colors.canvas;
+    out property <color> sidebar: colors.sidebar;
+    out property <color> surface: colors.surface;
+    out property <color> selected: colors.selected;
+    out property <color> line: colors.line;
+    out property <color> text: colors.text;
+    out property <color> muted: colors.muted;
+    out property <color> accent: colors.accent;
+    out property <color> accent-hover: colors.accent-hover;
+    out property <color> disabled: colors.disabled;
+    out property <color> ample: colors.ample;
+    out property <color> halfway: colors.halfway;
+    out property <color> scarce: colors.scarce;
 }
 
 export component Action inherits Rectangle {

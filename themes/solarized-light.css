@@ -1,0 +1,19 @@
+:root {
+  --rail: #e7dfcb;
+  --brand-fill: #e3daca;
+  --popup: #fdf6e3;
+  --track: #c9c2af;
+  --canvas: #fdf6e3;
+  --sidebar: #eee8d5;
+  --surface: #f4edda;
+  --selected: #e8dfc9;
+  --line: #c7bfaa;
+  --text: #073642;
+  --muted: #475e63;
+  --accent: #006e72;
+  --accent-hover: #00575b;
+  --disabled: #d9d3c3;
+  --ample: #426b32;
+  --halfway: #805718;
+  --scarce: #ac3833;
+}

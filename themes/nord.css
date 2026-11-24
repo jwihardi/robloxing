@@ -1,0 +1,19 @@
+:root {
+  --rail: #242933;
+  --brand-fill: #434c5e;
+  --popup: #3b4252;
+  --track: #4c566a;
+  --canvas: #2e3440;
+  --sidebar: #292e39;
+  --surface: #3b4252;
+  --selected: #434c5e;
+  --line: #4c566a;
+  --text: #eceff4;
+  --muted: #d8dee9;
+  --accent: #88c0d0;
+  --accent-hover: #8fbcbb;
+  --disabled: #404857;
+  --ample: #a3be8c;
+  --halfway: #ebcb8b;
+  --scarce: #d9959c;
+}

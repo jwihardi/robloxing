@@ -207,6 +207,34 @@ try {
     Wait-For { !(Named 'Subagent defaults') } 'toggle closed'
     Click 'Settings'
     Wait-For { Named 'Sign in' } 'provider accounts'
+    Click 'Appearance'
+    Wait-For { (Named 'Workshop Dark') -and (Named 'Catppuccin Mocha') } 'appearance presets'
+    Click 'Solarized Light'
+    Click 'New theme'
+    Wait-For { Named 'Theme CSS editor' } 'theme editor'
+    $source = (Named 'Theme CSS editor').GetCurrentPattern($valuePattern)
+    if ($source.Current.Value -notlike '*--canvas: #fdf6e3*') { throw 'New theme did not start from selected preset' }
+    $file = Join-Path $root 'Sea glass.css'
+    Set-Content -LiteralPath $file -Encoding ascii -Value ':root { --accent: #9ddfc7; }'
+    Click 'Load file…'
+    Choose-Attachment 'Load theme CSS' $file
+    Wait-For { (Named 'Theme name').GetCurrentPattern($valuePattern).Current.Value -eq 'Sea glass' } 'loaded theme name'
+    $source.SetValue('--unknown: #123')
+    Wait-For { !(Named 'Save theme').Current.IsEnabled } 'invalid theme blocked'
+    $source.SetValue(':root { --accent: #9ddfc7; --canvas: #19232a; }')
+    Wait-For { (Named 'Save theme').Current.IsEnabled } 'valid theme preview'
+    Click 'Save theme'
+    Wait-For { (Named 'Sea glass') -and (Named 'Edit theme') } 'saved custom theme'
+    Click 'Edit theme'
+    (Named 'Theme name').GetCurrentPattern($valuePattern).SetValue('Sea foam')
+    Click 'Cancel'
+    Wait-For { (Named 'Sea glass') -and !(Named 'Sea foam') } 'cancel leaves theme intact'
+    Click 'Edit theme'
+    Click 'Remove theme'
+    Click 'Confirm removal'
+    Wait-For { (Named 'Workshop Dark') -and !(Named 'Sea glass') -and !(Named 'Edit theme') } 'removed theme and restored default'
+    Click 'Providers'
+    Wait-For { Named 'Sign in' } 'back to provider accounts'
     Click 'Sign in'
     Wait-For { Named 'Sign out' } 'provider login result'
     Click 'Sign out'

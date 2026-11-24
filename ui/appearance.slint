@@ -1,0 +1,119 @@
+import { LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
+import { Action, Theme, ThemeColors } from "common.slint";
+
+export struct ThemeChoice { key: string, name: string, css: string, colors: ThemeColors, custom: bool }
+
+export global Appearance {
+    in property <[ThemeChoice]> choices;
+    in property <ThemeChoice> current;
+    in property <ThemeColors> preview;
+    in property <string> syntax-error;
+    in-out property <string> status;
+    in-out property <bool> editing;
+    in-out property <string> edit-key;
+    in-out property <string> name;
+    in-out property <string> css;
+    callback select-theme(string);
+    callback validate(string);
+    callback load-file();
+    callback save();
+    callback remove();
+    changed css => { validate(css); }
+    public function edit(existing: bool) {
+        edit-key = existing ? current.key : "";
+        name = existing ? current.name : "";
+        css = current.css;
+        validate(css);
+        status = "";
+        editing = true;
+    }
+}
+
+component Thumbnail inherits Rectangle {
+    in property <ThemeColors> colors;
+    width: 76px; height: 36px; border-radius: 7px;
+    background: root.colors.canvas; border-width: 1px; border-color: root.colors.line;
+    Rectangle { x: 3px; y: 3px; width: 15px; height: 30px; border-radius: 4px; background: root.colors.sidebar;
+        Rectangle { x: 3px; y: 5px; width: 9px; height: 4px; border-radius: 2px; background: root.colors.accent; }
+    }
+    Rectangle { x: 24px; y: 9px; width: 25px; height: 3px; border-radius: 1.5px; background: root.colors.text; }
+    Rectangle { x: 24px; y: 16px; width: 40px; height: 2px; border-radius: 1px; background: root.colors.muted; }
+    Rectangle { x: 24px; y: 24px; width: 44px; height: 6px; border-radius: 3px; background: root.colors.selected; }
+}
+
+export component AppearancePage inherits VerticalLayout {
+    spacing: 10px;
+    if !Appearance.editing: HorizontalLayout { height: 38px; spacing: 8px;
+        Text { text: "Color theme"; color: Theme.text; font-size: 18px; font-weight: 600;
+            horizontal-stretch: 1; vertical-alignment: center; }
+        if Appearance.current.custom: Action { label: "Edit theme"; width: 90px; activate => { Appearance.edit(true); } }
+        Action { label: "New theme"; glyph: "\u{e710}"; width: 130px; selected: true; activate => { Appearance.edit(false); } }
+    }
+    if !Appearance.editing: themes := ListView { vertical-stretch: 1;
+        for item in Appearance.choices: Rectangle {
+            width: themes.visible-width; height: 60px;
+            Action {
+                x: 0px; y: 2px; width: parent.width; height: 56px; icon-only: true;
+                label: item.name; selected: Appearance.current.key == item.key;
+                accessible-description: self.selected ? "Current theme" : "Apply theme";
+                activate => { Appearance.select-theme(item.key); }
+                Thumbnail { x: 10px; y: 10px; colors: item.colors; }
+                Text { x: 100px; width: parent.width - 142px; height: parent.height; text: item.name;
+                    color: Theme.text; font-size: 15px; vertical-alignment: center; overflow: elide; accessible-role: none; }
+                if Appearance.current.key == item.key: Text {
+                    x: parent.width - 32px; height: parent.height; text: "\u{e73e}"; font-family: "Segoe MDL2 Assets";
+                    color: Theme.accent; vertical-alignment: center; accessible-role: none;
+                }
+            }
+        }
+    }
+    if Appearance.editing: editor := ScrollView {
+        vertical-stretch: 1; content-width: self.visible-width; content-height: fields.preferred-height;
+        fields := VerticalLayout {
+            width: editor.visible-width - 8px; spacing: 9px; alignment: start;
+            Text { text: Appearance.edit-key == "" ? "Create a theme" : "Edit theme"; color: Theme.text; font-size: 18px; font-weight: 600; }
+            Text { text: "Name"; color: Theme.text; font-size: 14px; }
+            LineEdit { height: 34px; text <=> Appearance.name; accessible-label: "Theme name"; placeholder-text: "My theme"; }
+            HorizontalLayout { height: 32px;
+                Text { text: "Theme CSS"; color: Theme.text; font-size: 14px; vertical-alignment: center; horizontal-stretch: 1; }
+                Action { label: "Load file…"; width: 92px; height: 30px; activate => { Appearance.load-file(); } }
+            }
+            TextEdit { height: 145px; text <=> Appearance.css; font-family: "Consolas"; font-size: 13px; accessible-label: "Theme CSS editor"; }
+            Text { text: "Use hex colors. Omitted variables inherit Workshop Dark."; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+            Text { text: "Preview"; color: Theme.text; font-size: 14px; }
+            Rectangle { height: 92px; background: Appearance.preview.canvas; border-radius: 10px;
+                border-width: 1px; border-color: Theme.line; accessible-role: groupbox; accessible-label: "Theme preview";
+                Rectangle { x: 4px; y: 4px; width: 86px; height: parent.height - 8px; background: Appearance.preview.sidebar; border-radius: 6px;
+                    Rectangle { x: 0px; y: 0px; width: 17px; height: parent.height; background: Appearance.preview.rail; border-radius: 5px;
+                        Rectangle { x: 5px; y: 10px; width: 7px; height: 7px; border-radius: 2px; background: Appearance.preview.accent; }
+                    }
+                    Text { x: 25px; y: 10px; text: "Chats"; font-size: 12px; color: Appearance.preview.muted; }
+                    Rectangle { x: 23px; y: 32px; width: 55px; height: 10px; border-radius: 4px; background: Appearance.preview.selected; }
+                }
+                Text { x: 104px; y: 12px; text: "Conversation"; color: Appearance.preview.text; font-size: 15px; font-weight: 600; }
+                Rectangle { x: 102px; y: 46px; width: parent.width - 114px; height: 34px; background: Appearance.preview.surface; border-radius: 12px;
+                    Text { x: 10px; height: parent.height; text: "Message…"; color: Appearance.preview.muted; vertical-alignment: center; font-size: 13px; }
+                    Rectangle { x: parent.width - 28px; y: 5px; width: 24px; height: 24px; border-radius: 12px; background: Appearance.preview.accent;
+                        Text { text: "↑"; color: Appearance.preview.canvas; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
+    if Appearance.editing && Appearance.syntax-error != "": Text { text: Appearance.syntax-error; color: Theme.scarce; wrap: word-wrap; font-size: 13px; }
+    if Appearance.status != "": Text { text: Appearance.status; color: Theme.text; wrap: word-wrap; font-size: 13px; }
+    if Appearance.editing: HorizontalLayout {
+        height: 38px; spacing: 8px;
+        private property <bool> confirming;
+        if Appearance.edit-key != "": Action {
+            label: parent.confirming ? "Confirm removal" : "Remove theme"; width: 132px;
+            activate => { if parent.confirming { Appearance.remove(); } else { parent.confirming = true; } }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Action { label: "Cancel"; width: 70px; activate => { Appearance.status = ""; Appearance.editing = false; } }
+        Action { label: "Save theme"; width: 106px; primary: true;
+            enabled: Appearance.name != "" && Appearance.syntax-error == "";
+            activate => { Appearance.save(); }
+        }
+    }
+}
