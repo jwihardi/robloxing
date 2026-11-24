@@ -48,3 +48,44 @@ fn library_persists_ready_assets_and_recovers_interrupted_runs() -> Result<()> {
     assert!(other.studio_history("Images")?.is_empty());
     Ok(())
 }
+
+#[test]
+fn studio_defaults_are_shared_across_projects_and_runs_keep_their_settings() -> Result<()> {
+    use workshop::studio::settings::TaskSettings;
+    let tmp = tempdir()?;
+    let home = tmp.path().join("home");
+    let one = Store::open(&tmp.path().join("one"), &home)?;
+    let two = Store::open(&tmp.path().join("two"), &home)?;
+    let recipe = Recipe::Image {
+        brief: "A lantern".into(),
+        style: "Icon".into(),
+    };
+    let mut defaults = TaskSettings::default();
+    defaults.agent.models.push("artist".into());
+    defaults.save(&home, "Images")?;
+    let inherited = one.start_studio_job(&recipe)?;
+    let mut custom = defaults.clone();
+    custom.agent.max_effort = "high".into();
+    let overridden = two.queue_studio_job(&recipe, Some(&custom))?;
+    assert_eq!(TaskSettings::defaults(&home, "Images")?, defaults);
+    assert_eq!(
+        TaskSettings::defaults(&home, "Models")?,
+        TaskSettings::default()
+    );
+    TaskSettings::default().save(&home, "Images")?;
+    assert_eq!(one.studio_job(inherited)?.settings, defaults);
+    assert_eq!(two.studio_job(overridden)?.settings, custom);
+    assert_eq!(
+        two.studio_job(two.start_studio_job(&recipe)?)?.settings,
+        TaskSettings::default()
+    );
+    assert!(
+        TaskSettings {
+            function_limit: 0,
+            ..custom
+        }
+        .save(&home, "Ghidra")
+        .is_err()
+    );
+    Ok(())
+}

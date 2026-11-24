@@ -5,7 +5,7 @@ use crate::{
 mod art;
 mod catalog;
 use anyhow::{Context, Result, bail, ensure};
-pub(crate) use art::{design_model, generate_image};
+pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
 pub use catalog::{Catalog, Model as CatalogModel, load_models_and_usage, model_catalog};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};

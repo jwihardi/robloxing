@@ -1,5 +1,7 @@
 //! Project-scoped game asset jobs. Only finished runs expose deliverables.
 pub mod reports;
+pub mod settings;
+use settings::TaskSettings;
 mod textures;
 mod tools;
 
@@ -27,6 +29,12 @@ pub enum Recipe {
 }
 
 impl Recipe {
+    pub fn uses_task_settings(&self) -> bool {
+        matches!(
+            self,
+            Self::Image { .. } | Self::ModelBrief { .. } | Self::Decompile { .. }
+        )
+    }
     pub fn area(&self) -> &'static str {
         match self {
             Self::Image { .. } | Self::Texture { .. } => "Images",
@@ -94,6 +102,7 @@ pub struct Job {
     pub detail: String,
     pub created: String,
     pub recipe: Recipe,
+    pub settings: TaskSettings,
 }
 impl Job {
     pub fn filename(&self) -> &'static str {
@@ -128,15 +137,24 @@ fn same_contents(left: &Path, right: &Path) -> Result<bool> {
 }
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     let recipe: String = r.get(5)?;
+    #[derive(Deserialize)]
+    struct Request {
+        #[serde(flatten)]
+        recipe: Recipe,
+        #[serde(default)]
+        settings: TaskSettings,
+    }
+    let request: Request = serde_json::from_str(&recipe).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     Ok(Job {
         id: r.get(0)?,
         title: r.get(1)?,
         state: r.get(2)?,
         detail: r.get(3)?,
         created: r.get(4)?,
-        recipe: serde_json::from_str(&recipe).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
-        })?,
+        recipe: request.recipe,
+        settings: request.settings,
     })
 }
 impl Store {
@@ -236,14 +254,32 @@ impl Store {
         Ok(self.db.lock().unwrap().query_row("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs WHERE id=?1", [id], row)?)
     }
     pub fn start_studio_job(&self, recipe: &Recipe) -> Result<i64> {
+        self.queue_studio_job(recipe, None)
+    }
+    pub fn queue_studio_job(
+        &self,
+        recipe: &Recipe,
+        overrides: Option<&TaskSettings>,
+    ) -> Result<i64> {
         recipe.validate()?;
+        let settings = match overrides {
+            Some(value) => value.clone(),
+            None if recipe.uses_task_settings() => TaskSettings::defaults(
+                self.dir.parent().context("Missing preferences folder")?,
+                recipe.area(),
+            )?,
+            None => TaskSettings::default(),
+        };
+        settings.validate()?;
+        let mut request = serde_json::to_value(recipe)?;
+        request["settings"] = serde_json::to_value(settings)?;
         let db = self.db.lock().unwrap();
         db.execute(
             "INSERT INTO studio_jobs(area,title,request,state) VALUES(?1,?2,?3,'Queued')",
             params![
                 recipe.area(),
                 recipe.title(),
-                serde_json::to_string(recipe)?
+                serde_json::to_string(&request)?
             ],
         )?;
         Ok(db.last_insert_rowid())
@@ -254,7 +290,7 @@ impl Store {
     pub fn run_studio_job_with_refresh(
         &self,
         id: i64,
-        cancel: oneshot::Receiver<()>,
+        mut cancel: oneshot::Receiver<()>,
         fresh: bool,
     ) -> Result<()> {
         ensure!(
@@ -274,13 +310,15 @@ impl Store {
                     &self.db.lock().unwrap(),
                     &folder,
                     &format!(
-                        "Started run #{id} · {}\nFilter: {} · up to 64 matching functions",
+                        "Started run #{id} · {}\nFilter: {} · up to {} matching functions · {} s per function",
                         binary.display(),
                         if filter.trim().is_empty() {
                             "all"
                         } else {
                             filter.trim()
-                        }
+                        },
+                        job.settings.function_limit,
+                        job.settings.seconds_per_function
                     ),
                 )?;
             }
@@ -288,12 +326,21 @@ impl Store {
                 .enable_all()
                 .build()?;
             runtime.block_on(async {
-                tokio::select! {
+                let detail = tokio::select! {
                     biased;
-                    _ = cancel => bail!("Cancelled"),
-                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job, &folder,fresh)) =>
+                    _ = &mut cancel => bail!("Cancelled"),
+                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job, &folder, fresh)) =>
                         result.context("The tool timed out after 15 minutes")?,
+                }?;
+                if matches!(job.recipe, Recipe::Decompile { .. }) && job.settings.summarize {
+                    // Preserve access to the completed local report if Workshop exits during the summary.
+                    self.db.lock().unwrap().execute(
+                        "UPDATE studio_jobs SET state='Ready',detail=?2 WHERE id=?1",
+                        params![id, detail],
+                    )?;
+                    self.run_report_summary(&job, &folder, &detail, cancel).await;
                 }
+                Ok(detail)
             })
         };
         let result = run();
@@ -319,18 +366,47 @@ impl Store {
         }
         result.map(|_| ())
     }
+    async fn run_report_summary(
+        &self,
+        job: &Job,
+        folder: &Path,
+        detail: &str,
+        cancel: oneshot::Receiver<()>,
+    ) {
+        let request = async {
+            reports::log(
+                &self.db.lock().unwrap(),
+                folder,
+                "Requesting AI summary of the saved report.",
+            )?;
+            let inference = self.policy_inference(&job.settings.agent, "", "").await?;
+            provider::summarize_report(folder, detail, &inference).await
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancel => Err(anyhow::anyhow!("Summary cancelled.")),
+            result = tokio::time::timeout(Duration::from_secs(120), request) =>
+                result.context("Summary timed out after two minutes.").and_then(|r| r),
+        };
+        let message = match result {
+            Ok(()) => "AI summary saved.".into(),
+            Err(e) => format!("AI summary unavailable: {e:#}"),
+        };
+        let _ = reports::log(&self.db.lock().unwrap(), folder, &message);
+    }
     async fn build_asset(&self, job: &Job, folder: &Path, fresh: bool) -> Result<String> {
         let recipe = &job.recipe;
         match recipe {
             Recipe::Image { brief, style } => {
-                provider::generate_image(folder, brief, style).await?
+                let inference = self.policy_inference(&job.settings.agent, "", "").await?;
+                provider::generate_image(folder, brief, style, &inference).await?
             }
             Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,
             Recipe::Model { .. } | Recipe::ModelBrief { .. } | Recipe::Blend { .. } => {
-                return tools::model(self, folder, recipe).await;
+                return tools::model(self, folder, job).await;
             }
             Recipe::Decompile { binary, filter } => {
-                return tools::decompile(self, job.id, folder, binary, filter, fresh).await;
+                return tools::decompile(self, job, folder, binary, filter, fresh).await;
             }
         }
         let img = image::open(folder.join("image.png"))?;

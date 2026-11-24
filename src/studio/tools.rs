@@ -137,10 +137,12 @@ async fn run(program: &Path, args: &[&str], cwd: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) async fn model(store: &Store, cwd: &Path, recipe: &Recipe) -> Result<String> {
+pub(super) async fn model(store: &Store, cwd: &Path, job: &super::Job) -> Result<String> {
+    let recipe = &job.recipe;
     let blender = store.studio_tool("Blender")?;
     if let Recipe::ModelBrief { brief } = recipe {
-        provider::design_model(cwd, brief).await?;
+        let inference = store.policy_inference(&job.settings.agent, "", "").await?;
+        provider::design_model(cwd, brief, &inference).await?;
     }
     fs::write(cwd.join("model.py"), include_str!("model.py"))?;
     fs::write(cwd.join("request.json"), serde_json::to_vec(recipe)?)?;
@@ -170,12 +172,13 @@ pub(super) async fn model(store: &Store, cwd: &Path, recipe: &Recipe) -> Result<
 }
 pub(super) async fn decompile(
     store: &Store,
-    id: i64,
+    job: &super::Job,
     cwd: &Path,
     binary: &Path,
     filter: &str,
     fresh: bool,
 ) -> Result<String> {
+    let id = job.id;
     let log = |message: &str| reports::log(&store.db.lock().unwrap(), cwd, message);
     let binary = dunce::canonicalize(binary)?;
     log("Reading the input fingerprint and checking this project's archived reports.")?;
@@ -246,6 +249,8 @@ pub(super) async fn decompile(
         })
         .filter(|s| !s.is_empty())
         .collect();
+    let limit = job.settings.function_limit.to_string();
+    let seconds = job.settings.seconds_per_function.to_string();
     args.extend([
         "-Xmx2G",
         "-Djava.awt.headless=true",
@@ -266,6 +271,8 @@ pub(super) async fn decompile(
         "-postScript",
         "WorkshopGameFunctions.java",
         cwd.to_str().context("Invalid report folder")?,
+        &limit,
+        &seconds,
         "-deleteProject",
     ]);
     run(&java, &args, cwd).await?;

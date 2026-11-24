@@ -187,6 +187,15 @@ try {
     Click 'Confirm'
     Wait-For { !(Test-Path (Join-Path $env:CODEX_HOME 'skills/sample-skill')) } 'skill removal'
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
+    Click 'Tasks'
+    Wait-For { Named 'Task defaults' } 'per-task defaults'
+    Click 'fixture-fast'
+    Click 'Decompilation'
+    Wait-For { (Named 'Functions per run') -and (Named 'Generate an AI summary') } 'local analysis controls'
+    Click 'Generate an AI summary'
+    Wait-For { Named 'Maximum summary effort' } 'independent summary policy'
+    Click 'Model design'
+    Wait-For { (Named 'Maximum task effort') -and !(Named 'Generate an AI summary') } 'model design policy'
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
     Add-Type -AssemblyName System.Drawing
@@ -194,6 +203,17 @@ try {
     try {$studioImage.Save((Join-Path $root 'studio-image.png'),[Drawing.Imaging.ImageFormat]::Png)} finally {$studioImage.Dispose()}
     Click 'Game studio'
     Wait-For { Named 'Art brief' } 'image workspace'
+    Click 'Run settings'
+    Wait-For { (Named 'Use task defaults') -and (Named 'fixture-fast') } 'inherited image policy'
+    Click 'Use task defaults'
+    Wait-For { Named 'Maximum task effort' } 'editable one-run policy'
+    Click 'Any available model'
+    Click 'fixture-deep'
+    Click 'Maximum task effort' 0.5
+    Wait-For { (Named 'Maximum task effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Value -eq 1 } 'per-run high effort'
+    Click 'Back to studio'
+    Wait-For { Named 'Custom run settings' } 'override ready'
+    [void](New-Item -ItemType File (Join-Path $root 'record-inference'))
     (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Forest icon')
     [void](New-Item -ItemType File (Join-Path $root 'studio.hold'))
     Click 'Generate image'
@@ -203,6 +223,10 @@ try {
     Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
     Click 'Retry run'
     Wait-For { Named 'Attach to chat' } 'image job ready after retry'
+    $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
+    if ($request.model -ne 'fixture-deep' -or $request.effort -ne 'high') { throw 'Retry lost the image model or effort override' }
+    Remove-Item -LiteralPath (Join-Path $root 'record-inference')
+    if (!(Named 'Run settings')) { throw 'One-run override was not consumed' }
     (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('no matching title')
     Wait-For { Named 'No matching assets.' } 'filtered project library'
     (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')

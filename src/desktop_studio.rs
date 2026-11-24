@@ -1,4 +1,4 @@
-use super::{App, Desk, Studio, StudioItem, Update};
+use super::{App, Desk, Studio, StudioItem, TaskControls, Update};
 use anyhow::{Context, Result, bail, ensure};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
@@ -81,6 +81,11 @@ impl App {
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
         let jobs = store.find_studio_jobs(&studio.get_area(), &studio.get_query(), false, None)?;
+        studio.set_custom_task(
+            self.task_overrides
+                .borrow()
+                .contains_key(studio.get_area().as_str()),
+        );
         let rows: Vec<_> = jobs.iter().map(item).collect();
         studio.set_jobs(ModelRc::new(VecModel::from(rows)));
         let selected = jobs
@@ -94,6 +99,7 @@ impl App {
         let studio = ui.global::<Studio>();
         let next = job.map_or(0, |j| j.id);
         if i64::from(studio.get_selected().id) != next {
+            studio.set_show_summary(false);
             studio.set_show_log(job.is_some_and(|j| j.state != "Ready"));
         }
         if let Some(report) = job.filter(|j| j.recipe.area() == "Ghidra") {
@@ -108,10 +114,18 @@ impl App {
         }
         studio.set_selected(job.map(item).unwrap_or_default());
         studio.set_code("".into());
+        studio.set_ai_summary("".into());
         studio.set_preview(Default::default());
         if let Some(job) = job.filter(|j| j.state == "Ready") {
             let folder = job.folder(store);
             if job.recipe.area() == "Ghidra" {
+                if job.settings.summarize {
+                    let summary =
+                        fs::read_to_string(folder.join("ai-summary.md")).unwrap_or_else(|_| {
+                            "Open the run log for the status of this summary.".into()
+                        });
+                    studio.set_ai_summary(summary.into());
+                }
                 let mut bytes = Vec::new();
                 let file = fs::File::open(folder.join(job.filename()))?;
                 file.take(96 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -153,14 +167,20 @@ impl App {
         }
         let selected = || store.studio_job(studio.get_selected().id.into());
         match cmd {
+            "edit-task" => {
+                ui.global::<TaskControls>()
+                    .invoke_open(true, studio.get_area());
+                studio.set_editing_run(true);
+            }
             "log-tick" => {
                 let job = selected()?;
-                if job.state == "Running" && studio.get_selected().state == "Queued" {
+                if studio.get_selected().state.as_str() != job.state {
                     self.refresh_studio(&store, Some(job.id))?;
                 }
                 let log = workshop::studio::reports::log_tail(&job, &store)?;
-                if job.state == "Running"
-                    && let Some((_, event)) = log.lines().last().and_then(|s| s.split_once("  "))
+                if let Some((_, event)) = log.lines().last().and_then(|s| s.split_once("  "))
+                    && (job.state == "Running"
+                        || (studio.get_working() && event.starts_with("Requesting AI summary")))
                 {
                     studio.set_message(event.into());
                 }
@@ -190,14 +210,29 @@ impl App {
                     !studio.get_working(),
                     "Wait for the active run or cancel it."
                 );
-                let request = match cmd {
-                    "retry" | "fresh" => selected()?.recipe,
-                    "rebuild" => Recipe::Blend {
+                let previous = if matches!(cmd, "retry" | "fresh") {
+                    Some(selected()?)
+                } else {
+                    None
+                };
+                let request = match &previous {
+                    Some(job) => job.recipe.clone(),
+                    None if cmd == "rebuild" => Recipe::Blend {
                         source: selected()?.folder(&store).join("model.blend"),
                     },
                     _ => recipe(&studio)?,
                 };
-                let id = store.start_studio_job(&request)?;
+                let settings = previous.as_ref().map(|j| j.settings.clone()).or_else(|| {
+                    if request.uses_task_settings() {
+                        self.task_overrides.borrow().get(request.area()).cloned()
+                    } else {
+                        None
+                    }
+                });
+                let id = store.queue_studio_job(&request, settings.as_ref())?;
+                if cmd == "run" && request.uses_task_settings() {
+                    self.task_overrides.borrow_mut().remove(request.area());
+                }
                 studio.set_query("".into());
                 let (stop, cancel) = tokio::sync::oneshot::channel();
                 self.studio_cancel.replace(Some(stop));
@@ -218,46 +253,55 @@ impl App {
                 }
                 studio.set_message("Cancelling…".into());
             }
-            "reuse" => match selected()?.recipe {
-                Recipe::Image { brief, style } => {
-                    if let Some(i) = IMAGE_STYLES.iter().position(|s| *s == style) {
-                        studio.set_image_mode(i as i32);
-                    } else {
-                        studio.set_custom_style(style.into());
-                        studio.set_image_mode(4);
+            "reuse" => {
+                let job = selected()?;
+                if job.recipe.uses_task_settings() {
+                    self.task_overrides
+                        .borrow_mut()
+                        .insert(job.recipe.area().into(), job.settings);
+                    studio.set_custom_task(true);
+                }
+                match job.recipe {
+                    Recipe::Image { brief, style } => {
+                        if let Some(i) = IMAGE_STYLES.iter().position(|s| *s == style) {
+                            studio.set_image_mode(i as i32);
+                        } else {
+                            studio.set_custom_style(style.into());
+                            studio.set_image_mode(4);
+                        }
+                        studio.set_brief(brief.into());
                     }
-                    studio.set_brief(brief.into());
+                    Recipe::Texture { material, seed } => {
+                        studio.set_image_mode(3);
+                        studio.set_material(match material.as_str() {
+                            "Basalt" => 1,
+                            "Sand" => 2,
+                            _ => 0,
+                        });
+                        studio.set_seed(seed.to_string().into());
+                    }
+                    Recipe::ModelBrief { brief } => {
+                        studio.set_model_mode(0);
+                        studio.set_model_brief(brief.into());
+                    }
+                    Recipe::Model { template, name } => {
+                        studio.set_model_mode(match template.as_str() {
+                            "Barrel" => 2,
+                            "Planter" => 3,
+                            _ => 1,
+                        });
+                        studio.set_model_name(name.into());
+                    }
+                    Recipe::Blend { source } => {
+                        studio.set_model_mode(4);
+                        studio.set_scene_path(source.to_string_lossy().as_ref().into());
+                    }
+                    Recipe::Decompile { binary, filter } => {
+                        studio.set_binary_path(binary.to_string_lossy().as_ref().into());
+                        studio.set_filter(filter.into());
+                    }
                 }
-                Recipe::Texture { material, seed } => {
-                    studio.set_image_mode(3);
-                    studio.set_material(match material.as_str() {
-                        "Basalt" => 1,
-                        "Sand" => 2,
-                        _ => 0,
-                    });
-                    studio.set_seed(seed.to_string().into());
-                }
-                Recipe::ModelBrief { brief } => {
-                    studio.set_model_mode(0);
-                    studio.set_model_brief(brief.into());
-                }
-                Recipe::Model { template, name } => {
-                    studio.set_model_mode(match template.as_str() {
-                        "Barrel" => 2,
-                        "Planter" => 3,
-                        _ => 1,
-                    });
-                    studio.set_model_name(name.into());
-                }
-                Recipe::Blend { source } => {
-                    studio.set_model_mode(4);
-                    studio.set_scene_path(source.to_string_lossy().as_ref().into());
-                }
-                Recipe::Decompile { binary, filter } => {
-                    studio.set_binary_path(binary.to_string_lossy().as_ref().into());
-                    studio.set_filter(filter.into());
-                }
-            },
+            }
             "pick" => {
                 let dialog = rfd::FileDialog::new().set_directory(&store.project);
                 if studio.get_area() == "Models" {

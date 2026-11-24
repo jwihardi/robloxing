@@ -21,6 +21,8 @@ public class WorkshopGameFunctions extends GhidraScript {
     @Override public void run() throws Exception {
         Path script = getSourceFile().getFile(false).toPath().getParent();
         Path dir = Path.of(getScriptArgs()[0]);
+        int limit = Integer.parseInt(getScriptArgs()[1]);
+        int seconds = Integer.parseInt(getScriptArgs()[2]);
         String filter = Files.readString(script.resolve("filter.txt")).trim().toLowerCase(Locale.ROOT);
         DecompInterface decompiler = new DecompInterface();
         int written = 0, skipped = 0;
@@ -39,12 +41,12 @@ public class WorkshopGameFunctions extends GhidraScript {
             while (functions.hasNext() && !monitor.isCancelled()) {
                 var function = functions.next();
                 if (function.isExternal() || !function.getName().toLowerCase(Locale.ROOT).contains(filter)) continue;
-                if (written + skipped == 64) { reachedLimit = true; break; }
+                if (written + skipped == limit) { reachedLimit = true; break; }
                 String name = function.getName().replace('\t',' ').replace('\n',' ').replace('\r',' ');
                 String label = name + " @ " + function.getEntryPoint();
                 event(log, "Reading " + label);
                 long started = System.nanoTime();
-                var result = decompiler.decompileFunction(function, 12, monitor);
+                var result = decompiler.decompileFunction(function, seconds, monitor);
                 if (!result.decompileCompleted() || result.getDecompiledFunction() == null) {
                     skipped++;
                     event(log, "Skipped " + label + " · " + result.getErrorMessage());
@@ -58,7 +60,7 @@ public class WorkshopGameFunctions extends GhidraScript {
                 event(log, "Saved " + label + " · " + entry.length + " bytes in " + (System.nanoTime()-started)/1_000_000 + " ms");
             }
             monitor.checkCancelled();
-            event(log, written + " saved, " + skipped + " unavailable" + (reachedLimit ? " · 64-function limit reached" : ""));
+            event(log, written + " saved, " + skipped + " unavailable" + (reachedLimit ? " · " + limit + "-function limit reached" : ""));
         } finally {
             decompiler.dispose();
         }
@@ -67,6 +69,6 @@ public class WorkshopGameFunctions extends GhidraScript {
             ? "No matching functions could be decompiled. Try a different name or leave the filter empty."
             : "C pseudocode · " + written + " function" + (written == 1 ? "" : "s")
                 + (skipped == 0 ? "" : " · " + skipped + " unavailable")
-                + (reachedLimit ? " · 64-function limit reached" : ""));
+                + (reachedLimit ? " · " + limit + "-function limit reached" : ""));
     }
 }

@@ -55,11 +55,13 @@ pub(super) fn reuse(
         let db = store.db.lock().unwrap();
         let mut stmt = db.prepare(
             "SELECT r.job,r.report_sha,coalesce(r.reused_from,r.job)
-            FROM decompile_records r JOIN studio_jobs j ON j.id=r.job
+            FROM decompile_records r JOIN studio_jobs j ON j.id=r.job JOIN studio_jobs target ON target.id=?4
             WHERE r.input_sha=?1 AND r.filter_key=?2 AND r.format=?3 AND j.state='Ready'
+            AND coalesce(json_extract(j.request,'$.settings.function_limit'),64)=coalesce(json_extract(target.request,'$.settings.function_limit'),64)
+            AND coalesce(json_extract(j.request,'$.settings.seconds_per_function'),12)=coalesce(json_extract(target.request,'$.settings.seconds_per_function'),12)
             ORDER BY r.reused_from IS NOT NULL,r.job DESC",
         )?;
-        stmt.query_map(params![input_sha, filter, FORMAT], |r| {
+        stmt.query_map(params![input_sha, filter, FORMAT, id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -336,7 +338,8 @@ impl Archive {
                 });
             }
             "tool-log" => "tool.log",
-            _ => anyhow::bail!("Choose report, functions, log or tool-log."),
+            "summary" => "ai-summary.md",
+            _ => anyhow::bail!("Choose report, functions, summary, log or tool-log."),
         };
         let file = File::open(dir.join(source))
             .with_context(|| format!("Run {id} has no saved {source}."))?;
@@ -429,6 +432,11 @@ mod tests {
         fs::write(first.join("functions.c"), code)?;
         {
             let db = store.db.lock().unwrap();
+            // Old builds stored just the recipe, without a settings snapshot.
+            db.execute(
+                "UPDATE studio_jobs SET request=?1 WHERE id=?2",
+                params![serde_json::to_string(&recipe)?, original],
+            )?;
             db.execute(
                 "UPDATE studio_jobs SET state='Ready',detail='1 function' WHERE id=?",
                 [original],
@@ -470,6 +478,28 @@ mod tests {
             )?
             .is_none()
         );
+        use crate::studio::settings::TaskSettings;
+        for budget in [
+            TaskSettings {
+                function_limit: 1,
+                ..Default::default()
+            },
+            TaskSettings {
+                seconds_per_function: 1,
+                ..Default::default()
+            },
+        ] {
+            let changed = store.queue_studio_job(&recipe, Some(&budget))?;
+            assert!(reuse(&store, changed, dest.path(), &input, "tile")?.is_none());
+        }
+        let summarized = store.queue_studio_job(
+            &recipe,
+            Some(&TaskSettings {
+                summarize: true,
+                ..Default::default()
+            }),
+        )?;
+        assert!(reuse(&store, summarized, dest.path(), &input, "tile")?.is_some());
         Ok(())
     }
 }

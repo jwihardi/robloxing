@@ -44,15 +44,19 @@ Open **Game studio** in the project sidebar. Each tab keeps a searchable history
 |---|---|---|
 | Images | Describe concept art, an inventory icon or a sprite sheet. **Seamless tile** generates a 256 × 256 PNG from a material and repeatable seed. | Prompted images use the signed-in Codex CLI’s image generation capability. Tiles run locally. |
 | Models | Generate an editable prop, choose a crystal, barrel or planter starter, or import a local Blender scene. Select **Inspect model** on a finished preview to explore the exported mesh. **Open in Blender** opens its editable source. **Re-export** saves your edits as a new version. | Creating and re-exporting models uses Blender with its glTF exporter. **From brief** also uses Codex. Inspection runs inside Workshop. |
-| Ghidra | Choose a compiled game module and optionally filter its functions by name. Inspect the recovered C pseudocode and save the report. Each run attempts up to 64 matching functions. | An extracted Ghidra distribution and its supported JDK on PATH or in `JAVA_HOME`. |
+| Ghidra | Choose a compiled game module and optionally filter its functions by name. Inspect the recovered C pseudocode and save the report. By default, each run attempts 64 matching functions with up to 12 seconds per function. | An extracted Ghidra distribution and its supported JDK on PATH or in `JAVA_HOME`. |
 
 In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/− also work. **Wireframe** shows triangle edges. **Overlaps** highlights coplanar faces that share surface area in orange, even behind another surface. The inspector reads static geometry and base material colors from GLB exports up to 64 MiB and 150,000 triangles. Dense models can show a partial overlap count when the comparison budget is reached.
+
+**Settings → Tasks** saves independent defaults for image generation, 3D model design, and decompilation across projects. For the two design tasks, choose the allowed Codex models and maximum reasoning effort. Select one model to use it every time. In **Game studio → Run settings**, turn off **Use task defaults** to customize the next run. Retrying a run or reusing its settings restores its original choices.
+
+Decompilation runs locally. Set **Functions per run** (1–256) and **Seconds per function** (1–120). Turn on **Generate an AI summary** to send up to 48 KiB of saved pseudocode to Codex, using the decompilation task’s own model and effort settings. Open **Summary** beside **Report** to read it. If Codex is unavailable, the pseudocode stays accessible and **Run log** records the summary error.
 
 Use **Locate Blender** to select the executable or **Locate Ghidra** to select the installation root. Workshop remembers these choices across projects. You can also set `WORKSHOP_BLENDER` to an executable and `WORKSHOP_GHIDRA` to an installation root. Standard Windows and Steam installations of Blender are detected automatically.
 
 In **Ghidra**, search the project history by binary name, function, entry point, filter or input SHA-256. **Run log** shows the progress of the selected run, including which functions were saved or skipped, any failure and whether Workshop reused an earlier result. **Report** opens the saved pseudocode. Both remain available after restarting Workshop or moving the original binary. Older runs retain their original tool logs.
 
-Repeating a request for the same binary contents and normalized filter reuses a completed report after checking its SHA-256. The new run records the source run ID. **Run fresh** runs the selected analysis again, for example after updating Ghidra. Reports created before input fingerprints were recorded remain searchable and readable.
+Repeating a request for the same binary contents, normalized filter, function limit and per-function timeout reuses a completed report after checking its SHA-256. The new run records the source run ID. **Run fresh** runs the selected analysis again, for example after updating Ghidra. Reports created before input fingerprints were recorded remain searchable and readable.
 
 **Save as…** exports the PNG, GLB or C report to a destination you choose. **Attach to chat** adds the selected file to the composer for your next message. In a new chat, you can also ask the lead to find a finished image or model by title and use it in a reviewable project change. Studio originals stay in the project’s Workshop data folder.
 
@@ -71,13 +75,14 @@ $cli = ".\target\debug\workshop-cli.exe"
 
 The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
 
-`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. The read-only commands below also work while the desktop project is open. Codex leads and workers can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
+`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. Set `--function-limit` and `--seconds-per-function` to change local limits. Use `--summary` or `--summary=false` to override the saved summary preference. Image generation, prop design and enabled summaries accept `--model` and `--max-effort` for a single run. The read-only commands below also work while the desktop project is open. Codex leads and workers can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
 
 ```text
 workshop-cli --project . studio reports tile_cost
 workshop-cli --project . studio read-report 12 --part functions
 workshop-cli --project . studio read-report 12 --offset 480
 workshop-cli --project . studio read-report 12 --part log
+workshop-cli --project . studio read-report 12 --part summary
 ```
 
 Search returns run IDs and up to eight matching function locations per run. Use the saved byte offset to jump to a function, `next_offset` to continue a long report, and `next_before` with `reports --before` for older runs. The full Ghidra process output is available under `--part tool-log` for runs that launched Ghidra.

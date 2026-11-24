@@ -76,15 +76,28 @@ enum Action {
         command: Vec<String>,
     },
 }
+#[derive(clap::Args)]
+struct StudioAgentOptions {
+    /// Select a single Codex model for this run.
+    #[arg(long)]
+    model: Option<String>,
+    /// Maximum Codex reasoning effort for this run.
+    #[arg(long)]
+    max_effort: Option<String>,
+}
 #[derive(Subcommand)]
 enum StudioAction {
     Prop {
         brief: String,
+        #[command(flatten)]
+        agent: StudioAgentOptions,
     },
     Image {
         brief: String,
         #[arg(long, default_value = "Concept art")]
         style: String,
+        #[command(flatten)]
+        agent: StudioAgentOptions,
     },
     Texture {
         material: String,
@@ -105,6 +118,15 @@ enum StudioAction {
         /// Run Ghidra even when an identical archived report exists.
         #[arg(long)]
         fresh: bool,
+        #[arg(long)]
+        function_limit: Option<u16>,
+        #[arg(long)]
+        seconds_per_function: Option<u16>,
+        /// Generate an AI summary, or use --summary=false to skip it.
+        #[arg(long,num_args=0..=1,require_equals=true,default_missing_value="true")]
+        summary: Option<bool>,
+        #[command(flatten)]
+        agent: StudioAgentOptions,
     },
     /// Search archived runs by binary, filter, fingerprint or function.
     Reports {
@@ -116,7 +138,7 @@ enum StudioAction {
     /// Read saved pseudocode or logs. Offsets are bytes.
     ReadReport {
         id: i64,
-        #[arg(long,default_value="report",value_parser=["report","functions","log","tool-log"])]
+        #[arg(long,default_value="report",value_parser=["report","functions","log","tool-log","summary"])]
         part: String,
         #[arg(long, default_value_t = 0)]
         offset: u64,
@@ -129,11 +151,49 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
     let home = data_dir()?;
     let archive = || Archive::open(&Store::project_data_dir(project, &home)?);
     let fresh = matches!(action, StudioAction::Decompile { fresh: true, .. });
+    let agent = match &action {
+        StudioAction::Image { agent, .. } => Some(("Images", agent)),
+        StudioAction::Prop { agent, .. } => Some(("Models", agent)),
+        StudioAction::Decompile { agent, .. } => Some(("Ghidra", agent)),
+        _ => None,
+    };
+    let mut settings = None;
+    if let Some((area, agent)) = agent {
+        let mut value = workshop::studio::settings::TaskSettings::defaults(&home, area)?;
+        if let StudioAction::Decompile {
+            function_limit,
+            seconds_per_function,
+            summary,
+            ..
+        } = &action
+        {
+            if let Some(n) = function_limit {
+                value.function_limit = *n;
+            }
+            if let Some(n) = seconds_per_function {
+                value.seconds_per_function = *n;
+            }
+            if let Some(enabled) = summary {
+                value.summarize = *enabled;
+            }
+            anyhow::ensure!(
+                value.summarize || (agent.model.is_none() && agent.max_effort.is_none()),
+                "Enable --summary to use a Codex model for a decompilation."
+            );
+        }
+        if let Some(model) = &agent.model {
+            value.agent.models = vec![model.clone()];
+        }
+        if let Some(effort) = &agent.max_effort {
+            value.agent.max_effort = effort.clone();
+        }
+        settings = Some(value);
+    }
     let recipe = match action {
-        StudioAction::Image { brief, style } => Recipe::Image { brief, style },
+        StudioAction::Image { brief, style, .. } => Recipe::Image { brief, style },
         StudioAction::Texture { material, seed } => Recipe::Texture { material, seed },
         StudioAction::Model { template, name } => Recipe::Model { template, name },
-        StudioAction::Prop { brief } => Recipe::ModelBrief { brief },
+        StudioAction::Prop { brief, .. } => Recipe::ModelBrief { brief },
         StudioAction::Blend { source } => Recipe::Blend {
             source: dunce::canonicalize(source)?,
         },
@@ -165,7 +225,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
         }
     };
     let store = Store::open(project, &home)?;
-    let id = store.start_studio_job(&recipe)?;
+    let id = store.queue_studio_job(&recipe, settings.as_ref())?;
     let (_keep, cancel) = tokio::sync::oneshot::channel();
     if recipe.area() == "Ghidra" {
         let path = store.studio_job(id)?.folder(&store).join("activity.log");

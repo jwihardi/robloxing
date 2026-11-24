@@ -22,6 +22,10 @@ export global Studio {
     in property <StudioItem> selected;
     in property <image> preview;
     in property <string> code;
+    in property <string> ai-summary;
+    in-out property <bool> show-summary;
+    in-out property <bool> editing-run;
+    in property <bool> custom-task;
     in property <string> run-log;
     in-out property <bool> show-log;
     in property <string> message;
@@ -204,6 +208,10 @@ export component StudioPage inherits Rectangle {
                     root.tile ? Studio.seed != "" : root.images ? Studio.brief != "" : Studio.model-mode == 0 ? Studio.model-brief != "" : Studio.model-name != "");
                 activate => {Studio.command(Studio.working ? "cancel" : "run");} }
             Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            if root.binary || (root.images && !root.tile) || (root.models && Studio.model-mode==0): Action {
+                label:Studio.custom-task ? "Custom run settings" : "Run settings"; width:Studio.custom-task ? 165px : 120px;
+                glyph:"\u{e713}"; activate=>{Studio.command("edit-task");}
+            }
         }
         HorizontalLayout { height: 32px; spacing: 10px;
             Text { text: root.images ? "Project images" : root.models ? "Project models" : "Decompilations";
@@ -239,12 +247,13 @@ export component StudioPage inherits Rectangle {
                 }
                 if root.binary: VerticalLayout { padding: 6px; spacing: 5px;
                     HorizontalLayout { height: 30px; spacing: 4px; alignment: start;
-                        Action { label: "Report"; width: 66px; height: 30px; enabled: root.ready; selected: root.ready && !Studio.show-log; activate => {Studio.show-log=false;} }
-                        Action { label: "Run log"; width: 74px; height: 30px; selected: Studio.show-log || !root.ready; activate => {Studio.show-log=true;} }
+                        Action { label: "Report"; width: 66px; height: 30px; enabled: root.ready; selected: root.ready && !Studio.show-log && !Studio.show-summary; activate => {Studio.show-log=false;Studio.show-summary=false;} }
+                        if Studio.ai-summary!="": Action {label:"Summary";width:80px;height:30px;selected:Studio.show-summary;activate=>{Studio.show-log=false;Studio.show-summary=true;}}
+                        Action { label: "Run log"; width: 74px; height: 30px; selected: Studio.show-log || !root.ready; activate => {Studio.show-log=true;Studio.show-summary=false;} }
                     }
-                    TextEdit { text: (Studio.show-log || !root.ready) ? Studio.run-log : Studio.code;
-                        read-only: true; font-family: "Consolas"; font-size: 12px; vertical-stretch: 1;
-                        accessible-label: (Studio.show-log || !root.ready) ? "Decompilation log" : "Recovered functions"; }
+                    TextEdit { text: (Studio.show-log || !root.ready) ? Studio.run-log : Studio.show-summary ? Studio.ai-summary : Studio.code;
+                        read-only: true; font-family: Studio.show-summary ? "Segoe UI" : "Consolas"; font-size: Studio.show-summary ? 14px : 12px; vertical-stretch: 1;
+                        accessible-label: (Studio.show-log || !root.ready) ? "Decompilation log" : Studio.show-summary ? "AI summary" : "Recovered functions"; }
                 }
                 if !root.ready && !root.binary: Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px;
                     text: Studio.selected.detail != "" ? Studio.selected.detail : Studio.selected.state; wrap: word-wrap; overflow: elide; vertical-alignment: center; color: Theme.muted; font-size: 13px; }

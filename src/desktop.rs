@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod capture;
 mod desktop_studio;
+mod desktop_tasks;
 mod inspector;
 mod preferences;
 use anyhow::{Context, Result};
@@ -24,7 +25,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk, Studio, StudioItem, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
     StudioFinished(PathBuf, i64, Result<()>),
@@ -62,6 +63,8 @@ impl Updates {
 }
 struct App {
     inspector: RefCell<Option<inspector::Inspector>>,
+    task_overrides:
+        RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
     studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -241,6 +244,75 @@ fn picker(
         efforts: ModelRc::new(VecModel::from(efforts)),
         model_index: model_index as i32,
         effort_index,
+    }
+}
+fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyChoices {
+    let mut models: Vec<_> = catalog.models.iter().map(|m| m.model.clone()).collect();
+    for id in &policy.models {
+        if !models.contains(id) {
+            models.push(id.clone());
+        }
+    }
+    let allowed = if policy.models.is_empty() {
+        "Any available model".into()
+    } else {
+        policy
+            .models
+            .iter()
+            .map(|id| model_label(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rows = ModelRc::new(VecModel::from(
+        models
+            .into_iter()
+            .map(|id| PolicyModel {
+                selected: policy.models.contains(&id),
+                label: model_label(&id).into(),
+                value: id.into(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let mut efforts: Vec<_> = EFFORTS
+        .iter()
+        .copied()
+        .filter(|level| {
+            *level == policy.max_effort
+                || catalog
+                    .models
+                    .iter()
+                    .filter(|m| policy.models.is_empty() || policy.models.contains(&m.model))
+                    .any(|m| {
+                        m.supported_reasoning_efforts
+                            .iter()
+                            .any(|e| e.reasoning_effort == *level)
+                    })
+        })
+        .map(|e| PickerOption {
+            value: e.into(),
+            label: if e == "none" {
+                "No reasoning".into()
+            } else if e == "xhigh" {
+                "Extra high".into()
+            } else {
+                capitalized(e).into()
+            },
+        })
+        .collect();
+    efforts.push(PickerOption {
+        value: "".into(),
+        label: "None".into(),
+    });
+    let cap_index = efforts
+        .iter()
+        .position(|e| e.value == policy.max_effort.as_str())
+        .unwrap_or(efforts.len() - 1) as i32;
+    PolicyChoices {
+        all_models: policy.models.is_empty(),
+        allowed_names: allowed.into(),
+        models: rows,
+        levels: ModelRc::new(VecModel::from(efforts)),
+        cap_index,
     }
 }
 fn title(state: &str) -> &str {
@@ -460,69 +532,12 @@ impl App {
             Some(p) => p,
             None => store.worker_defaults()?,
         };
-        let mut models: Vec<_> = catalog.models.iter().map(|m| m.model.clone()).collect();
-        for id in &policy.models {
-            if !models.contains(id) {
-                models.push(id.clone());
-            }
-        }
-        ui.set_all_models(policy.models.is_empty());
-        let allowed = if policy.models.is_empty() {
-            "Any available model".into()
-        } else {
-            policy
-                .models
-                .iter()
-                .map(|id| model_label(id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        ui.set_allowed_model_names(allowed.into());
-        ui.set_policy_models(ModelRc::new(VecModel::from(
-            models
-                .into_iter()
-                .map(|id| PolicyModel {
-                    selected: policy.models.contains(&id),
-                    label: model_label(&id).into(),
-                    value: id.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
-        let mut efforts: Vec<_> = EFFORTS
-            .iter()
-            .copied()
-            .filter(|level| {
-                *level == policy.max_effort
-                    || catalog
-                        .models
-                        .iter()
-                        .filter(|m| policy.models.is_empty() || policy.models.contains(&m.model))
-                        .any(|m| {
-                            m.supported_reasoning_efforts
-                                .iter()
-                                .any(|e| e.reasoning_effort == *level)
-                        })
-            })
-            .map(|e| PickerOption {
-                value: e.into(),
-                label: if e == "xhigh" {
-                    "Extra high".into()
-                } else {
-                    capitalized(e).into()
-                },
-            })
-            .collect();
-        efforts.push(PickerOption {
-            value: "".into(),
-            label: "None".into(),
-        });
-        ui.set_cap_index(
-            efforts
-                .iter()
-                .position(|e| e.value == policy.max_effort.as_str())
-                .unwrap_or(efforts.len() - 1) as i32,
-        );
-        ui.set_cap_levels(ModelRc::new(VecModel::from(efforts)));
+        let choices = policy_choices(&policy, catalog);
+        ui.set_all_models(choices.all_models);
+        ui.set_allowed_model_names(choices.allowed_names);
+        ui.set_policy_models(choices.models);
+        ui.set_cap_index(choices.cap_index);
+        ui.set_cap_levels(choices.levels);
         Ok(())
     }
     fn change_policy(&self, field: &str, value: &str) -> Result<()> {
@@ -626,6 +641,11 @@ impl App {
         self.settings_rows.borrow_mut().clear();
         self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
+        if tab == "Tasks" {
+            self.settings_read.take();
+            ui.set_settings_status("".into());
+            return;
+        }
         let p = preferences::Provider::from_label(&ui.get_settings_provider());
         let browse = ui.get_browse_plugins();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
@@ -915,6 +935,7 @@ impl App {
                     }
                 }
                 Update::Opened(store) => {
+                    self.task_overrides.borrow_mut().clear();
                     self.close_inspector();
                     self.studio_cancel.take();
                     let studio = ui.global::<Studio>();
@@ -950,23 +971,31 @@ impl App {
                     ui.set_draft("".into());
                 }
                 Update::Models(project, result) => {
-                    if let Some(store) = self
-                        .store
-                        .borrow()
-                        .as_ref()
-                        .filter(|s| s.project == project)
-                    {
+                    let slot = self.store.borrow();
+                    let store = slot.as_ref();
+                    if store.map_or_else(
+                        || data_dir().is_ok_and(|home| home == project),
+                        |s| s.project == project,
+                    ) {
                         match result {
                             Ok(catalog) => {
-                                store.cache_worker_catalog(&catalog);
+                                if let Some(store) = store {
+                                    store.cache_worker_catalog(&catalog);
+                                }
                                 self.catalog.replace(catalog);
                                 ui.set_catalog_ready(true);
                                 ui.set_catalog_status("".into());
-                                self.render_settings(store)?;
+                                if let Some(store) = store {
+                                    self.render_settings(store)?;
+                                }
+                                if ui.global::<Studio>().get_editing_run()
+                                    || (ui.get_settings_open() && ui.get_settings_tab() == "Tasks")
+                                {
+                                    self.task_settings("open", "")?;
+                                }
                             }
                             Err(e) => ui.set_catalog_status(
-                                format!("Couldn’t load Codex models. Refresh in Subagents. {e}")
-                                    .into(),
+                                format!("Couldn’t load Codex models. {e}").into(),
                             ),
                         }
                     }
@@ -1213,6 +1242,7 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
         inspector: Default::default(),
+        task_overrides: Default::default(),
         studio_cancel: Default::default(),
         settings_generation: Default::default(),
         settings_read: Default::default(),
@@ -1240,6 +1270,7 @@ fn main() -> Result<()> {
         session: Default::default(),
     });
     desktop_studio::connect(&ui, &app);
+    desktop_tasks::connect(&ui, &app);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();
@@ -1320,6 +1351,8 @@ fn main() -> Result<()> {
     ui.on_reload_models(move || {
         if let Some(store) = a.store.borrow().as_ref() {
             a.load_models(store.project.clone());
+        } else if let Ok(home) = data_dir() {
+            a.load_models(home);
         }
     });
     ui.set_turns(app.turns.clone().into());

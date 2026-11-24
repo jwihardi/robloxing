@@ -26,17 +26,20 @@ impl WorkerPolicy {
         Ok(())
     }
 
-    fn resolve(&self, task: &Assignment, catalog: &provider::Catalog) -> Result<(String, String)> {
+    fn resolve(
+        &self,
+        model_id: &str,
+        effort: &str,
+        catalog: &provider::Catalog,
+    ) -> Result<(String, String)> {
         self.validate()?;
         let allowed = |id: &str| self.models.is_empty() || self.models.iter().any(|m| m == id);
         let rank = |value: &str| EFFORTS.iter().position(|&e| e == value);
         let cap = rank(&self.max_effort).unwrap_or(usize::MAX);
-        let requested = if task.effort.is_empty() {
+        let requested = if effort.is_empty() {
             cap
         } else {
-            rank(&task.effort)
-                .context("Unknown subagent reasoning effort")?
-                .min(cap)
+            rank(effort).context("Unknown reasoning effort")?.min(cap)
         };
         let eligible = |m: &provider::CatalogModel| {
             allowed(&m.model)
@@ -45,28 +48,25 @@ impl WorkerPolicy {
                         .iter()
                         .any(|e| rank(&e.reasoning_effort).is_some_and(|r| r <= requested)))
         };
-        let model = if task.model.is_empty() {
+        let model = if model_id.is_empty() {
             catalog
                 .models
                 .iter()
                 .find(|m| m.model == catalog.default_model && eligible(m))
                 .or_else(|| catalog.models.iter().find(|m| eligible(m)))
-                .context(
-                    "No available subagent model matches the allowed models and effort limit",
-                )?
+                .context("No available model matches the allowed models and effort limit")?
         } else {
             ensure!(
-                allowed(&task.model),
-                "Model {} is outside the allowed subagent models",
-                task.model
+                allowed(model_id),
+                "Model {model_id} is outside the allowed models"
             );
             catalog
                 .models
                 .iter()
-                .find(|m| m.model == task.model)
-                .with_context(|| format!("Subagent model {} is unavailable", task.model))?
+                .find(|m| m.model == model_id)
+                .with_context(|| format!("Model {model_id} is unavailable"))?
         };
-        if self.max_effort.is_empty() && task.effort.is_empty() {
+        if self.max_effort.is_empty() && effort.is_empty() {
             return Ok((model.model.clone(), String::new()));
         }
         let effort = model
@@ -174,9 +174,18 @@ impl Store {
         policy: &WorkerPolicy,
         task: &Assignment,
     ) -> Result<(String, String)> {
+        self.policy_inference(policy, &task.model, &task.effort)
+            .await
+    }
+    pub(crate) async fn policy_inference(
+        &self,
+        policy: &WorkerPolicy,
+        model: &str,
+        effort: &str,
+    ) -> Result<(String, String)> {
         if policy.max_effort.is_empty()
-            && task.effort.is_empty()
-            && task.model.is_empty()
+            && effort.is_empty()
+            && model.is_empty()
             && policy.models.is_empty()
         {
             return Ok((String::new(), String::new()));
@@ -185,6 +194,6 @@ impl Store {
         if cache.is_none() {
             *cache = Some(provider::worker_catalog(&self.project).await?);
         }
-        policy.resolve(task, cache.as_ref().unwrap())
+        policy.resolve(model, effort, cache.as_ref().unwrap())
     }
 }

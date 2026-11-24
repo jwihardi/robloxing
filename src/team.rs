@@ -377,7 +377,7 @@ pub(crate) fn tools(worker: bool) -> Value {
     let strings = json!({"type":"array","items":string});
     let mut available = vec![
         json!({"type":"function","name":"workshop_find_reports","description":"Search this project's saved decompilation history before requesting another analysis. Search by binary name, filter, symbol, entry point or input SHA-256. Each matching function lists its report byte offset, address and name. Empty query lists recent runs.","inputSchema":{"type":"object","properties":{"query":string,"before":{"type":"integer","description":"Optional next_before from the preceding page."}},"required":["query"],"additionalProperties":false}}),
-        json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
+        json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the optional AI summary, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log","summary"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
     ];
     if worker {
         return Value::Array(available);
