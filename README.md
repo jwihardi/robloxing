@@ -32,7 +32,7 @@ Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screensho
 
 ## Themes
 
-Open **Settings → Appearance** and select a theme to apply it across Workshop. Choose **New theme** to start with the current palette. Give it a name, paste color declarations or choose **Load file…** to read a local CSS file. The preview updates as you edit. **Save theme** applies it and remembers it across projects and restarts. Select a saved custom theme and choose **Edit theme** to change or remove it.
+Open **Settings → Appearance** and select **Workshop Dark**, **Nord**, **Catppuccin Mocha**, or **Solarized Light** to apply it across Workshop. Choose **New theme** to start with the current palette. Give it a name, paste color declarations or choose **Load file…** to read a local CSS file. The preview updates as you edit. **Save theme** applies it and remembers it across projects and restarts. Select a saved custom theme and choose **Edit theme** to change or remove it.
 
 Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Paste a single `:root` block or the declarations inside it. You can start with just a few overrides. Missing variables inherit Workshop Dark. The default file lists every supported color, including surfaces, text, focus accents and usage meters. [Full theme template](themes/workshop-dark.css)
 
