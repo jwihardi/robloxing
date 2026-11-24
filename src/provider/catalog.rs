@@ -27,7 +27,12 @@ pub struct Catalog {
     pub default_effort: String,
 }
 
-async fn request(io: &mut Connection, id: i32, method: &str, params: Value) -> Result<Value> {
+pub(super) async fn request(
+    io: &mut Connection,
+    id: i32,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
     send(
         &mut io.stdin,
         json!({"id": id, "method": method, "params": params}),

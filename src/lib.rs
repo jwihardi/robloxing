@@ -2,6 +2,7 @@ mod check;
 mod git;
 pub mod provider;
 pub mod screenshots;
+pub mod studio;
 pub mod team;
 pub mod usage;
 pub mod worker_policy;
@@ -167,6 +168,7 @@ impl Store {
             )?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.worker_defaults(id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL)")?;
             Self::init_screenshots(&db)?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.studio_tools(name TEXT PRIMARY KEY, path TEXT NOT NULL)")?;
         }
         let tx = db.transaction()?;
         for (table, column) in [
@@ -186,6 +188,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        db.execute("UPDATE studio_jobs SET state='Interrupted', detail='Workshop closed during this run.' WHERE state IN ('Running','Queued')", [])?;
         db.execute(
             "INSERT OR IGNORE INTO projects(id,path) VALUES(1,?1)",
             [project.to_string_lossy()],

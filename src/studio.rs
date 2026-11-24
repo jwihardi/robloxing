@@ -1,0 +1,301 @@
+//! Project-scoped game asset jobs. Only finished runs expose deliverables.
+mod textures;
+mod tools;
+
+use crate::{Store, provider};
+use anyhow::{Context, Result, bail, ensure};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::sync::oneshot;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Recipe {
+    Image { brief: String, style: String },
+    Texture { material: String, seed: u32 },
+    Model { template: String, name: String },
+    ModelBrief { brief: String },
+    Blend { source: PathBuf },
+    Decompile { binary: PathBuf, filter: String },
+}
+
+impl Recipe {
+    pub fn area(&self) -> &'static str {
+        match self {
+            Self::Image { .. } | Self::Texture { .. } => "Images",
+            Self::Model { .. } | Self::ModelBrief { .. } | Self::Blend { .. } => "Models",
+            Self::Decompile { .. } => "Ghidra",
+        }
+    }
+    fn title(&self) -> String {
+        let title = match self {
+            Self::Image { brief, .. } | Self::ModelBrief { brief } => brief.trim(),
+            Self::Texture { material, seed } => return format!("{material} tile · {seed}"),
+            Self::Model { name, .. } => name.trim(),
+            Self::Blend { source } | Self::Decompile { binary: source, .. } => source
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled"),
+        };
+        title
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(90)
+            .collect()
+    }
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Image { brief, .. } => {
+                ensure!(!brief.trim().is_empty(), "Describe the image to generate.")
+            }
+            Self::ModelBrief { brief } => {
+                ensure!(!brief.trim().is_empty(), "Describe the model to create.")
+            }
+            Self::Texture { material, .. } => ensure!(
+                matches!(material.as_str(), "Moss" | "Basalt" | "Sand"),
+                "Choose a tile material."
+            ),
+            Self::Model { template, name } => {
+                ensure!(!name.trim().is_empty(), "Name the model.");
+                ensure!(
+                    matches!(template.as_str(), "Crystal" | "Barrel" | "Planter"),
+                    "Choose a starter mesh."
+                );
+            }
+            Self::Blend { source } => ensure!(
+                source.is_file()
+                    && source
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("blend")),
+                "Choose an existing Blender scene."
+            ),
+            Self::Decompile { binary, .. } => {
+                ensure!(binary.is_file(), "Choose a local game binary.")
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+pub struct Job {
+    pub id: i64,
+    pub title: String,
+    pub state: String,
+    pub detail: String,
+    pub created: String,
+    pub recipe: Recipe,
+}
+impl Job {
+    pub fn filename(&self) -> &'static str {
+        match self.recipe.area() {
+            "Images" => "image.png",
+            "Models" => "model.glb",
+            _ => "functions.c",
+        }
+    }
+    pub fn folder(&self, store: &Store) -> PathBuf {
+        store.dir.join("studio").join(self.id.to_string())
+    }
+}
+fn same_contents(left: &Path, right: &Path) -> Result<bool> {
+    let mut left = fs::File::open(left)?;
+    let mut right = fs::File::open(right)?;
+    if left.metadata()?.len() != right.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut a = [0u8; 32768];
+    let mut b = [0u8; 32768];
+    loop {
+        let n = left.read(&mut a)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        right.read_exact(&mut b[..n])?;
+        if a[..n] != b[..n] {
+            return Ok(false);
+        }
+    }
+}
+fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
+    let recipe: String = r.get(5)?;
+    Ok(Job {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        state: r.get(2)?,
+        detail: r.get(3)?,
+        created: r.get(4)?,
+        recipe: serde_json::from_str(&recipe).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+    })
+}
+impl Store {
+    pub(crate) fn import_studio_asset(
+        &self,
+        attempt: i64,
+        asset: i64,
+        destination: &str,
+    ) -> Result<()> {
+        let job = self.studio_job(asset)?;
+        ensure!(
+            job.state == "Ready" && matches!(job.recipe.area(), "Images" | "Models"),
+            "Choose a ready game image or model."
+        );
+        let relative = destination.replace('\\', "/");
+        let segments: Vec<_> = relative.split('/').collect();
+        ensure!(
+            segments.iter().all(|s| {
+                let device = s
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_ascii_uppercase();
+                !s.is_empty()
+                    && !s.starts_with('.')
+                    && !s.ends_with([' ', '.'])
+                    && s.chars().all(|c| c.is_alphanumeric() || " _-.".contains(c))
+                    && !matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    && !["COM", "LPT"].iter().any(|p| {
+                        device.strip_prefix(p).is_some_and(|n| {
+                            n.chars().count() == 1 && n.chars().all(char::is_numeric)
+                        })
+                    })
+            }),
+            "Use a project-relative asset path, such as Art/Prop.glb."
+        );
+        let file = Path::new(&relative);
+        ensure!(
+            file.extension()
+                .zip(Path::new(job.filename()).extension())
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)),
+            "Use the asset's original file extension."
+        );
+        let mut dir = dunce::canonicalize(self.work(attempt))?;
+        for segment in &segments[..segments.len() - 1] {
+            dir.push(segment);
+            if let Err(e) = fs::create_dir(&dir)
+                && e.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(e.into());
+            }
+            ensure!(
+                dir.is_dir() && dunce::canonicalize(&dir)? == dir,
+                "Choose a directory inside the review copy without links."
+            );
+        }
+        let dest = dir.join(segments.last().unwrap());
+        let source = job.folder(self).join(job.filename());
+        if fs::symlink_metadata(&dest).is_ok() {
+            ensure!(
+                dest.is_file()
+                    && dunce::canonicalize(&dest)? == dest
+                    && same_contents(&dest, &source)?,
+                "A different file already exists at the destination. Choose another name."
+            );
+            return Ok(());
+        }
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        std::io::copy(&mut fs::File::open(source)?, temp.as_file_mut())?;
+        temp.persist_noclobber(dest)?;
+        Ok(())
+    }
+    pub fn studio_history(&self, area: &str) -> Result<Vec<Job>> {
+        self.find_studio_jobs(area, "", false, None)
+    }
+    pub fn find_studio_jobs(
+        &self,
+        area: &str,
+        query: &str,
+        ready_only: bool,
+        limit: Option<u32>,
+    ) -> Result<Vec<Job>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs
+            WHERE area=?1 AND instr(lower(title),lower(?2))>0 AND (?3=0 OR state='Ready') ORDER BY id DESC LIMIT ?4")?;
+        Ok(q.query_map(
+            params![area, query, ready_only, limit.map(i64::from).unwrap_or(-1)],
+            row,
+        )?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn studio_job(&self, id: i64) -> Result<Job> {
+        Ok(self.db.lock().unwrap().query_row("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs WHERE id=?1", [id], row)?)
+    }
+    pub fn start_studio_job(&self, recipe: &Recipe) -> Result<i64> {
+        recipe.validate()?;
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO studio_jobs(area,title,request,state) VALUES(?1,?2,?3,'Queued')",
+            params![
+                recipe.area(),
+                recipe.title(),
+                serde_json::to_string(recipe)?
+            ],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+    pub fn run_studio_job(&self, id: i64, cancel: oneshot::Receiver<()>) -> Result<()> {
+        ensure!(
+            self.db.lock().unwrap().execute(
+                "UPDATE studio_jobs SET state='Running' WHERE id=?1 AND state='Queued'",
+                [id]
+            )? == 1,
+            "This job has already started."
+        );
+        let job = self.studio_job(id)?;
+        let folder = job.folder(self);
+        let run = || -> Result<String> {
+            fs::create_dir_all(folder.parent().context("Missing job directory")?)?;
+            fs::create_dir(&folder)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = cancel => bail!("Cancelled"),
+                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job.recipe, &folder)) =>
+                        result.context("The tool timed out after 15 minutes")?,
+                }
+            })
+        };
+        let result = run();
+        let (state, detail) = match &result {
+            Ok(detail) => ("Ready", detail.clone()),
+            Err(e) if e.to_string() == "Cancelled" => ("Cancelled", String::new()),
+            Err(e) => ("Failed", format!("{e:#}")),
+        };
+        self.db.lock().unwrap().execute(
+            "UPDATE studio_jobs SET state=?2,detail=?3 WHERE id=?1",
+            params![id, state, detail],
+        )?;
+        result.map(|_| ())
+    }
+    async fn build_asset(&self, recipe: &Recipe, folder: &Path) -> Result<String> {
+        match recipe {
+            Recipe::Image { brief, style } => {
+                provider::generate_image(folder, brief, style).await?
+            }
+            Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,
+            Recipe::Model { .. } | Recipe::ModelBrief { .. } | Recipe::Blend { .. } => {
+                return tools::model(self, folder, recipe).await;
+            }
+            Recipe::Decompile { binary, filter } => {
+                return tools::decompile(self, folder, binary, filter).await;
+            }
+        }
+        let img = image::open(folder.join("image.png"))?;
+        img.thumbnail(480, 480).save(folder.join("preview.png"))?;
+        Ok(format!("PNG · {} × {}", img.width(), img.height()))
+    }
+}

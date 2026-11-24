@@ -374,6 +374,8 @@ pub(crate) fn tools() -> Value {
     let string = json!({"type":"string"});
     let strings = json!({"type":"array","items":string});
     json!([
+        {"type":"function","name":"workshop_find_assets","description":"Find ready game art in this project's Game studio when the creator asks to use an existing image or model. Use the returned ID with workshop_import_asset to copy it into the review.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
         {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
         {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
@@ -643,6 +645,29 @@ pub(crate) async fn dispatch(
 ) -> Result<String> {
     let args = &request["arguments"];
     match request["tool"].as_str() {
+        Some("workshop_find_assets") => {
+            let area = args["area"].as_str().context("Select Images or Models")?;
+            ensure!(
+                matches!(area, "Images" | "Models"),
+                "Select Images or Models"
+            );
+            let jobs = store.find_studio_jobs(
+                area,
+                args["query"].as_str().context("Provide a title filter")?,
+                true,
+                Some(12),
+            )?;
+            let assets: Vec<_> = jobs.iter().map(|job| json!({"id":job.id,"title":job.title,"format":job.detail,"file":job.filename()})).collect();
+            Ok(serde_json::to_string(&assets)?)
+        }
+        Some("workshop_import_asset") => {
+            let id = args["id"].as_i64().context("Choose an asset ID")?;
+            let destination = args["destination"]
+                .as_str()
+                .context("Choose an asset destination")?;
+            store.import_studio_asset(lead.id, id, destination)?;
+            Ok(format!("Imported {destination} in the review copy."))
+        }
         Some("workshop_delegate") => {
             let assignments: Vec<Assignment> = serde_json::from_value(args["tasks"].clone())?;
             store.queue(lead.id, &assignments)?;

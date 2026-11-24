@@ -7,6 +7,7 @@ use std::{
 use workshop::{
     Attempt, Store, data_dir,
     provider::{self, Control},
+    studio::Recipe,
 };
 
 #[derive(Parser)]
@@ -21,6 +22,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Open,
+    /// Create game assets or inspect a local binary.
+    Studio {
+        #[command(subcommand)]
+        action: StudioAction,
+    },
     List,
     /// Show the workers and checkpoint for a lead conversation.
     Agents {
@@ -70,6 +76,68 @@ enum Action {
         command: Vec<String>,
     },
 }
+#[derive(Subcommand)]
+enum StudioAction {
+    Prop {
+        brief: String,
+    },
+    Image {
+        brief: String,
+        #[arg(long, default_value = "Concept art")]
+        style: String,
+    },
+    Texture {
+        material: String,
+        #[arg(long, default_value_t = 1)]
+        seed: u32,
+    },
+    Model {
+        template: String,
+        name: String,
+    },
+    Blend {
+        source: PathBuf,
+    },
+    Decompile {
+        binary: PathBuf,
+        #[arg(long, default_value = "")]
+        filter: String,
+    },
+    History {
+        area: String,
+    },
+}
+fn studio(store: &Store, action: StudioAction) -> Result<()> {
+    let recipe = match action {
+        StudioAction::Image { brief, style } => Recipe::Image { brief, style },
+        StudioAction::Texture { material, seed } => Recipe::Texture { material, seed },
+        StudioAction::Model { template, name } => Recipe::Model { template, name },
+        StudioAction::Prop { brief } => Recipe::ModelBrief { brief },
+        StudioAction::Blend { source } => Recipe::Blend {
+            source: dunce::canonicalize(source)?,
+        },
+        StudioAction::Decompile { binary, filter } => Recipe::Decompile {
+            binary: dunce::canonicalize(binary)?,
+            filter,
+        },
+        StudioAction::History { area } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&store.studio_history(&area)?)?
+            );
+            return Ok(());
+        }
+    };
+    let id = store.start_studio_job(&recipe)?;
+    let (_keep, cancel) = tokio::sync::oneshot::channel();
+    store.run_studio_job(id, cancel)?;
+    let job = store.studio_job(id)?;
+    println!(
+        "{}",
+        serde_json::json!({"id":id,"title":job.title,"detail":job.detail,"folder":job.folder(store),"file":job.filename()})
+    );
+    Ok(())
+}
 fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
     eprintln!("Attempt {} in {}", a.id, store.work(a.id).display());
     let (tx, rx) = provider::channel();
@@ -102,6 +170,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
+        Action::Studio { action } => studio(&store, action)?,
         Action::Agents { id } => {
             println!("{}", serde_json::to_string_pretty(&store.workers(id)?)?);
             println!("{}", store.handoff(id)?);

@@ -33,7 +33,9 @@ Right-align the creator's messages on a soft graphite surface. Set Codex replies
 
 Delegating adds an expandable worker tree above the transcript. Each branch pairs an assignment title with its current state. Opening a branch reveals activity, scope, retries, usage and the running worker’s stop action. The tree stays visible while the transcript scrolls and has its own height limit. Direct chats use the full reading space. The persistent rows and per-worker controls take inspiration from KiroCrew. [SubagentProgressBar](https://github.com/kirodotdev/KiroCrew/blob/f4ed7c1fe7e857a533381f9f852b8a17fdee6eca/website/src/pages/chat/SubagentProgressBar.tsx)
 
-The sidebar narrows from 224 to 192 logical pixels on smaller windows. Segoe UI carries the conversation. The wordmark and opening question use the same family at semibold weight. Neutral charcoal surfaces frame the reading column. The bright slider fill and checkmark identify the selected effort and model. The `Theme` global in `ui/workshop.slint` owns the runtime tokens.
+The sidebar narrows from 224 to 192 logical pixels on smaller windows. Segoe UI carries the conversation. The wordmark and opening question use the same family at semibold weight. Neutral charcoal surfaces frame the reading column. The bright slider fill and checkmark identify the selected effort and model. The `Theme` global in `ui/common.slint` owns the runtime tokens.
+
+Game studio follows KiroCrew’s pattern of pairing a task-specific interface with persistent project work. One sidebar entry opens Images, Models and Ghidra. Each tab places creation controls above a project library, with the selected image, mesh render or decompiler listing beside the run history. A creator can export the selected result or bring it into chat. The chat and studio share the palette, typography and keyboard-accessible actions in `ui/common.slint`. [KiroCrew](https://github.com/kirodotdev/KiroCrew)
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|

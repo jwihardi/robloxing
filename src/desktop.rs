@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod capture;
+mod desktop_studio;
 mod preferences;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
@@ -22,9 +23,10 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Desk, Studio, StudioItem, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
+    StudioFinished(PathBuf, i64, Result<()>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged(Result<String>, bool),
@@ -58,6 +60,7 @@ impl Updates {
     }
 }
 struct App {
+    studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_rows: RefCell<Vec<preferences::Row>>,
@@ -818,6 +821,30 @@ impl App {
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             match update {
+                Update::StudioFinished(project, id, result) => {
+                    let slot = self.store.borrow();
+                    if let Some(store) = slot.as_ref().filter(|s| s.project == project) {
+                        self.studio_cancel.take();
+                        let studio = ui.global::<Studio>();
+                        studio.set_working(false);
+                        studio.set_message(
+                            result
+                                .err()
+                                .map(|e| e.to_string())
+                                .unwrap_or_default()
+                                .into(),
+                        );
+                        let selected = i64::from(studio.get_selected().id);
+                        if ui.get_studio_open()
+                            && let Err(e) = self.refresh_studio(
+                                store,
+                                Some(if selected > 0 { selected } else { id }),
+                            )
+                        {
+                            studio.set_message(format!("{e:#}").into());
+                        }
+                    }
+                }
                 Update::Captured(project, attempt, command, result) => {
                     ui.set_capturing(false);
                     if matches!(result, Ok(true)) {
@@ -886,6 +913,16 @@ impl App {
                     }
                 }
                 Update::Opened(store) => {
+                    self.studio_cancel.take();
+                    let studio = ui.global::<Studio>();
+                    ui.set_studio_open(false);
+                    studio.invoke_clear_project();
+                    studio.set_working(false);
+                    studio.set_message("".into());
+                    studio.set_jobs(Default::default());
+                    studio.set_selected(Default::default());
+                    studio.set_preview(Default::default());
+                    studio.set_code("".into());
                     ui.set_project(
                         store
                             .project
@@ -1172,6 +1209,7 @@ fn main() -> Result<()> {
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
+        studio_cancel: Default::default(),
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
@@ -1197,6 +1235,7 @@ fn main() -> Result<()> {
         receiver: rx,
         session: Default::default(),
     });
+    desktop_studio::connect(&ui, &app);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();

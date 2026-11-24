@@ -10,7 +10,7 @@ class FixtureProvider {
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     static readonly string ThreadId = Guid.NewGuid().ToString();
     static string session, turn, task;
-    static bool worker;
+    static bool worker, studio;
     static string Dir { get { return Environment.GetEnvironmentVariable("WORKSHOP_PROBE_DIR"); } }
     static void Send(object message) { Console.WriteLine(Json.Serialize(message)); Console.Out.Flush(); }
     static void Done(string text) {
@@ -77,6 +77,7 @@ class FixtureProvider {
             if(method=="thread/start" || method=="thread/resume"){
                 session=p.ContainsKey("threadId")?(string)p["threadId"]:ThreadId;
                 worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop Codex worker");
+                studio=p.ContainsKey("ephemeral") && Object.Equals(p["ephemeral"],true);
                 Send(new {id=id,result=new {thread=new {id=session}}});
             }
             if(method=="thread/loaded/list") Send(new {id=id,result=new {data=new[]{session}}});
@@ -86,6 +87,13 @@ class FixtureProvider {
                 turn=Guid.NewGuid().ToString();
                 Send(new {id=id,result=new {turn=new {id=turn}}});
                 var first=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
+                if(studio){
+                    if(File.Exists(Path.Combine(Dir,"studio.hold"))) Thread.Sleep(Timeout.Infinite);
+                    Send(new {method="item/completed", @params=new {threadId=session,turnId=turn,
+                        item=new {type="imageGeneration",status="completed",savedPath=Path.Combine(Dir,"studio-image.png")}}});
+                    Done("Image generated.");
+                    continue;
+                }
                 if(worker){Worker((string)first["text"]);continue;}
                 var tasks=new List<object>{Assignment("left"),Assignment("right")};
                 if(File.Exists(Path.Combine(Dir,"mixed"))){

@@ -1,3 +1,6 @@
+import { Theme, Action } from "common.slint";
+import { Studio, StudioPage } from "studio.slint";
+export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, detail: string, stats: string, running: bool }
@@ -13,24 +16,6 @@ export struct PickerData {
 }
 
 enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs }
-
-global Theme {
-    out property <color> popup: #2c2c2c;
-    out property <color> track: #454545;
-    out property <color> canvas: #202020;
-    out property <color> sidebar: #181818;
-    out property <color> surface: #303030;
-    out property <color> selected: #3b3b3b;
-    out property <color> line: #474747;
-    out property <color> text: #f5f5f5;
-    out property <color> muted: #b5b5b5;
-    out property <color> accent: #eeeeee;
-    out property <color> accent-hover: #ffffff;
-    out property <color> disabled: #444444;
-    out property <color> ample: #8dcea6;
-    out property <color> halfway: #e4bc73;
-    out property <color> scarce: #ed827e;
-}
 
 component Flyout inherits FocusScope {
     callback escape();
@@ -57,44 +42,6 @@ component InlineReading inherits HorizontalLayout {
     spacing: 4px;
     Text { text: root.reading.label; color: Theme.muted; vertical-alignment: center; font-size: 13px; }
     RemainingValue { fraction: root.reading.remaining; }
-}
-
-component Action inherits Rectangle {
-    in property <string> label;
-    in property <string> detail;
-    in property <string> glyph;
-    in property <bool> icon-only: false;
-    in property <bool> primary: false;
-    in property <bool> selected: false;
-    in property <bool> enabled: true;
-    callback activate();
-    height: 36px;
-    border-radius: primary ? 17px : 13px;
-    border-width: focus.has-focus ? 1px : 0px;
-    border-color: Theme.accent;
-    background: primary ? (enabled ? (area.pressed ? Theme.muted : area.has-hover ? Theme.accent-hover : Theme.accent) : Theme.disabled)
-        : enabled && area.pressed ? Theme.track : selected ? Theme.selected : enabled && area.has-hover ? Theme.surface : transparent;
-    accessible-role: button;
-    accessible-label: label;
-    accessible-enabled: enabled;
-    accessible-action-default => { if root.enabled { root.activate(); } }
-    forward-focus: focus;
-    HorizontalLayout {
-        padding-left: root.icon-only ? 0px : 10px; padding-right: root.icon-only ? 0px : 10px;
-        spacing: 10px; alignment: root.icon-only ? center : start;
-        if root.glyph != "": Text { text: root.glyph; vertical-alignment: center; font-size: 15px;
-            font-family: "Segoe MDL2 Assets"; color: root.primary && root.enabled ? Theme.canvas : Theme.muted; accessible-role: none; }
-        if !root.icon-only && root.detail == "": Text { text: root.label; vertical-alignment: center; font-size: 14px;
-            color: root.enabled ? Theme.text : Theme.muted; overflow: elide; accessible-role: none; }
-        if root.detail != "": VerticalLayout { alignment: center; spacing: 2px;
-            Text { text: root.label; color: Theme.text; font-size: 14px; accessible-role: none; }
-            Text { text: root.detail; color: Theme.muted; font-size: 12px; accessible-role: none; }
-        }
-    }
-    area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.activate(); } }
-    focus := FocusScope { focus-on-click: false; width: 0px; enabled: root.enabled;
-        key-pressed(e) => { if e.text == Key.Return || e.text == Key.Space { root.activate(); return accept; } return reject; }
-    }
 }
 
 component UsageSummary inherits Action {
@@ -334,6 +281,7 @@ export component Desk inherits Window {
     in property <string> album-error;
     in property <bool> capturing;
     private property <bool> album-open;
+    in-out property <bool> studio-open;
     private property <string> viewing-shot;
     private property <bool> return-to-outputs;
     callback refresh-album();
@@ -482,7 +430,12 @@ export component Desk inherits Window {
             root.operate(root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
-    function new-chat() {root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
+    function new-chat() {root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
+    public function open-asset-draft() {
+        root.studio-open = false;
+        if !root.writable { root.new-chat(); }
+        composer.focus-input();
+    }
     init => { Palette.color-scheme = dark; }
     rail := Rectangle {
         x: 0px; y: 0px; width: root.width < 880px ? 192px : 224px; height: root.height; background: Theme.sidebar;
@@ -498,17 +451,19 @@ export component Desk inherits Window {
             }
             ListView {
                 for chat[i] in root.rows: Action { label: chat; selected: i == root.selection;
-                    enabled: !root.busy; activate => {root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(i);} }
+                    enabled: !root.busy; activate => {root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(i);} }
             }
             if root.older-chats || root.newer-chats: HorizontalLayout {
                 if root.newer-chats: Action { label: "Newer chats"; enabled: !root.busy; activate => {root.page(true,false);} }
                 if root.older-chats: Action { label: "Older chats"; enabled: !root.busy; activate => {root.page(true,true);} }
             }
+            if root.project != "": Action { label: "Game studio"; glyph: "\u{e7fc}"; selected: root.studio-open;
+                activate => {root.studio-open = !root.studio-open; root.album-open = false; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.studio-open {Studio.command("refresh");}} }
             Action { label: "Screenshots"; glyph: "\u{e722}"; selected: root.album-open;
-                activate => {root.album-open = !root.album-open; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.album-open {root.refresh-album();}} }
+                activate => {root.studio-open = false; root.album-open = !root.album-open; root.settings-open = false; root.open-panel = OpenPanel.closed; root.viewing-shot = ""; if root.album-open {root.refresh-album();}} }
             settings := Action {
                 label: "Settings"; glyph: "\u{e713}"; selected: root.settings-open;
-                activate => { root.album-open = false; root.viewing-shot = ""; root.settings-open = !root.settings-open;
+                activate => { root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = !root.settings-open;
                     if root.settings-open { root.open-panel = OpenPanel.closed; root.visit-settings(root.settings-tab,root.settings-provider); } }
             }
             Rectangle { height: 1px; background: Theme.line; }
@@ -516,7 +471,7 @@ export component Desk inherits Window {
         }
     }
     pane := Rectangle {
-        visible: !root.settings-open && !root.album-open && root.viewing-shot == "";
+        visible: !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
         x: rail.width; width: root.width - self.x; height: root.height;
         private property <length> measure: min(720px, self.width - 56px);
         private property <length> folder-button-y: self.height / 2 - 32px;
@@ -641,6 +596,7 @@ export component Desk inherits Window {
     }
     // Disable the outside hit area during the press so Slint delivers that same
     // event to the newly uncovered control. The opener itself toggles on release.
+    if root.studio-open: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; }
     if root.album-open && root.viewing-shot == "": Rectangle {
         x: rail.width; width: root.width - self.x; height: root.height;
         VerticalLayout { x: 28px; y: 28px; width: parent.width - 56px; height: parent.height - 48px; spacing: 20px;

@@ -16,6 +16,61 @@ fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
 }
 
 #[test]
+fn studio_import_survives_replay_and_requires_review() -> Result<()> {
+    let tmp = tempdir()?;
+    let project = tmp.path().join("p");
+    let store = Store::open(&project, &tmp.path().join("data"))?;
+    let id = store.start_studio_job(&crate::studio::Recipe::Texture {
+        material: "Sand".into(),
+        seed: 2,
+    })?;
+    let (_hold, signal) = tokio::sync::oneshot::channel();
+    store.run_studio_job(id, signal)?;
+    let lead = store.prepare("Use the sand tile", "", None)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let found = rt.block_on(dispatch(
+        &store,
+        &lead,
+        &json!({"tool":"workshop_find_assets","arguments":{"area":"Images","query":"sand"}}),
+        &|_| {},
+    ))?;
+    assert_eq!(serde_json::from_str::<Value>(&found)?[0]["id"], id);
+    let import =
+        json!({"tool":"workshop_import_asset","arguments":{"id":id,"destination":"Art/Dunes.png"}});
+    rt.block_on(dispatch(&store, &lead, &import, &|_| {}))?;
+    rt.block_on(dispatch(&store, &lead, &import, &|_| {}))?;
+    for invalid in [
+        "../escape.png",
+        "Art/.git/file.png",
+        "C:/other.png",
+        "Art/NUL.png",
+        "file.exe",
+    ] {
+        assert!(store.import_studio_asset(lead.id, id, invalid).is_err());
+    }
+    fs::write(store.work(lead.id).join("Art/keep.png"), "existing")?;
+    assert!(
+        store
+            .import_studio_asset(lead.id, id, "Art/keep.png")
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(store.work(lead.id).join("Art/keep.png"))?,
+        b"existing"
+    );
+    assert!(!project.join("Art/Dunes.png").exists());
+    store.finish(lead.id, "review", "Review asset")?;
+    store.accept(lead.id)?;
+    assert_eq!(
+        image::image_dimensions(project.join("Art/Dunes.png"))?,
+        (256, 256)
+    );
+    Ok(())
+}
+
+#[test]
 fn queue_validates_the_complete_dependency_graph_before_inserting() -> Result<()> {
     let tmp = tempdir()?;
     let store = Store::open(&tmp.path().join("p"), &tmp.path().join("db"))?;

@@ -2,8 +2,10 @@ use crate::{
     Attempt, Store, team,
     usage::{ContextUsage, UsageWindow, account_windows},
 };
+mod art;
 mod catalog;
 use anyhow::{Context, Result, bail, ensure};
+pub(crate) use art::{design_model, generate_image};
 pub(crate) use catalog::worker_catalog;
 pub use catalog::{Catalog, Model as CatalogModel, load_models_and_usage, model_catalog};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};

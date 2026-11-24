@@ -1,4 +1,4 @@
-param([string]$Binary = ".\target\release\workshop.exe")
+param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
@@ -9,6 +9,8 @@ public class WorkshopPointer {
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref Point p);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -30,13 +32,13 @@ public class WorkshopPointer {
         },IntPtr.Zero);
         return found;
     }
-    public static IntPtr FilenameEdit(IntPtr dialog) {
+    public static IntPtr FilenameEdit(IntPtr dialog, bool save) {
         IntPtr found=IntPtr.Zero;
         EnumChildWindows(dialog, delegate(IntPtr child, IntPtr param) {
             var name=new System.Text.StringBuilder(128);
             GetClassName(child,name,name.Capacity);
             int id=GetDlgCtrlID(child);
-            if(name.ToString()=="Edit" && (id==1148 || id==1152)){found=child;return false;}
+            if(name.ToString()=="Edit" && (id==1148 || id==1152 || (save && id==1001))){found=child;return false;}
             return true;
         },IntPtr.Zero);
         return found;
@@ -97,9 +99,10 @@ function Choose-Attachment($title,$path) {
     $dialog = [System.Windows.Automation.AutomationElement]::FromHandle([WorkshopPointer]::Dialog($proc.Id,$title))
     if ($dialog.Current.ProcessId -ne $proc.Id) { throw 'Unexpected picker process' }
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
-    Wait-For { [WorkshopPointer]::IsWindowVisible($handle) -and [WorkshopPointer]::IsWindowVisible([WorkshopPointer]::FilenameEdit($handle)) } 'visible native filename editor'
+    $save = $title -eq 'Save studio asset'
+    Wait-For { [WorkshopPointer]::IsWindowVisible($handle) -and [WorkshopPointer]::IsWindowVisible([WorkshopPointer]::FilenameEdit($handle,$save)) } 'visible native filename editor'
+    $edit = [WorkshopPointer]::FilenameEdit($handle,$save)
     [void]$proc.WaitForInputIdle(1000)
-    $edit = [WorkshopPointer]::FilenameEdit($handle)
     [void][WorkshopPointer]::SendMessage($edit,0x000c,0,$path)
     [void][WorkshopPointer]::PostMessage($handle,0x0111,1,[WorkshopPointer]::GetDlgItem($handle,1))
     if ($title -eq 'Attach a folder') {
@@ -186,17 +189,56 @@ try {
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
+    Add-Type -AssemblyName System.Drawing
+    $studioImage=[Drawing.Bitmap]::new(40,24)
+    try {$studioImage.Save((Join-Path $root 'studio-image.png'),[Drawing.Imaging.ImageFormat]::Png)} finally {$studioImage.Dispose()}
+    Click 'Game studio'
+    Wait-For { Named 'Art brief' } 'image workspace'
+    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Forest icon')
+    [void](New-Item -ItemType File (Join-Path $root 'studio.hold'))
+    Click 'Generate image'
+    Wait-For { Named 'Cancel run' } 'cancellable studio job'
+    Click 'Cancel run'
+    Wait-For { $retry=Named 'Retry run'; $retry -and $retry.Current.IsEnabled } 'cancelled job saved in library'
+    Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
+    Click 'Retry run'
+    Wait-For { Named 'Attach to chat' } 'image job ready after retry'
+    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('no matching title')
+    Wait-For { Named 'No matching assets.' } 'filtered project library'
+    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    Wait-For { Named 'Attach to chat' } 'restored asset selection'
+    Click 'Models'
+    Wait-For { Named 'Model brief' } 'model workspace'
+    Click 'Ghidra'
+    Wait-For { Named 'Choose binary…' } 'Ghidra workspace'
+    Click 'Images'
+    Wait-For { Named 'Attach to chat' } 'return to generated image'
+    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Different brief')
+    Click 'Reuse settings'
+    Wait-For { (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq 'Forest icon' } 'reuse the saved art brief'
+    $exported=Join-Path $project 'forest.png'
+    Click 'Save as…'
+    Choose-Attachment 'Save studio asset' $exported
+    Wait-For { Test-Path -LiteralPath $exported } 'saved studio asset'
+    $exportedImage=[Drawing.Bitmap]::FromFile($exported)
+    try {if($exportedImage.Width -ne 40 -or $exportedImage.Height -ne 24){throw 'Incorrect exported asset'}} finally {$exportedImage.Dispose()}
+    Click 'Attach to chat'
+    Wait-For { Named 'Remove image.png' } 'asset attached to chat draft'
+    Click 'Remove image.png'
+    Wait-For { !(Named 'Remove image.png') } 'remove studio attachment'
+    if ($StudioOnly) { 'Game studio capture-independent UI checks passed'; return }
     Click 'Outputs'
     Wait-For { Named 'Screenshots you send in this chat appear here.' } 'empty chat outputs'
     Click 'Outputs'
     Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
-    Add-Type -AssemblyName System.Drawing
-    $fixtureWindow = $proc.MainWindowHandle
+    $fixtureWindow = [WorkshopPointer]::Dialog($proc.Id,'project · Workshop')
     try {
         [void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-1),10,10,0,0,0x0041)
         $start = [WorkshopPointer+Point]::new(); $start.X = 380; $start.Y = 160
         [void][WorkshopPointer]::ClientToScreen($fixtureWindow,[ref]$start)
-        Wait-For { [WorkshopPointer]::WindowFromPoint($start) -eq $fixtureWindow } 'fixture canvas on screen'
+        try {Wait-For { [WorkshopPointer]::GetAncestor([WorkshopPointer]::WindowFromPoint($start),2) -eq $fixtureWindow -and $fixtureWindow -ne [IntPtr]::Zero } 'fixture canvas on screen'} catch {
+            throw "Fixture capture requires a visible test window. Window=$fixtureWindow Point=$($start.X),$($start.Y) Hit=$([WorkshopPointer]::WindowFromPoint($start)) Minimized=$([WorkshopPointer]::IsIconic($fixtureWindow))"
+        }
         (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
         Click 'Send message'
         function CaptureWindow {

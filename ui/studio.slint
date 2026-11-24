@@ -1,0 +1,130 @@
+import { ComboBox, LineEdit, ListView, TextEdit } from "std-widgets.slint";
+import { Action, Theme } from "common.slint";
+
+export struct StudioItem { id: int, title: string, state: string, detail: string, date: string }
+
+export global Studio {
+    in-out property <string> area: "Images";
+    in-out property <int> image-mode;
+    in-out property <int> model-mode;
+    in-out property <int> material;
+    in-out property <string> seed: "1";
+    in-out property <string> brief;
+    in-out property <string> custom-style;
+    in-out property <string> model-name;
+    in-out property <string> model-brief;
+    in-out property <string> scene-path;
+    in-out property <string> binary-path;
+    in-out property <string> filter;
+    in-out property <string> query;
+    changed query => {command("search");}
+    in property <[StudioItem]> jobs;
+    in property <StudioItem> selected;
+    in property <image> preview;
+    in property <string> code;
+    in property <string> message;
+    in property <bool> working;
+    callback command(string);
+    callback select(int);
+    public function clear-project() {
+        area = "Images"; brief = ""; custom-style = ""; model-name = ""; model-brief = ""; scene-path = ""; binary-path = ""; filter = ""; query = ""; seed = "1";
+    }
+}
+
+export component StudioPage inherits Rectangle {
+    in property <bool> can-attach;
+    private property <bool> images: Studio.area == "Images";
+    private property <bool> models: Studio.area == "Models";
+    private property <bool> binary: Studio.area == "Ghidra";
+    private property <bool> tile: images && Studio.image-mode == 3;
+    private property <bool> import-scene: models && Studio.model-mode == 4;
+    private property <bool> ready: Studio.selected.state == "Ready";
+    private property <string> run-label: tile ? "Make tile" : images ? "Generate image" : import-scene ? "Export scene" : models ? "Create model" : "Decompile";
+    background: Theme.canvas;
+    VerticalLayout {
+        x: (root.width - self.width) / 2; y: 20px; width: min(920px,root.width - 40px); height: root.height - 36px; spacing: 9px;
+        Text { text: "Game studio"; height: 36px; font-size: 25px; font-weight: 600; color: Theme.text; }
+        HorizontalLayout { height: 36px; spacing: 4px; alignment: start;
+            for tab in ["Images","Models","Ghidra"]: Action {
+                width: 80px; label: tab; selected: Studio.area == tab;
+                activate => { Studio.area = tab; Studio.query = ""; Studio.command("refresh"); }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+        HorizontalLayout { height: 32px; spacing: 8px;
+            if root.images: ComboBox { width: 156px; accessible-label: "Image format";
+                model: ["Concept art","Inventory icon","Sprite sheet","Seamless tile","Custom style"]; current-index <=> Studio.image-mode; }
+            if root.images && Studio.image-mode == 4: LineEdit { horizontal-stretch: 1; placeholder-text: "Art direction…"; accessible-label: "Custom art direction"; text <=> Studio.custom-style; }
+            if root.models: ComboBox { width: 158px; accessible-label: "Model source";
+                model: ["From brief","Crystal","Barrel","Planter","Blender scene"]; current-index <=> Studio.model-mode; }
+            if root.binary: Text { text: "Local binary"; color: Theme.text; vertical-alignment: center; font-size: 15px; font-weight: 600; }
+            Rectangle { horizontal-stretch: 1; }
+            if !root.images: Action { label: root.models ? "Locate Blender" : "Locate Ghidra"; width: 118px; height: 32px; activate => {Studio.command("locate");} }
+        }
+        if root.images && !root.tile: LineEdit {
+            height: 40px; placeholder-text: "Describe the game image you want to make…"; accessible-label: "Art brief"; text <=> Studio.brief;
+        }
+        if root.tile: HorizontalLayout { height: 40px; spacing: 10px;
+            ComboBox { width: 150px; model: ["Moss","Basalt","Sand"]; accessible-label: "Tile material"; current-index <=> Studio.material; }
+            Text { text: "Seed"; color: Theme.muted; vertical-alignment: center; }
+            LineEdit { width: 115px; accessible-label: "Tile seed"; text <=> Studio.seed; }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.models && Studio.model-mode == 0: LineEdit { height: 40px; text <=> Studio.model-brief; accessible-label: "Model brief"; placeholder-text: "Describe the shape, proportions, and colors of your prop…"; }
+        if root.models && Studio.model-mode > 0 && !root.import-scene: LineEdit { height: 40px; text <=> Studio.model-name; accessible-label: "Model name"; placeholder-text: "Name your model…"; }
+        if root.import-scene || root.binary: HorizontalLayout { height: 36px; spacing: 8px;
+            Action { label: root.binary ? "Choose binary…" : "Choose scene…"; width: 136px; selected: true; activate => {Studio.command("pick");} }
+            Text { text: root.binary ? Studio.binary-path : Studio.scene-path; color: Theme.muted; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        }
+        if root.binary: LineEdit { height: 34px; text <=> Studio.filter; placeholder-text: "Function name contains (optional)"; accessible-label: "Function filter"; }
+        HorizontalLayout { height: 36px; spacing: 10px;
+            Action { label: Studio.working ? "Cancel run" : root.run-label; width: 138px; primary: !Studio.working;
+                enabled: Studio.working || (root.binary ? Studio.binary-path != "" : root.import-scene ? Studio.scene-path != "" :
+                    root.tile ? Studio.seed != "" : root.images ? Studio.brief != "" : Studio.model-mode == 0 ? Studio.model-brief != "" : Studio.model-name != "");
+                activate => {Studio.command(Studio.working ? "cancel" : "run");} }
+            Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+        }
+        HorizontalLayout { height: 32px; spacing: 10px;
+            Text { text: root.images ? "Project images" : root.models ? "Project models" : "Decompilations";
+                horizontal-stretch: 1; vertical-alignment: center; font-weight: 600; color: Theme.text; font-size: 17px; }
+            if Studio.jobs.length > 0 || Studio.query != "": LineEdit { width: 152px; accessible-label: "Search assets"; placeholder-text: "Search assets"; text <=> Studio.query; }
+        }
+        if Studio.jobs.length == 0: Text {
+            text: Studio.query != "" ? "No matching assets." : root.images ? "Your generated images and seamless tiles will appear here." : root.models ? "Describe a prop, choose a starter mesh, or export a Blender scene to glTF." : "Choose a compiled game module to recover its functions as C pseudocode.";
+            wrap: word-wrap; color: Theme.muted; vertical-stretch: 1; font-size: 14px;
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { spacing: 10px; vertical-stretch: 1;
+            history := ListView { width: min(215px, root.width * 0.32);
+                for job in Studio.jobs: Action {
+                    label: job.title; accessible-description: job.state + " " + job.date; icon-only: true;
+                    width: history.visible-width; height: 51px; selected: Studio.selected.id == job.id;
+                    VerticalLayout { padding-left: 10px; padding-right: 8px; spacing: 2px; alignment: center;
+                        Text { text: job.title; color: Theme.text; overflow: elide; font-size: 14px; }
+                        Text { text: job.state == "Ready" ? job.date : job.state; color: Theme.muted; font-size: 12px; overflow: elide; }
+                    }
+                    activate => {Studio.select(job.id);}
+                }
+            }
+            Rectangle { horizontal-stretch: 1; background: Theme.sidebar; border-radius: 12px; clip: true;
+                if root.ready && !root.binary: Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: Studio.preview; image-fit: contain; }
+                if root.ready && root.binary: TextEdit { x: 6px; y: 6px; width: parent.width - 12px; height: parent.height - 12px;
+                    text: Studio.code; read-only: true; font-family: "Consolas"; font-size: 12px; accessible-label: "Recovered functions"; }
+                if !root.ready: Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px;
+                    text: Studio.selected.detail != "" ? Studio.selected.detail : Studio.selected.state; wrap: word-wrap; overflow: elide; vertical-alignment: center; color: Theme.muted; font-size: 13px; }
+            }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { height: 28px; spacing: 8px;
+            Text { text: root.ready ? Studio.selected.detail : ""; horizontal-stretch: 1; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
+            Action { label: "Reuse settings"; width: 112px; height: 28px; activate => {Studio.command("reuse");} }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { height: 36px; spacing: 3px; alignment: start;
+            if root.ready: Action { label: "Save as…"; width: 78px; selected: true; activate => {Studio.command("export");} }
+            if root.ready: Action { label: "Attach to chat"; width: 110px; enabled: root.can-attach; activate => {Studio.command("attach");} }
+            if root.ready && root.models: Action { label: "Edit in Blender"; width: 116px; activate => {Studio.command("edit");} }
+            if root.ready && root.models: Action { label: "Re-export"; width: 81px; enabled: !Studio.working; activate => {Studio.command("rebuild");} }
+            if Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted": Action {
+                label: "Retry run"; width: 88px; enabled: !Studio.working; activate => {Studio.command("retry");} }
+            if !root.ready && Studio.selected.state == "Failed": Action { label: "Show files"; width: 90px; activate => {Studio.command("files");} }
+        }
+    }
+}

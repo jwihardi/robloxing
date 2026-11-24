@@ -36,6 +36,20 @@ When the lead delegates, its workers appear underneath it. Select a worker to se
 
 Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
 
+## Game studio
+
+Open **Game studio** in the project sidebar. Each tab keeps a searchable history of its runs and outputs. Select **Reuse settings** to start a variation from an earlier brief, seed or source file. You can continue chatting during a run, cancel it, and retry a failed or interrupted run. Reopening a project restores its library.
+
+| Area | What you can make | Requirements |
+|---|---|---|
+| Images | Describe concept art, an inventory icon or a sprite sheet. **Seamless tile** generates a 256 × 256 PNG from a material and repeatable seed. | Prompted images use the signed-in Codex CLI’s image generation capability. Tiles run locally. |
+| Models | Describe a prop to generate an editable low-poly scene, choose a crystal, barrel or planter starter, or import a local Blender scene. Inspect the preview and triangle count, **Edit in Blender**, then **Re-export** your saved edits as a new version. | Blender with its glTF exporter. **From brief** also uses Codex to design a scene of named, colored primitives. |
+| Ghidra | Choose a compiled game module and optionally filter its functions by name. Inspect the recovered C pseudocode and save the report. Each run attempts up to 64 matching functions. | An extracted Ghidra distribution and its supported JDK on PATH or in `JAVA_HOME`. |
+
+Use **Locate Blender** to select the executable or **Locate Ghidra** to select the installation root. Workshop remembers these choices across projects. You can also set `WORKSHOP_BLENDER` to an executable and `WORKSHOP_GHIDRA` to an installation root. Standard Windows and Steam installations of Blender are detected automatically.
+
+**Save as…** exports the PNG, GLB or C report to a destination you choose. **Attach to chat** adds the selected file to the composer for your next message. In a new chat, you can also ask the lead to find a finished image or model by title and use it in a reviewable project change. Studio originals stay in the project’s Workshop data folder.
+
 ## CLI
 
 Build the CLI alone with `cargo build --locked --no-default-features --bin workshop-cli`. Example commands after building follow below.
@@ -48,6 +62,8 @@ $cli = ".\target\debug\workshop-cli.exe"
 & $cli --project $project diff 1
 & $cli --project $project accept 1
 ```
+
+The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
 
 `run --model MODEL "task"` selects a provider model. Each run streams structured events to stdout. Type a direction or `/cancel` on stdin while it runs. Use `resume ID "direction"` to continue the same session in the same working copy. `retry ID` makes a fresh attempt from the project's current files. `discard ID` records the decision and retains the previous output. To run a project-specific command in the reviewed copy, use `check ID -- COMMAND [ARGS...]`. Close the desktop project before opening the same project in the CLI.
 
@@ -66,3 +82,5 @@ Project records live under `%LOCALAPPDATA%\Robloxing\Workshop`. Override the par
 ## Verification
 
 Run `cargo test --locked --all-targets` for the offline recovery and scheduler tests. The Windows records cover the provider, Studio, native desktop and process cleanup. [H1 verification](docs/h1-verification.md) · [H2 verification](docs/h2-verification.md)
+
+After a release build, run `.\tests\windows\picker_clicks.ps1 -StudioOnly` for the native game studio controls, including cancellation, retry, search, settings reuse, file export and chat attachments. The suite uses a local fixture provider. Omit the switch to include the desktop screenshot and composer regressions, which require the test window to be visible on screen.
