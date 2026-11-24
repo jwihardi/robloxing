@@ -66,6 +66,17 @@ fn recipe(studio: &Studio<'_>) -> Result<Recipe> {
     })
 }
 impl App {
+    pub(super) fn close_inspector(&self) {
+        self.inspector.take();
+        let ui = self.ui.unwrap();
+        let studio = ui.global::<Studio>();
+        studio.set_inspecting(false);
+        studio.set_inspect_image(Default::default());
+        studio.set_inspect_ready(false);
+        studio.set_inspect_result("".into());
+        studio.set_inspect_faces("".into());
+        studio.set_inspect_error("".into());
+    }
     pub(super) fn refresh_studio(&self, store: &Store, selection: Option<i64>) -> Result<()> {
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
@@ -81,6 +92,11 @@ impl App {
     fn select_studio_job(&self, store: &Store, job: Option<&Job>) -> Result<()> {
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
+        if studio.get_inspecting()
+            && job.is_none_or(|j| j.id != i64::from(studio.get_selected().id) || j.state != "Ready")
+        {
+            self.close_inspector();
+        }
         studio.set_selected(job.map(item).unwrap_or_default());
         studio.set_code("".into());
         studio.set_preview(Default::default());
@@ -110,6 +126,10 @@ impl App {
     }
     fn studio_command(&self, cmd: &str) -> Result<()> {
         let ui = self.ui.unwrap();
+        if cmd == "close-inspector" {
+            self.close_inspector();
+            return Ok(());
+        }
         if cmd == "search" && !ui.get_studio_open() {
             return Ok(());
         }
@@ -124,6 +144,20 @@ impl App {
         }
         let selected = || store.studio_job(studio.get_selected().id.into());
         match cmd {
+            "inspect" => {
+                let job = selected()?;
+                ensure!(
+                    job.recipe.area() == "Models" && job.state == "Ready",
+                    "Select a finished model."
+                );
+                self.close_inspector();
+                self.inspector
+                    .replace(Some(super::inspector::Inspector::open(
+                        &ui,
+                        job.folder(&store).join(job.filename()),
+                    )));
+                studio.set_inspecting(true);
+            }
             "refresh" | "search" => {
                 self.refresh_studio(&store, Some(studio.get_selected().id.into()))?
             }
@@ -294,6 +328,13 @@ impl App {
 }
 
 pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
+    let a = app.clone();
+    ui.global::<Studio>()
+        .on_inspect_view(move |yaw, pitch, zoom, mode, w, h| {
+            if let Some(inspector) = a.inspector.borrow().as_ref() {
+                inspector.request(yaw, pitch, zoom, mode, w, h);
+            }
+        });
     let a = app.clone();
     ui.global::<Studio>().on_command(move |cmd| {
         if let Err(e) = a.studio_command(&cmd) {

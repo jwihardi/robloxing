@@ -282,6 +282,7 @@ export component Desk inherits Window {
     in property <bool> capturing;
     private property <bool> album-open;
     in-out property <bool> studio-open;
+    changed studio-open => { if !studio-open && Studio.inspecting { Studio.command("close-inspector"); } }
     private property <string> viewing-shot;
     private property <bool> return-to-outputs;
     callback refresh-album();

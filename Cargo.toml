@@ -6,7 +6,7 @@ default-run = "workshop"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:slint", "dep:rfd"]
+desktop = ["dep:slint", "dep:rfd", "dep:gltf", "dep:glam"]
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +25,8 @@ sha2 = "0.10"
 tempfile = "3"
 slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"], optional = true }
 rfd = { version = "0.15", optional = true }
+gltf = { version = "1.4", default-features = false, features = ["utils"], optional = true }
+glam = { version = "0.30", optional = true }
 
 [[bin]]
 name = "workshop"

@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod capture;
 mod desktop_studio;
+mod inspector;
 mod preferences;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
@@ -60,6 +61,7 @@ impl Updates {
     }
 }
 struct App {
+    inspector: RefCell<Option<inspector::Inspector>>,
     studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -913,6 +915,7 @@ impl App {
                     }
                 }
                 Update::Opened(store) => {
+                    self.close_inspector();
                     self.studio_cancel.take();
                     let studio = ui.global::<Studio>();
                     ui.set_studio_open(false);
@@ -1209,6 +1212,7 @@ fn main() -> Result<()> {
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
+        inspector: Default::default(),
         studio_cancel: Default::default(),
         settings_generation: Default::default(),
         settings_read: Default::default(),
