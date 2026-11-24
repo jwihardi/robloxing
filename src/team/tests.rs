@@ -1,0 +1,276 @@
+use super::*;
+use std::fs;
+use tempfile::tempdir;
+
+fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
+    Assignment {
+        key: key.into(),
+        model: String::new(),
+        effort: String::new(),
+        title: key.into(),
+        deliverable: format!("Implement {key}"),
+        acceptance: "Matches the project spec".into(),
+        files: files.iter().map(|s| s.to_string()).collect(),
+        depends_on: deps.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn queue_validates_the_complete_dependency_graph_before_inserting() -> Result<()> {
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("p"), &tmp.path().join("db"))?;
+    let a = store.prepare("plan", "", None)?;
+    let top = assignment("top", &["base"], &["src"]);
+    let mut base = assignment("base", &["top"], &["SRC/one.txt"]);
+    assert!(overlaps(&top, &base));
+    assert!(!overlaps(&top, &assignment("other", &[], &["src2"])));
+    assert!(store.queue(a.id, &[top.clone(), base.clone()]).is_err());
+    assert!(store.queue(a.id, std::slice::from_ref(&top)).is_err());
+    assert!(store.workers(a.id)?.is_empty());
+    base.depends_on.clear();
+    store.queue(a.id, &[top.clone(), base.clone()])?;
+    store.queue(a.id, &[top, base])?;
+    let mut workers = store.workers(a.id)?;
+    assert_eq!(workers.len(), 2);
+    assert_eq!(next_wave(&workers, 2)[0].assignment.key, "base");
+    let base = workers
+        .iter()
+        .position(|w| w.assignment.key == "base")
+        .unwrap();
+    workers[base].state = "blocked".into();
+    assert!(next_wave(&workers, 2).is_empty());
+    workers[base].state = "finished".into();
+    assert_eq!(next_wave(&workers, 2)[0].assignment.key, "top");
+    assert!(!store.dir.join("workers").exists());
+    Ok(())
+}
+
+#[test]
+fn dispatch_receipts_track_only_accepted_assignments_in_chat_order() -> Result<()> {
+    let tmp = tempdir()?;
+    let project = tmp.path().join("project");
+    let home = tmp.path().join("data");
+    let store = Store::open(&project, &home)?;
+    let lead = store.prepare("write ten files", "", None)?;
+    let pair = [
+        assignment("first", &[], &["first"]),
+        assignment("second", &[], &["second"]),
+    ];
+    store.event(lead.id, "user/followup", Some("Use two subagents"))?;
+    store.queue(lead.id, &pair)?;
+    store.queue(lead.id, &pair)?;
+    let ids: Vec<_> = store.workers(lead.id)?.iter().map(|w| w.id).collect();
+    store.worker_state(ids[1], "blocked", "Retry")?;
+    store.queue(lead.id, &pair)?;
+    store.event(lead.id, "agent/message", Some("Done"))?;
+    drop(store);
+
+    let store = Store::open(&project, &home)?;
+    let (rows, more) = store.message_page(lead.id, i64::MAX, 10)?;
+    assert!(!more);
+    assert_eq!(
+        rows.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        [
+            "Use two subagents",
+            "Dispatched 2 subagents",
+            "Dispatched 1 subagent",
+            "Done"
+        ]
+    );
+    assert_eq!(rows[1].dispatched_workers, ids);
+    assert_eq!(rows[2].dispatched_workers, [ids[1]]);
+    Ok(())
+}
+
+#[test]
+fn interrupted_worker_integration_recovers_once_and_checks_the_combined_revision() -> Result<()> {
+    let tmp = tempdir()?;
+    let project = tmp.path().join("project");
+    let home = tmp.path().join("data");
+    fs::create_dir(&project)?;
+    fs::write(project.join(".gitattributes"), "*.txt text eol=lf\n")?;
+    let store = Store::open(&project, &home)?;
+    let lead = store.prepare("create pair", "", None)?;
+    store.session(lead.id, "lead")?;
+    let spec = assignment("pair", &[], &["one.txt", "two.txt"]);
+    store.queue(lead.id, std::slice::from_ref(&spec))?;
+    let w = store.workers(lead.id)?.remove(0);
+    let child = store.child_store(lead.id, w.id)?;
+    let run = child.prepare("pair", "", None)?;
+    for file in &spec.files {
+        fs::write(child.work(run.id).join(file), "once\n")?;
+    }
+    child.finish(run.id, "review", "ready")?;
+    store.db.lock().unwrap().execute(
+        "UPDATE workers SET state='integrating',run=?1,tries=1 WHERE id=?2",
+        params![run.id, w.id],
+    )?;
+    child.status(run.id, "applying", "applying")?;
+    fs::write(store.work(lead.id).join("one.txt"), "once\n")?;
+    drop(child);
+    drop(store);
+
+    let store = Store::open(&project, &home)?;
+    assert_eq!(store.workers(lead.id)?[0].state, "checking");
+    assert_eq!(
+        fs::read_to_string(store.work(lead.id).join("two.txt"))?,
+        "once\n"
+    );
+    assert!(!project.join("two.txt").exists());
+    let lead = store.resume(lead.id)?;
+    store.queue(lead.id, &[spec])?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(store.execute_queue(&lead, &|_| {}))?;
+    assert_eq!(store.workers(lead.id)?[0].tries, 1);
+    store.checkpoint(lead.id, "Keep one line per file", "Add guide")?;
+    store.finish(lead.id, "review", "ready")?;
+    assert!(store.handoff(999)?.is_empty());
+    store.accept(lead.id)?;
+    store.accept(lead.id)?;
+    assert_eq!(fs::read_to_string(project.join("one.txt"))?, "once\n");
+    let next = store.prepare("continue", "", None)?;
+    assert!(store.handoff(next.id)?.contains("Add guide"));
+    Ok(())
+}
+
+#[test]
+fn older_projects_keep_model_settings_and_accept_per_chat_effort() -> Result<()> {
+    let tmp = tempdir()?;
+    let project = tmp.path().join("project");
+    let home = tmp.path().join("data");
+    let store = Store::open(&project, &home)?;
+    let a = store.prepare("hello", "existing-model", None)?;
+    store.finish(a.id, "review", "ready")?;
+    store.db.lock().unwrap().execute_batch(
+        "ALTER TABLE attempts DROP COLUMN effort;
+         ALTER TABLE team_settings DROP COLUMN lead_effort;
+         ALTER TABLE team_settings DROP COLUMN worker_effort;
+         UPDATE team_settings SET worker_model='existing-worker';",
+    )?;
+    drop(store);
+    let store = Store::open(&project, &home)?;
+    assert_eq!(store.team_settings()?.worker_model, "existing-worker");
+    assert_eq!(store.attempt(a.id)?.model, "existing-model");
+    assert!(store.attempt(a.id)?.effort.is_empty());
+    store.set_chat_inference(a.id, "changed-model", "high")?;
+    let retry = store.prepare("again", "changed-model", Some(a.id))?;
+    assert_eq!(
+        (retry.model.as_str(), retry.effort.as_str()),
+        ("changed-model", "high")
+    );
+    assert!(store.team_settings()?.lead_effort.is_empty());
+    Ok(())
+}
+
+#[test]
+fn pages_cover_transcript_once_and_keep_first_prompt_separate() -> Result<()> {
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("p"), &tmp.path().join("d"))?;
+    let lead = store.prepare("hello", "", None)?;
+    for i in 0..125 {
+        store.event(lead.id, "agent/message", Some(&i.to_string()))?;
+    }
+    let mut cursor = i64::MAX;
+    let mut pages = Vec::new();
+    loop {
+        let (rows, older) = store.message_page(lead.id, cursor, 50)?;
+        assert!(rows.len() <= 50);
+        cursor = rows[0].id;
+        pages.push(rows.into_iter().map(|r| r.text).collect::<Vec<_>>());
+        if !older {
+            break;
+        }
+    }
+    assert_eq!(
+        pages.into_iter().rev().flatten().collect::<Vec<_>>(),
+        (0..125).map(|v| v.to_string()).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_policy_inherits_across_projects_and_overrides_per_chat() -> Result<()> {
+    use crate::worker_policy::WorkerPolicy;
+    let tmp = tempdir()?;
+    let home = tmp.path().join("data");
+    let p = tmp.path().join("first");
+    let first = Store::open(&p, &home)?;
+    let other = Store::open(&tmp.path().join("second"), &home)?;
+    let global = WorkerPolicy {
+        models: vec!["small".into()],
+        max_effort: "low".into(),
+    };
+    let expanded = WorkerPolicy {
+        models: vec!["small".into(), "large".into()],
+        max_effort: "high".into(),
+    };
+    first.save_worker_defaults(&global)?;
+    assert_eq!(other.worker_defaults()?, global);
+    let a = first.prepare_with_policy("hard problem", "", None, Some(&expanded))?;
+    first.finish(a.id, "review", "ready")?;
+    let separate = first.prepare("ordinary task", "", None)?;
+    assert_eq!(first.effective_worker_policy(separate.id)?, global);
+    first.finish(separate.id, "review", "ready")?;
+    drop(first);
+    let first = Store::open(&p, &home)?;
+    assert_eq!(first.effective_worker_policy(a.id)?, expanded);
+    let retry = first.prepare("try again", "", Some(a.id))?;
+    assert_eq!(first.effective_worker_policy(retry.id)?, expanded);
+    first.set_chat_worker_policy(a.id, None)?;
+    other.save_worker_defaults(&WorkerPolicy::default())?;
+    assert_eq!(
+        first.effective_worker_policy(a.id)?,
+        WorkerPolicy::default()
+    );
+    assert_eq!(first.effective_worker_policy(retry.id)?, expanded);
+    Ok(())
+}
+
+#[test]
+fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()> {
+    use crate::worker_policy::WorkerPolicy;
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("p"), &tmp.path().join("d"))?;
+    let model = |id: &str, efforts: &[&str]| {
+        serde_json::json!({
+            "model":id, "isDefault":false, "defaultReasoningEffort":"low",
+            "supportedReasoningEfforts":efforts.iter().map(|e|serde_json::json!({"reasoningEffort":e})).collect::<Vec<_>>(),
+        })
+    };
+    let catalog = provider::Catalog {
+        models: serde_json::from_value(serde_json::json!([
+            model("small", &["low", "high"]),
+            model("large", &["medium", "xhigh"])
+        ]))?,
+        default_model: "small".into(),
+        default_effort: "low".into(),
+    };
+    store.cache_worker_catalog(&catalog);
+    let mut policy = WorkerPolicy {
+        models: vec!["large".into()],
+        max_effort: "high".into(),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut task = assignment("one", &[], &[]);
+    task.effort = "xhigh".into();
+    assert_eq!(
+        rt.block_on(store.worker_inference(&policy, &task))?,
+        ("large".into(), "medium".into())
+    );
+    task.model = "small".into();
+    assert!(rt.block_on(store.worker_inference(&policy, &task)).is_err());
+    policy.models.push("small".into());
+    task.effort = "low".into();
+    assert_eq!(
+        rt.block_on(store.worker_inference(&policy, &task))?,
+        ("small".into(), "low".into())
+    );
+    task.model = "large".into();
+    policy.max_effort = "low".into();
+    assert!(rt.block_on(store.worker_inference(&policy, &task)).is_err());
+    Ok(())
+}

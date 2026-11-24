@@ -247,3 +247,13 @@ impl Review<'_> {
         Ok(())
     }
 }
+
+pub(crate) fn changed_paths(work: &Path, base: &str, candidate: &str) -> Result<Vec<String>> {
+    let bytes =
+        output(command(work).args(["diff", "--name-only", "--no-renames", "-z", base, candidate]))?;
+    bytes
+        .split(|c| *c == 0)
+        .filter(|path| !path.is_empty())
+        .map(|p| Ok(std::str::from_utf8(p)?.to_owned()))
+        .collect()
+}

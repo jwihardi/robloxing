@@ -1,6 +1,9 @@
 mod check;
 mod git;
 pub mod provider;
+pub mod team;
+pub mod usage;
+pub mod worker_policy;
 
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, params};
@@ -37,6 +40,7 @@ pub struct Attempt {
     pub base: String,
     pub session: String,
     pub model: String,
+    pub effort: String,
     pub patch: String,
     pub candidate: String,
 }
@@ -46,38 +50,85 @@ pub struct Store {
     pub dir: PathBuf,
     db: Mutex<Connection>,
     _lock: File,
+    worker: bool,
+    worker_catalog: tokio::sync::Mutex<Option<provider::Catalog>>,
+    controls: Mutex<
+        std::collections::HashMap<i64, tokio::sync::mpsc::UnboundedSender<provider::Control>>,
+    >,
 }
 
-#[derive(Clone, PartialEq)]
-pub struct Activity {
-    pub time: String,
-    pub kind: String,
-    pub summary: String,
+pub struct ChatMessage {
+    pub id: i64,
+    pub from_user: bool,
+    pub delivery_notice: bool,
+    pub text: String,
+    pub dispatched_workers: Vec<i64>,
 }
 
 impl Store {
-    /// Recent human-readable updates for the agent window, including older provider events.
-    pub fn recent_activity(&self, id: i64) -> Result<Vec<Activity>> {
+    pub fn messages_after(&self, attempt: i64, after: i64) -> Result<Vec<ChatMessage>> {
+        self.message_range(attempt, after, i64::MAX, -1, false)
+    }
+    pub fn message_page(
+        &self,
+        attempt: i64,
+        before: i64,
+        limit: usize,
+    ) -> Result<(Vec<ChatMessage>, bool)> {
+        let mut rows =
+            self.message_range(attempt, 0, before, (limit.clamp(1, 100) + 1) as i64, true)?;
+        let more = rows.len() > limit.clamp(1, 100);
+        if more {
+            rows.pop();
+        }
+        rows.reverse();
+        Ok((rows, more))
+    }
+    fn message_range(
+        &self,
+        attempt: i64,
+        after: i64,
+        before: i64,
+        limit: i64,
+        descending: bool,
+    ) -> Result<Vec<ChatMessage>> {
         let db = self.db.lock().unwrap();
-        let mut query = db.prepare(
-            "SELECT strftime('%H:%M',recorded,'localtime'),kind,summary FROM events
-             WHERE attempt=? AND summary IS NOT NULL AND
-             (kind IN ('agent/message','item/completed','turn/started','check','steer/sent',
-                       'steer/error','steer/unavailable','error') OR
-              (kind='item/started' AND summary IN ('Editing project files','Thinking through the task')))
-             ORDER BY id DESC LIMIT 40",
-        )?;
-        Ok(query
-            .query_map([id], |r| {
-                Ok(Activity {
-                    time: r.get(0)?,
-                    kind: r.get(1)?,
-                    summary: r.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+        let order = if descending { "DESC" } else { "ASC" };
+        let mut stmt = db.prepare(&format!(
+            "SELECT id,kind,summary FROM events
+            WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
+            AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
+                         'steer/error','steer/unavailable','workshop/dispatch')
+            ORDER BY id {order} LIMIT ?4"
+        ))?;
+        let mut rows = stmt.query(params![attempt, after, before, limit])?;
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next()? {
+            let kind: String = row.get(1)?;
+            let mut text: String = row.get(2)?;
+            let mut dispatched_workers: Vec<i64> = Vec::new();
+            if kind == "workshop/dispatch" {
+                dispatched_workers = serde_json::from_str(&text)?;
+                let count = dispatched_workers.len();
+                text = format!(
+                    "Dispatched {count} subagent{}",
+                    if count == 1 { "" } else { "s" }
+                );
+            }
+            messages.push(ChatMessage {
+                id: row.get(0)?,
+                from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
+                delivery_notice: matches!(kind.as_str(), "steer/error" | "steer/unavailable"),
+                dispatched_workers,
+                text,
+            });
+        }
+        Ok(messages)
     }
     pub fn open(folder: &Path, home: &Path) -> Result<Self> {
+        Self::open_role(folder, home, false)
+    }
+    fn open_role(folder: &Path, home: &Path, worker: bool) -> Result<Self> {
         fs::create_dir_all(folder)?;
         fs::create_dir_all(home)?;
         let folder = dunce::canonicalize(folder)?;
@@ -89,7 +140,11 @@ impl Store {
         let key = folder.to_string_lossy().to_string();
         #[cfg(windows)]
         let key = key.to_lowercase();
-        let dir = home.join(digest(key.as_bytes()));
+        let dir = if worker {
+            home.clone()
+        } else {
+            home.join(digest(key.as_bytes()))
+        };
         fs::create_dir_all(&dir)?;
         let lock = OpenOptions::new()
             .read(true)
@@ -100,8 +155,33 @@ impl Store {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("This project is already open in Workshop.")?;
         let project = git::project(&folder)?;
-        let db = Connection::open(dir.join("workshop.sqlite"))?;
+        let mut db = Connection::open(dir.join("workshop.sqlite"))?;
         db.execute_batch(include_str!("schema.sql"))?;
+        if !worker {
+            db.execute(
+                "ATTACH DATABASE ?1 AS preferences",
+                [home.join("preferences.sqlite").to_string_lossy()],
+            )?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.worker_defaults(id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL)")?;
+        }
+        let tx = db.transaction()?;
+        for (table, column) in [
+            ("team_settings", "lead_effort"),
+            ("team_settings", "worker_effort"),
+            ("attempts", "effort"),
+        ] {
+            let missing: bool = tx.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |r| r.get(0),
+            )?;
+            if missing {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                ))?;
+            }
+        }
+        tx.commit()?;
         db.execute(
             "INSERT OR IGNORE INTO projects(id,path) VALUES(1,?1)",
             [project.to_string_lossy()],
@@ -112,8 +192,20 @@ impl Store {
             dir,
             db: Mutex::new(db),
             _lock: lock,
+            worker,
+            worker_catalog: Default::default(),
+            controls: Default::default(),
         };
-        for a in store.attempts()? {
+        store.recover_workers()?;
+        let interrupted = {
+            let db = store.db.lock().unwrap();
+            let mut query=db.prepare("SELECT id FROM attempts WHERE state IN ('preparing','running','applying') ORDER BY id")?;
+            query
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for id in interrupted {
+            let a = store.attempt(id)?;
             match a.state.as_str() {
                 "preparing" => store.status(
                     a.id,
@@ -156,10 +248,21 @@ impl Store {
         )?)
     }
     pub fn attempts(&self) -> Result<Vec<Attempt>> {
+        self.attempt_range(None, -1, 0)
+    }
+    pub fn attempts_page(&self, offset: usize, limit: usize) -> Result<Vec<Attempt>> {
+        self.attempt_range(None, limit.clamp(1, 101) as i64, offset as i64)
+    }
+    fn attempt_range(&self, id: Option<i64>, limit: i64, offset: i64) -> Result<Vec<Attempt>> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate FROM attempts a JOIN tasks t ON a.task=t.id ORDER BY a.id DESC")?;
+        let filter = if id.is_some() {
+            "WHERE a.id=?1"
+        } else {
+            "WHERE ?1 IS NULL"
+        };
+        let mut stmt=db.prepare(&format!("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate,a.effort FROM attempts a JOIN tasks t ON a.task=t.id {filter} ORDER BY a.id DESC LIMIT ?2 OFFSET ?3"))?;
         Ok(stmt
-            .query_map([], |r| {
+            .query_map(params![id, limit, offset], |r| {
                 Ok(Attempt {
                     id: r.get(0)?,
                     task: r.get(1)?,
@@ -170,6 +273,7 @@ impl Store {
                     base: r.get(6)?,
                     session: r.get(7)?,
                     model: r.get(8)?,
+                    effort: r.get(11)?,
                     patch: r.get(9)?,
                     candidate: r.get(10)?,
                 })
@@ -177,9 +281,8 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn attempt(&self, id: i64) -> Result<Attempt> {
-        self.attempts()?
-            .into_iter()
-            .find(|a| a.id == id)
+        self.attempt_range(Some(id), 1, 0)?
+            .pop()
             .context("Select an attempt.")
     }
     pub fn folder(&self, id: i64) -> PathBuf {
@@ -190,6 +293,67 @@ impl Store {
     }
 
     pub fn prepare(&self, prompt: &str, model: &str, retry: Option<i64>) -> Result<Attempt> {
+        self.prepare_with_policy(prompt, model, retry, None)
+    }
+    pub fn prepare_with_policy(
+        &self,
+        prompt: &str,
+        model: &str,
+        retry: Option<i64>,
+        policy: Option<&worker_policy::WorkerPolicy>,
+    ) -> Result<Attempt> {
+        self.prepare_with_files(prompt, model, retry, policy, &[])
+    }
+    pub fn prepare_with_files(
+        &self,
+        prompt: &str,
+        model: &str,
+        retry: Option<i64>,
+        policy: Option<&worker_policy::WorkerPolicy>,
+        files: &[PathBuf],
+    ) -> Result<Attempt> {
+        let settings = self.team_settings()?;
+        if let Some(id) = retry {
+            let old = self.attempt(id)?;
+            return self.prepare_inference(prompt, model, &old.effort, retry, policy, &[]);
+        }
+        let effort = if model.is_empty() || model == settings.lead_model {
+            &settings.lead_effort
+        } else {
+            ""
+        };
+        let model = if model.trim().is_empty() {
+            &settings.lead_model
+        } else {
+            model
+        };
+        self.prepare_inference(prompt, model, effort, retry, policy, files)
+    }
+    pub(crate) fn task_attachments(&self, task: i64) -> Result<Vec<PathBuf>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare("SELECT path FROM task_attachments WHERE task=?1 ORDER BY rowid")?;
+        Ok(
+            q.query_map([task], |r| Ok(PathBuf::from(r.get::<_, String>(0)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+        )
+    }
+    pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
+        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3 WHERE id=?1 AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort])?;
+        ensure!(
+            n == 1,
+            "Wait for the current response before changing the model."
+        );
+        Ok(())
+    }
+    fn prepare_inference(
+        &self,
+        prompt: &str,
+        model: &str,
+        effort: &str,
+        retry: Option<i64>,
+        policy: Option<&worker_policy::WorkerPolicy>,
+        files: &[PathBuf],
+    ) -> Result<Attempt> {
         ensure!(!prompt.trim().is_empty(), "Describe the task first.");
         let head = git::git(&self.project, &["rev-parse", "HEAD"])?;
         let id = {
@@ -205,10 +369,26 @@ impl Store {
                     "INSERT INTO tasks(milestone,prompt) VALUES(1,?1)",
                     [prompt.trim()],
                 )?;
-                tx.last_insert_rowid()
+                let task = tx.last_insert_rowid();
+                for path in files {
+                    tx.execute(
+                        "INSERT INTO task_attachments(task,path) VALUES(?1,?2)",
+                        params![task, path.to_str().context("Unreadable attachment path")?],
+                    )?;
+                }
+                task
             };
-            tx.execute("INSERT INTO attempts(task,head,model,state,action) VALUES(?1,?2,?3,'preparing','Creating isolated copy')",params![task,head,model])?;
+            tx.execute("INSERT INTO attempts(task,head,model,effort,state,action) VALUES(?1,?2,?3,?4,'preparing','Creating isolated copy')",params![task,head,model,effort])?;
             let id = tx.last_insert_rowid();
+            if let Some(policy) = policy {
+                policy.validate()?;
+                tx.execute(
+                    "INSERT INTO chat_worker_policy(attempt,policy) VALUES(?1,?2)",
+                    params![id, serde_json::to_string(policy)?],
+                )?;
+            } else if let Some(previous) = retry {
+                tx.execute("INSERT INTO chat_worker_policy SELECT ?1,policy FROM chat_worker_policy WHERE attempt=?2", params![id,previous])?;
+            }
             tx.commit()?;
             id
         };
@@ -262,9 +442,18 @@ impl Store {
         Ok(())
     }
     pub fn session(&self, id: i64, session: &str) -> Result<()> {
+        self.bind_session(id, session, "", "")
+    }
+    pub(crate) fn bind_session(
+        &self,
+        id: i64,
+        session: &str,
+        model: &str,
+        effort: &str,
+    ) -> Result<()> {
         self.db.lock().unwrap().execute(
-            "UPDATE attempts SET session=?2 WHERE id=?1",
-            params![id, session],
+            "UPDATE attempts SET session=?2, model=CASE WHEN model='' THEN ?3 ELSE model END, effort=CASE WHEN effort='' THEN ?4 ELSE effort END WHERE id=?1",
+            params![id, session, model, effort],
         )?;
         Ok(())
     }
@@ -324,6 +513,21 @@ impl Store {
         let a = self.attempt(id)?;
         if a.state == "accepted" {
             return Ok(());
+        }
+        if !self.worker {
+            ensure!(
+                self.workers(id)?.iter().all(|w| w.state == "finished"),
+                "Resolve the unfinished workers before accepting this change."
+            );
+            if !self.workers(id)?.is_empty() {
+                ensure!(
+                    self.verified(id, &a.candidate, &self.team_settings()?)?,
+                    "The combined revision needs verification. Resume the lead before accepting."
+                );
+            }
+            if a.state == "review" && a.patch.is_empty() && self.has_checkpoint(id)? {
+                return self.decide(id, "accepted", "Decisions saved for the next chat");
+            }
         }
         ensure!(
             matches!(

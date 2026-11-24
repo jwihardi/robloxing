@@ -1,0 +1,680 @@
+use crate::{Attempt, Store, git, provider};
+use anyhow::{Context, Result, ensure};
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    pub lead_model: String,
+    pub worker_model: String,
+    pub lead_effort: String,
+    pub worker_effort: String,
+    pub parallelism: usize,
+    pub check_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Assignment {
+    pub key: String,
+    pub title: String,
+    pub deliverable: String,
+    pub acceptance: String,
+    pub files: Vec<String>,
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Worker {
+    pub id: i64,
+    pub assignment: Assignment,
+    pub state: String,
+    pub run: Option<i64>,
+    pub tries: usize,
+    pub detail: String,
+    pub repeats: usize,
+    pub tokens: Option<i64>,
+}
+
+fn clipped(s: &str, limit: usize) -> String {
+    s.chars().take(limit).collect()
+}
+fn covers(parent: &str, child: &str) -> bool {
+    let parent = parent.to_lowercase();
+    let child = child.to_lowercase();
+    parent == "."
+        || parent == child
+        || child
+            .strip_prefix(&parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+fn overlaps(a: &Assignment, b: &Assignment) -> bool {
+    a.files
+        .iter()
+        .any(|p| b.files.iter().any(|q| covers(p, q) || covers(q, p)))
+}
+// Preserve explicit dependencies first. For overlapping paths the earlier task in
+// this stable topological order owns the file until it finishes successfully.
+fn next_wave(workers: &[Worker], limit: usize) -> Vec<&Worker> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut ordered: Vec<&Worker> = Vec::new();
+    let mut visited = HashSet::new();
+    let mut ready = Vec::new();
+    while let Some(w) = workers.iter().find(|w| {
+        !visited.contains(&w.assignment.key)
+            && w.assignment
+                .depends_on
+                .iter()
+                .all(|key| visited.contains(key))
+    }) {
+        if w.state == "queued"
+            && ordered.iter().all(|prior| {
+                prior.state == "finished"
+                    || (!w.assignment.depends_on.contains(&prior.assignment.key)
+                        && !overlaps(&w.assignment, &prior.assignment))
+            })
+        {
+            ready.push(w);
+            if ready.len() == limit {
+                break;
+            }
+        }
+        visited.insert(w.assignment.key.clone());
+        ordered.push(w);
+    }
+    ready
+}
+fn validate(a: &Assignment) -> Result<()> {
+    ensure!(
+        !a.key.is_empty()
+            && a.key.len() <= 64
+            && a.key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)),
+        "Use a short, stable task key"
+    );
+    ensure!(
+        !a.title.trim().is_empty()
+            && a.title.len() <= 100
+            && !a.deliverable.trim().is_empty()
+            && !a.acceptance.trim().is_empty(),
+        "Give each worker a title, deliverable and acceptance criteria"
+    );
+    ensure!(
+        a.files.len() <= 128 && a.deliverable.len() + a.acceptance.len() <= 24000,
+        "Assignment is too large"
+    );
+    for p in &a.files {
+        ensure!(
+            p == "."
+                || (!p.contains(['\\', ':', '*', '?'])
+                    && p.split('/').all(|c| !c.is_empty()
+                        && c != "."
+                        && c != ".."
+                        && !c.eq_ignore_ascii_case(".git"))),
+            "Use exact project-relative file or directory paths: {p}"
+        );
+    }
+    Ok(())
+}
+
+impl Store {
+    pub fn team_settings(&self) -> Result<Settings> {
+        let (lead_model,worker_model,parallelism,argv,lead_effort,worker_effort):(_,_,_,String,_,_)= self.db.lock().unwrap().query_row("SELECT lead_model,worker_model,parallelism,check_args,lead_effort,worker_effort FROM team_settings WHERE id=1",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+        Ok(Settings {
+            lead_model,
+            worker_model,
+            lead_effort,
+            worker_effort,
+            parallelism,
+            check_args: serde_json::from_str(&argv)?,
+        })
+    }
+    pub fn configure_team(&self, settings: &Settings) -> Result<()> {
+        ensure!(
+            (1..=2).contains(&settings.parallelism),
+            "Choose one or two concurrent workers"
+        );
+        ensure!(
+            settings
+                .check_args
+                .first()
+                .is_none_or(|x| !x.trim().is_empty()),
+            "Choose a check executable"
+        );
+        self.db.lock().unwrap().execute("UPDATE team_settings SET lead_model=?1,worker_model=?2,parallelism=?3,check_args=?4,lead_effort=?5,worker_effort=?6 WHERE id=1",params![settings.lead_model.trim(),settings.worker_model.trim(),settings.parallelism,serde_json::to_string(&settings.check_args)?,settings.lead_effort,settings.worker_effort])?;
+        Ok(())
+    }
+    pub fn workers(&self, lead: i64) -> Result<Vec<Worker>> {
+        let db = self.db.lock().unwrap();
+        let mut q=db.prepare("SELECT id,spec,state,run,tries,detail,repeats,tokens FROM workers WHERE lead=?1 ORDER BY id")?;
+        let rows = q.query_map([lead], |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, String>(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, spec, state, run, tries, detail, repeats, tokens) = row?;
+            Ok(Worker {
+                id,
+                assignment: serde_json::from_str(&spec)?,
+                state,
+                run,
+                tries,
+                detail,
+                repeats,
+                tokens,
+            })
+        })
+        .collect()
+    }
+    fn worker_state(&self, id: i64, state: &str, detail: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE workers SET state=?2,detail=?3 WHERE id=?1",
+            params![id, state, clipped(detail, 4000)],
+        )?;
+        Ok(())
+    }
+    fn block_worker(&self, id: i64, err: &str) -> Result<()> {
+        let reason = clipped(err, 4000);
+        let signature = crate::digest(reason.as_bytes());
+        self.db.lock().unwrap().execute("UPDATE workers SET state='blocked',detail=?2,repeats=CASE WHEN signature=?3 THEN repeats+1 ELSE 1 END,signature=?3 WHERE id=?1",params![id,reason,signature])?;
+        Ok(())
+    }
+    fn child_store(&self, lead: i64, worker: i64) -> Result<Store> {
+        Store::open_role(
+            &self.work(lead),
+            &self.dir.join("workers").join(worker.to_string()),
+            true,
+        )
+    }
+    fn queue(&self, lead: i64, assignments: &[Assignment]) -> Result<()> {
+        ensure!(
+            !assignments.is_empty() && assignments.len() <= 16,
+            "Delegate between one and sixteen tasks per batch"
+        );
+        let existing = self.workers(lead)?;
+        let mut graph = existing
+            .iter()
+            .map(|w| (w.assignment.key.clone(), w.assignment.depends_on.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut keys = HashSet::new();
+        for a in assignments {
+            validate(a)?;
+            ensure!(keys.insert(&a.key), "Duplicate task key {}", a.key);
+            if let Some(w) = existing.iter().find(|w| w.assignment.key == a.key) {
+                ensure!(
+                    w.assignment == *a || w.state == "blocked",
+                    "Task {} already exists with another assignment",
+                    a.key
+                );
+            }
+            graph.insert(a.key.clone(), a.depends_on.clone());
+        }
+        ensure!(
+            graph.len() <= 128,
+            "Conversation already has 128 delegated tasks"
+        );
+        let mut ordered = HashSet::new();
+        while ordered.len() < graph.len() {
+            let before = ordered.len();
+            for (name, deps) in &graph {
+                if deps.iter().all(|dep| ordered.contains(dep)) {
+                    ordered.insert(name.clone());
+                }
+            }
+            ensure!(
+                ordered.len() > before,
+                "Unknown dependency or dependency cycle in delegated tasks"
+            );
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let mut dispatched = Vec::new();
+        for a in assignments {
+            let id = tx
+                .query_row(
+                    "INSERT INTO workers(lead,name,spec,state) VALUES(?1,?2,?3,'queued')
+                 ON CONFLICT(lead,name) DO UPDATE SET state='queued',spec=excluded.spec
+                 WHERE workers.state='blocked' AND workers.repeats<2 AND workers.tries<4
+                 RETURNING id",
+                    params![lead, a.key, serde_json::to_string(a)?],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            if let Some(id) = id {
+                dispatched.push(id);
+            }
+        }
+        if !dispatched.is_empty() {
+            tx.execute(
+                "INSERT INTO events(attempt,kind,summary) VALUES(?1,'workshop/dispatch',?2)",
+                params![lead, serde_json::to_string(&dispatched)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn recover_workers(&self) -> Result<()> {
+        if self.worker {
+            return Ok(());
+        }
+        let pending: Vec<(i64, i64, Option<i64>, String)> = {
+            let db = self.db.lock().unwrap();
+            let mut q = db.prepare(
+                "SELECT id,lead,run,state FROM workers WHERE state IN ('running','integrating')",
+            )?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (id, lead, run, state) in pending {
+            if state == "integrating"
+                && let Some(run) = run
+            {
+                let repair = (|| -> Result<()> {
+                    let child = self.child_store(lead, id)?;
+                    child.accept(run)?;
+                    Ok(())
+                })();
+                match repair {
+                    Ok(()) => self.worker_state(
+                        id,
+                        "checking",
+                        "Recovered the integrated patch; waiting for its combined check.",
+                    )?,
+                    Err(e) => self.block_worker(id, &format!("{e:#}"))?,
+                }
+                continue;
+            }
+            self.worker_state(
+                id,
+                "blocked",
+                "Interrupted. Resume the lead to finish this assignment from the saved work.",
+            )?;
+        }
+        Ok(())
+    }
+    pub fn checkpoint(&self, lead: i64, decisions: &str, next: &str) -> Result<()> {
+        self.db.lock().unwrap().execute("INSERT INTO checkpoints VALUES(?1,?2,?3) ON CONFLICT(lead) DO UPDATE SET decisions=?2,next_task=?3",params![lead,clipped(decisions,4000),clipped(next,2000)])?;
+        Ok(())
+    }
+    pub fn handoff(&self, lead: i64) -> Result<String> {
+        let db = self.db.lock().unwrap();
+        let mut q=db.prepare("SELECT c.decisions,c.next_task FROM checkpoints c JOIN attempts a ON a.id=c.lead WHERE c.lead=?1 OR a.state='accepted' ORDER BY (c.lead=?1) DESC,c.lead DESC LIMIT 3")?;
+        let rows = q
+            .query_map([lead], |r| {
+                Ok(format!(
+                    "Decisions: {}\nNext: {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(q);
+        drop(db);
+        let mut text = rows.join("\n");
+        for w in self
+            .workers(lead)?
+            .into_iter()
+            .filter(|w| w.state != "finished")
+            .take(16)
+        {
+            text.push_str(&format!(
+                "\n{} [{}]: {} — {}",
+                w.assignment.key,
+                w.state,
+                w.assignment.deliverable,
+                clipped(&w.detail, 300)
+            ));
+        }
+        Ok(clipped(&text, 10000))
+    }
+    pub fn current_checkpoint(&self, lead: i64) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT decisions,next_task FROM checkpoints WHERE lead=?1",
+                [lead],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+    pub fn has_checkpoint(&self, lead: i64) -> Result<bool> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT 1 FROM checkpoints WHERE lead=?1", [lead], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()?
+            .is_some())
+    }
+}
+
+pub(crate) fn tools() -> Value {
+    let string = json!({"type":"string"});
+    let strings = json!({"type":"array","items":string});
+    json!([
+        {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
+    ])
+}
+
+impl Store {
+    pub fn usage(&self, id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT tokens FROM usage WHERE attempt=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+    pub(crate) fn interrupt_workers(&self, lead: i64) -> Result<()> {
+        self.controls.lock().unwrap().clear();
+        self.db.lock().unwrap().execute("UPDATE workers SET state='blocked',detail='Interrupted by the creator. Resume to retry this assignment.' WHERE lead=?1 AND state IN ('running','queued','checking')",[lead])?;
+        Ok(())
+    }
+    pub fn stop_worker(&self, worker: i64) -> Result<()> {
+        self.controls
+            .lock()
+            .unwrap()
+            .get(&worker)
+            .context("Worker has already stopped")?
+            .send(provider::Control::Cancel)
+            .map_err(|_| anyhow::anyhow!("Worker has already stopped"))
+    }
+    async fn run_assignment(
+        &self,
+        lead: i64,
+        w: &Worker,
+        policy: &crate::worker_policy::WorkerPolicy,
+        notify: &dyn Fn(provider::ReplyUpdate<'_>),
+    ) -> Result<()> {
+        let (model, effort) = self.worker_inference(policy, &w.assignment).await?;
+        let child = self.child_store(lead, w.id)?;
+        let last = if let Some(run) = w.run {
+            let previous = child.attempt(run)?;
+            format!(
+                "Previous attempt: {}. Integration feedback: {}. Prior worker summary: {}",
+                previous.state,
+                w.detail,
+                clipped(&previous.action, 1800)
+            )
+        } else {
+            String::new()
+        };
+        let s = &w.assignment;
+        let prompt = format!(
+            "{}\n\nDeliverable: {}\nAcceptance: {}\nAllowed edit paths: {:?}\nAn empty path list means read-only. Dependencies: {:?}.\n{}\n{}",
+            s.title,
+            s.deliverable,
+            s.acceptance,
+            s.files,
+            s.depends_on,
+            self.handoff(lead)?,
+            last
+        );
+        let a = child.prepare_inference(&prompt, &model, &effort, None, None, &[])?;
+        self.db.lock().unwrap().execute(
+            "UPDATE workers SET run=?2,detail='Working in isolated copy' WHERE id=?1",
+            params![w.id, a.id],
+        )?;
+        notify(provider::ReplyUpdate::WorkersChanged);
+        let (tx, rx) = provider::channel();
+        self.controls.lock().unwrap().insert(w.id, tx);
+        let update_error = std::cell::RefCell::new(None);
+        let result = provider::worker_turn(&child, &a, rx, &|event| {
+            let updated = match event {
+                provider::ReplyUpdate::AccountUsage(_) => return notify(event),
+                provider::ReplyUpdate::Usage(tokens) => self
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE workers SET tokens=?2 WHERE id=?1",
+                        params![w.id, w.tokens.unwrap_or(0) + tokens],
+                    )
+                    .map(|_| ())
+                    .map_err(Into::into),
+                provider::ReplyUpdate::Activity(action) => {
+                    self.worker_state(w.id, "running", action)
+                }
+                _ => return,
+            };
+            if let Err(e) = updated {
+                update_error.replace(Some(e));
+            }
+            notify(provider::ReplyUpdate::WorkersChanged);
+        })
+        .await;
+        self.controls.lock().unwrap().remove(&w.id);
+        if let Some(e) = update_error.into_inner() {
+            return Err(e);
+        }
+        result?;
+        let a = child.attempt(a.id)?;
+        for path in git::changed_paths(&child.work(a.id), &a.base, &a.candidate)? {
+            ensure!(
+                s.files.iter().any(|scope| covers(scope, &path)),
+                "Worker edited {path} outside its assigned scope"
+            );
+        }
+        self.worker_state(w.id, "review", &a.action)?;
+        notify(provider::ReplyUpdate::WorkersChanged);
+        Ok(())
+    }
+    async fn drive_worker(
+        &self,
+        lead: i64,
+        w: Worker,
+        policy: &crate::worker_policy::WorkerPolicy,
+        notify: &dyn Fn(provider::ReplyUpdate<'_>),
+    ) -> Result<()> {
+        if let Err(e) = self.run_assignment(lead, &w, policy, notify).await {
+            self.block_worker(w.id, &format!("{e:#}"))?;
+            notify(provider::ReplyUpdate::WorkersChanged);
+        }
+        Ok(())
+    }
+    fn integrate(&self, lead: i64, w: &Worker) -> Result<()> {
+        let run = w.run.context("Missing worker revision")?;
+        let child = self.child_store(lead, w.id)?;
+        if !child.attempt(run)?.patch.is_empty() {
+            self.worker_state(w.id, "integrating", &w.detail)?;
+            child.accept(run)?;
+        }
+        self.worker_state(w.id, "checking", &w.detail)
+    }
+    async fn verify_combined(&self, lead: &Attempt, settings: &Settings) -> Result<()> {
+        let work = self.work(lead.id);
+        let (tree, _) = git::capture(&work, &lead.base)?;
+        if settings.check_args.is_empty() {
+            git::git(&work, &["diff", "--check", &lead.base, &tree])?;
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                self.run_check(lead.id, &settings.check_args, &tree),
+            )
+            .await
+            .context("Project check timed out after five minutes")??;
+            ensure!(
+                git::capture(&work, &lead.base)?.0 == tree,
+                "The check modified the files being verified"
+            );
+        }
+        self.db.lock().unwrap().execute("INSERT INTO verified_team VALUES(?1,?2,?3) ON CONFLICT(lead) DO UPDATE SET tree=?2,check_args=?3",params![lead.id,tree,serde_json::to_string(&settings.check_args)?])?;
+        Ok(())
+    }
+    pub fn verified_candidate(&self, attempt: &Attempt) -> Result<bool> {
+        self.verified(attempt.id, &attempt.candidate, &self.team_settings()?)
+    }
+    pub(crate) fn verified(&self, id: i64, tree: &str, settings: &Settings) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM verified_team WHERE lead=?1 AND tree=?2 AND check_args=?3)",params![id,tree,serde_json::to_string(&settings.check_args)?],|r|r.get(0))?)
+    }
+    pub(crate) async fn verify_final(&self, lead: &Attempt) -> Result<()> {
+        ensure!(
+            self.workers(lead.id)?.iter().all(|w| w.state == "finished"),
+            "Delegated work is blocked. Resume the lead to resolve it."
+        );
+        let settings = self.team_settings()?;
+        let (tree, _) = git::capture(&self.work(lead.id), &lead.base)?;
+        if !self.verified(lead.id, &tree, &settings)? {
+            self.verify_combined(lead, &settings).await?;
+        }
+        Ok(())
+    }
+    async fn execute_queue(
+        &self,
+        lead: &Attempt,
+        notify: &dyn Fn(provider::ReplyUpdate<'_>),
+    ) -> Result<String> {
+        let settings = self.team_settings()?;
+        let policy = self.effective_worker_policy(lead.id)?;
+        let mut running = FuturesUnordered::new();
+        loop {
+            let workers = self.workers(lead.id)?;
+            if !running.is_empty() && !workers.iter().any(|w| w.state == "queued") {
+                // No more slots to fill. Check the final siblings together.
+                running.next().await.transpose()?;
+                continue;
+            }
+            for w in workers.iter().filter(|w| w.state == "review") {
+                match self.integrate(lead.id, w) {
+                    Ok(()) => {}
+                    Err(e) => self.block_worker(w.id, &format!("{e:#}"))?,
+                }
+            }
+            let checked: Vec<_> = self
+                .workers(lead.id)?
+                .into_iter()
+                .filter(|w| w.state == "checking")
+                .collect();
+            if !checked.is_empty() {
+                notify(provider::ReplyUpdate::WorkersChanged);
+                let result = self.verify_combined(lead, &settings).await;
+                // An in-flight sibling may supply the other half of a combined check.
+                if result.is_err() && !running.is_empty() {
+                    running.next().await.transpose()?;
+                    continue;
+                }
+                for w in checked {
+                    if let Err(e) = &result {
+                        self.block_worker(w.id, &format!("Combined check failed: {e:#}"))?;
+                    } else {
+                        self.worker_state(w.id, "finished", &w.detail)?;
+                    }
+                }
+                notify(provider::ReplyUpdate::WorkersChanged);
+            }
+            let workers = self.workers(lead.id)?;
+            let slots = settings.parallelism - running.len();
+            for w in next_wave(&workers, slots) {
+                self.db.lock().unwrap().execute(
+                    "UPDATE workers SET state='running',tries=tries+1,run=NULL,detail='Preparing isolated copy' WHERE id=?1",
+                    [w.id],
+                )?;
+                running.push(self.drive_worker(lead.id, w.clone(), &policy, notify));
+            }
+            notify(provider::ReplyUpdate::WorkersChanged);
+            if let Some(done) = running.next().await {
+                done?;
+            } else {
+                for w in workers.iter().filter(|w| w.state == "queued") {
+                    self.worker_state(
+                        w.id,
+                        "blocked",
+                        "A prerequisite is blocked. Complete it before retrying this task.",
+                    )?;
+                }
+                break;
+            }
+        }
+        notify(provider::ReplyUpdate::WorkersChanged);
+        let output = self
+            .workers(lead.id)?
+            .iter()
+            .map(|w| {
+                format!(
+                    "{} [{}] {}: {}",
+                    w.assignment.key,
+                    w.state,
+                    w.assignment.title,
+                    clipped(&w.detail, 1200)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = clipped(&output, 24000);
+        ensure!(
+            self.workers(lead.id)?.iter().all(|w| w.state == "finished"),
+            "Worker feedback:\n{output}\nRetry the owning key. After two identical failures or four runs, repair directly and use workshop_resolve or report the blocker."
+        );
+        Ok(output)
+    }
+}
+
+pub(crate) async fn dispatch(
+    store: &Store,
+    lead: &Attempt,
+    request: &Value,
+    notify: &dyn Fn(provider::ReplyUpdate<'_>),
+) -> Result<String> {
+    let args = &request["arguments"];
+    match request["tool"].as_str() {
+        Some("workshop_delegate") => {
+            let assignments: Vec<Assignment> = serde_json::from_value(args["tasks"].clone())?;
+            store.queue(lead.id, &assignments)?;
+            notify(provider::ReplyUpdate::WorkersChanged);
+            store.execute_queue(lead, notify).await
+        }
+        Some("workshop_resolve") => {
+            let key = args["key"].as_str().context("Missing task key")?;
+            let detail = args["resolution"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("Describe the resolution")?;
+            let w = store
+                .workers(lead.id)?
+                .into_iter()
+                .find(|w| w.assignment.key == key && w.state == "blocked")
+                .context("Select a blocked worker")?;
+            store.verify_combined(lead, &store.team_settings()?).await?;
+            store.worker_state(w.id, "finished", detail)?;
+            notify(provider::ReplyUpdate::WorkersChanged);
+            Ok("Resolution verified and recorded.".into())
+        }
+        Some("workshop_checkpoint") => {
+            store.checkpoint(
+                lead.id,
+                args["decisions"].as_str().context("Missing decisions")?,
+                args["next_task"].as_str().context("Missing next task")?,
+            )?;
+            Ok("Checkpoint saved for review.".into())
+        }
+        _ => anyhow::bail!("Unknown Workshop tool"),
+    }
+}
+#[cfg(test)]
+mod tests;

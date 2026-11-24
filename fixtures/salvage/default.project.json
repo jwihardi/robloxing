@@ -1,9 +1,0 @@
-{
-  "name": "Salvage workshop fixture",
-  "tree": {
-    "$className": "DataModel",
-    "ReplicatedStorage": {
-      "Salvage": { "$path": "src/Salvage.luau" }
-    }
-  }
-}

@@ -14,8 +14,8 @@ impl Case {
         let project = temp.path().join("My Game");
         let home = temp.path().join("data");
         fs::create_dir(&project)?;
-        fs::write(project.join(".gitattributes"), "*.luau text eol=lf\n")?;
-        fs::write(project.join("score.luau"), "return 0\n")?;
+        fs::write(project.join(".gitattributes"), "score.txt text eol=lf\n")?;
+        fs::write(project.join("score.txt"), "Score: 0\n")?;
         drop(Store::open(&project, &home)?);
         Ok(Self {
             _temp: temp,
@@ -37,16 +37,100 @@ impl Case {
     }
 }
 #[test]
+#[ignore = "sends two messages through the locally signed-in Codex provider"]
+fn live_followup_reuses_the_session_and_streams_both_replies() -> Result<()> {
+    use std::time::Instant;
+    use workshop::provider::{self, ReplyUpdate};
+
+    let case = Case::new()?;
+    let store = case.open()?;
+    let mut session = None;
+    let mut attempt = store.prepare("hi", "", None)?;
+    for index in 0..2 {
+        if index != 0 {
+            attempt = store.resume(attempt.id)?;
+        }
+        let (_control, input) = provider::channel();
+        let start = Instant::now();
+        let mut first_text = None;
+        let mut streamed = String::new();
+        provider::run_turn(
+            &mut session,
+            &store,
+            &attempt,
+            "hi",
+            input,
+            false,
+            |update| {
+                if let ReplyUpdate::Delta(text) = update {
+                    first_text.get_or_insert_with(|| start.elapsed());
+                    streamed.push_str(text);
+                }
+            },
+        )?;
+        assert!(session.is_some());
+        let messages = store.messages_after(attempt.id, 0)?;
+        assert_eq!(messages.iter().filter(|m| !m.from_user).count(), index + 1);
+        assert_eq!(messages.last().unwrap().text, streamed);
+        eprintln!("Turn {} first text in {:?}", index + 1, first_text.unwrap());
+    }
+    let log = fs::read_to_string(store.folder(attempt.id).join("events.jsonl"))?;
+    let events = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(events.iter().filter(|v| v["id"] == 1).count(), 1);
+    assert!(events.iter().any(|v| {
+        v["id"] == 5
+            && v["result"]["data"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == &attempt.session))
+    }));
+    assert_eq!(events.iter().filter(|v| v["id"] == 2).count(), 1);
+    Ok(())
+}
+
+#[test]
+fn transcript_reopens_in_order_and_can_fetch_only_new_messages() -> Result<()> {
+    let case = Case::new()?;
+    let store = case.open()?;
+    let attempt = store.prepare("Hello", "", None)?;
+    let id = attempt.id;
+    store.event(id, "item/completed", Some("First reply"))?;
+    store.event(id, "item/started", Some("A tool command"))?;
+    store.event(id, "steer/sent", Some("Keep going"))?;
+    let cursor = store.messages_after(id, 0)?.last().unwrap().id;
+    store.event(id, "user/followup", Some("Explain the result"))?;
+    store.event(id, "agent/message", Some("Final reply"))?;
+    drop(store);
+
+    let store = case.open()?;
+    let messages = store.messages_after(id, 0)?;
+    let transcript: Vec<_> = messages
+        .iter()
+        .map(|m| (m.from_user, m.text.as_str()))
+        .collect();
+    assert_eq!(
+        transcript,
+        [
+            (false, "First reply"),
+            (true, "Keep going"),
+            (true, "Explain the result"),
+            (false, "Final reply")
+        ]
+    );
+    assert_eq!(store.messages_after(id, cursor)?.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn interrupt_review_accept_twice_preserves_creator_and_index() -> Result<()> {
     let case = Case::new()?;
     let store = case.open()?;
-    fs::write(case.project.join("score.luau"), "-- staged\nreturn 0\n")?;
-    case.git(&["add", "score.luau"]);
+    fs::write(case.project.join("score.txt"), "Staged edit\nScore: 0\n")?;
+    case.git(&["add", "score.txt"]);
     let index = case.git(&["diff", "--cached"]);
-    fs::write(
-        case.project.join("score.luau"),
-        "-- staged and edited\nreturn 0\n",
-    )?;
+    fs::write(case.project.join("score.txt"), "Creator edit\nScore: 0\n")?;
     fs::write(case.project.join("creator.txt"), "untracked")?;
     let a = store.prepare("fix score", "", None)?;
     assert_eq!(
@@ -54,8 +138,8 @@ fn interrupt_review_accept_twice_preserves_creator_and_index() -> Result<()> {
         "untracked"
     );
     fs::write(
-        store.work(a.id).join("score.luau"),
-        "-- staged and edited\nreturn 2\n",
+        store.work(a.id).join("score.txt"),
+        "Creator edit\nScore: 2\n",
     )?;
     fs::write(store.work(a.id).join("added.bin"), [0, 4, 0, 8])?;
     assert!(case.open().is_err());
@@ -68,8 +152,8 @@ fn interrupt_review_accept_twice_preserves_creator_and_index() -> Result<()> {
     store.accept(a.id)?;
     store.accept(a.id)?;
     assert_eq!(
-        fs::read_to_string(case.project.join("score.luau"))?,
-        "-- staged and edited\nreturn 2\n"
+        fs::read_to_string(case.project.join("score.txt"))?,
+        "Creator edit\nScore: 2\n"
     );
     assert_eq!(fs::read(case.project.join("added.bin"))?, [0, 4, 0, 8]);
     assert_eq!(case.git(&["diff", "--cached"]), index);
@@ -84,14 +168,14 @@ fn changed_destination_and_corrupt_artifact_never_overwrite_creator() -> Result<
     let case = Case::new()?;
     let store = case.open()?;
     let a = store.prepare("fix", "", None)?;
-    fs::write(store.work(a.id).join("score.luau"), "return 4\n")?;
+    fs::write(store.work(a.id).join("score.txt"), "Score: 4\n")?;
     store.finish(a.id, "review", "Ready")?;
     let a = store.attempt(a.id)?;
-    fs::write(case.project.join("score.luau"), "return 9\n")?;
+    fs::write(case.project.join("score.txt"), "Score: 9\n")?;
     assert!(store.accept(a.id).is_err());
     assert_eq!(
-        fs::read_to_string(case.project.join("score.luau"))?,
-        "return 9\n"
+        fs::read_to_string(case.project.join("score.txt"))?,
+        "Score: 9\n"
     );
     fs::write(
         store.folder(a.id).join(format!("{}.patch", a.patch)),
@@ -103,8 +187,8 @@ fn changed_destination_and_corrupt_artifact_never_overwrite_creator() -> Result<
     assert_eq!(next.task, a.task);
     assert_ne!(next.id, a.id);
     assert_eq!(
-        fs::read_to_string(store.work(next.id).join("score.luau"))?,
-        "return 9\n"
+        fs::read_to_string(store.work(next.id).join("score.txt"))?,
+        "Score: 9\n"
     );
     Ok(())
 }
@@ -113,7 +197,7 @@ fn reopen_recovers_partial_application_and_records_one_decision() -> Result<()> 
     let case = Case::new()?;
     let store = case.open()?;
     let a = store.prepare("two files", "", None)?;
-    fs::write(store.work(a.id).join("score.luau"), "return 1\n")?;
+    fs::write(store.work(a.id).join("score.txt"), "Score: 1\n")?;
     fs::write(store.work(a.id).join("note.txt"), "done\n")?;
     store.finish(a.id, "review", "Ready")?;
     store.status(a.id, "applying", "Applying")?;
@@ -122,8 +206,8 @@ fn reopen_recovers_partial_application_and_records_one_decision() -> Result<()> 
     let store = case.open()?;
     assert_eq!(store.attempt(a.id)?.state, "accepted");
     assert_eq!(
-        fs::read_to_string(case.project.join("score.luau"))?,
-        "return 1\n"
+        fs::read_to_string(case.project.join("score.txt"))?,
+        "Score: 1\n"
     );
     store.accept(a.id)?;
     let db = rusqlite::Connection::open(store.dir.join("workshop.sqlite"))?;

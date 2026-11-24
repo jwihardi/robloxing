@@ -22,14 +22,16 @@ Build a lightweight Windows workspace where a creator can describe a game, direc
 3. **Ship a small desktop UI.** Start with Rust and Slint. Show the active milestone, task list, current action, and reviewable diff. Include submit, steer, cancel, retry, accept, and discard. Preserve pre-existing creator edits. Give every change an isolated working copy and record exactly what acceptance will apply.
 4. **Recover cleanly.** On restart, reconcile incomplete work with the saved patch and revision. Identify interrupted attempts, preserve their output, and allow resumption or a new attempt. Make applying an already accepted patch safe to retry.
 
-**Exit demo:** Ask one agent to fix a failing Luau module test. Close the app after it edits the file, reopen it, inspect the diff, rerun the test, and accept the fix once. Repeat with a pre-existing user edit and confirm it survives.
+**Exit demo:** Ask one agent to fix a failing test in a project of the creator's choice. Close the app after it edits the file, reopen it, inspect the diff, rerun the test, and accept the fix once. Repeat with a pre-existing user edit and confirm it survives.
 
 ## H2 · Add orchestration and bound its resource use
+
+The current implementation covers Codex in both roles. Claude and mixed-provider handoffs are deferred. The Windows verification record tracks the Codex exit demo, cancellation and resource measurements. [H2 verification](docs/h2-verification.md)
 
 | Build | Behavior required for the basic harness |
 |---|---|
 | Lead and worker roles | The creator picks each role's provider and model. The lead owns design decisions, task dependencies, and acceptance criteria. A worker gets the relevant files, interfaces, edit scope, and one concrete deliverable. The lead can handle a small task directly. |
-| Scheduler | Persist tasks as queued, running, blocked, ready for review, or finished. Run one worker by default and permit two independent workers concurrently. Start processes on demand. Treat shared-file changes as dependent work. |
+| Scheduler | Persist tasks as queued, running, blocked, ready for review, or finished. The lead can submit parallel, sequential or mixed plans. New projects allow two concurrent workers and creators can limit a project to one. Start processes on demand. Treat shared-file changes as dependent work. |
 | Integration | Workers return patches against known revisions. Apply compatible patches to an integration worktree and rerun checks on the combined state. Route a conflict or failing check back to its owner with the failing output. |
 | Continuity and control | Store accepted design decisions and the next unfinished task. Hand that compact record to either provider. Show active workers, retry count, and provider-reported usage when available. Stop repeated identical failures and return the blocker to the lead. |
 | Resource discipline | Use event-driven I/O, bounded in-memory logs, and paged history. Queueing tasks should create zero idle worker processes. Closing a project should release its workers and tools. |

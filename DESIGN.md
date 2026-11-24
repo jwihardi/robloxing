@@ -1,47 +1,43 @@
 ---
 version: alpha
 name: Workshop
-description: A dark Windows workspace for directing Codex and following its runs.
+description: A dark Windows chat window for talking to a project agent.
 colors:
-  page: "#1c1c22"
-  rail: "#15151a"
-  panel: "#26262d"
-  edge: "#38383f"
-  text: "#f1ede7"
-  muted: "#b0aeb8"
-  accent: "#edb487"
+  canvas: "#202020"
+  sidebar: "#181818"
+  surface: "#303030"
+  selected: "#3b3b3b"
+  line: "#474747"
+  text: "#f5f5f5"
+  muted: "#b5b5b5"
+  accent: "#eeeeee"
 typography:
   sans: { fontFamily: "Segoe UI" }
-  display: { fontFamily: "Georgia" }
-  mono: { fontFamily: "Consolas" }
+  display: { fontFamily: "Segoe UI" }
 rounded:
-  controls: "4px"
+  composer: "27px"
+  message: "14px"
 spacing:
-  pane: "32px"
-  rail: "16px"
+  reading-gutter: "28px"
+  sidebar: "12px"
 components:
-  signal: {}
-  run-link: {}
-  heading: {}
-  label: {}
-  rule: {}
+  composer: {}
+  action: {}
 ---
 
 # Workshop
 
-Workshop is a single-agent desktop tool for Windows creators. The dark rail holds project navigation and run history. Each run opens onto the agent, its assignment and its recent activity. A four-bar copper mark identifies the agent across the assignment and session views.
+A single sidebar holds New chat, conversation history and the project picker. The composer sits at the bottom in both new and existing chats. The opening question is centered in the space above it. Multiline drafts expand upward to a fixed scrollable height. A pill beside Send shows the current model and effort. It opens a rounded panel where the effort title and model name share a full-width button above the stepped slider. This button opens the scrollable model list. Each stop corresponds to a level supported by that model. In a conversation, the chat title identifies the transcript and its menu offers retry, accept and discard as the conversation state allows.
 
-## Layout and controls
+Right-align the creator's messages on a soft graphite surface. Set Codex replies directly on the canvas and let both be selected and copied. Keep messages in time order within a 720-pixel reading column. This arrangement takes inspiration from the [KiroCrew session screen](https://github.com/kirodotdev/KiroCrew/blob/main/.github/screenshots/25249/composer-meter-after-model-switch-dark.png).
 
-Reserve 244 logical pixels for the rail and let the reading column grow with the window. Show the assignment once above the feed. Keep directions and decisions within reach while history and activity scroll independently.
+Delegating adds an expandable worker tree above the transcript. Each branch pairs an assignment title with its current state. Opening a branch reveals activity, scope, retries, usage and the running worker’s stop action. The tree stays visible while the transcript scrolls and has its own height limit. Direct chats use the full reading space. The persistent rows and per-worker controls take inspiration from KiroCrew. [SubagentProgressBar](https://github.com/kirodotdev/KiroCrew/blob/f4ed7c1fe7e857a533381f9f852b8a17fdee6eca/website/src/pages/chat/SubagentProgressBar.tsx)
 
-Use Georgia for the Workshop name, Segoe UI for instructions and controls, and Consolas for local event times. Use the accent for the selected run, agent mark and status text. Group content with space and quieter surfaces. The `Ink` global in `ui/workshop.slint` owns the runtime palette. Native Slint controls use the dark Fluent palette.
-
-Activity comes from saved events for the selected attempt. Display recent agent messages, directions, checks and named actions in reverse chronological order. The CLI provides the full patch and provider logs.
+The sidebar narrows from 224 to 192 logical pixels on smaller windows. Segoe UI carries the conversation. The wordmark and opening question use the same family at semibold weight. Neutral charcoal surfaces frame the reading column. The bright slider fill and checkmark identify the selected effort and model. The `Theme` global in `ui/workshop.slint` owns the runtime tokens.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|
-| Form | Desk task editor | Task prompt or steering direction | New assignment, active turn, resumed turn | Keyboard input and retained text on setup failure |
-| Select/Listbox | RunLink in the history ListView | Saved attempts ordered newest first | Selected, idle and busy | Selecting a run loads its assignment and activity |
-| Scrollbar | Slint scroll and list widgets | Available pane height | Assignment, history and activity | Scroll independently from the run controls |
-| CRUD | Store and Desk | SQLite attempt state and saved patch | Submit, resume, retry, accept and discard | Recovery tests and native exit demo |
+| Form | Composer | Local draft and selected provider session | Start a chat, steer, follow up | Enter sends, Shift+Enter inserts a newline |
+| Select/Listbox | InferencePicker, EffortTrack and history ListView | Codex model catalog, project defaults and selected chat | Composer and worker settings share the model and effort controls | Each model exposes its supported effort levels and selections survive reopening |
+| Scrollbar | Slint scroll and list widgets | Available pane height | History, messages and composer | Long conversations scroll above the composer |
+| CRUD | Store and Desk | SQLite attempt state and saved patch | New chat, stop, retry, accept and discard | Recovery and transcript tests |

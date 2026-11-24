@@ -1,4 +1,4 @@
-//! Run in a disposable copy of the fixture. stdout is Claude's original JSONL.
+//! Run in a disposable project folder. stdout is Claude's original JSONL.
 use anyhow::{Result, ensure};
 use clap::Parser;
 use std::{fs::File, path::PathBuf, time::Duration};

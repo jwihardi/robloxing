@@ -12,24 +12,38 @@ impl Store {
             !a.candidate.is_empty() && !matches!(a.state.as_str(), "running" | "preparing"),
             "Wait for the attempt to finish."
         );
-        let (exe, args) = args.split_first().context("Choose a check command.")?;
         let work = self.work(id);
         ensure!(
             git::capture(&work, &a.base)?.0 == a.candidate,
             "The working copy changed since review. Resume or retry before checking."
         );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let msg = runtime.block_on(self.run_check(id, args, &a.candidate))?;
+        ensure!(
+            git::capture(&work, &a.base)?.0 == a.candidate,
+            "Check modified the reviewed files. Resume or retry to review its edits."
+        );
+        Ok(msg)
+    }
+    pub(crate) async fn run_check(
+        &self,
+        id: i64,
+        args: &[String],
+        revision: &str,
+    ) -> Result<String> {
+        let (exe, args) = args.split_first().context("Choose a check command.")?;
+        let work = self.work(id);
         let folder = self.folder(id);
         self.artifact(id, "check", "checks.log")?;
         let mut log = OpenOptions::new()
             .create(true)
             .append(true)
             .open(folder.join("checks.log"))?;
-        writeln!(log, "\nChecking {} with {} {:?}", a.candidate, exe, args)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
+        writeln!(log, "\nChecking {} with {} {:?}", revision, exe, args)?;
         let start = log.metadata()?.len();
-        let success = runtime.block_on(async {
+        let success = {
             let mut child = crate::provider::managed(
                 exe,
                 &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -39,8 +53,8 @@ impl Store {
             )?;
             drop(child.stdin().take());
             let status = child.wait().await?;
-            Ok::<_, anyhow::Error>(status.success())
-        })?;
+            status.success()
+        };
         let mut reader = File::open(folder.join("checks.log"))?;
         reader.seek(SeekFrom::Start(
             start.max(reader.metadata()?.len().saturating_sub(4096)),
@@ -52,12 +66,6 @@ impl Store {
         } else {
             "Check failed"
         };
-        if success {
-            ensure!(
-                git::capture(&work, &a.base)?.0 == a.candidate,
-                "Check modified the reviewed files. Resume or retry to review its edits."
-            );
-        }
         self.event(id, "check", Some(msg))?;
         ensure!(
             success,
