@@ -106,7 +106,21 @@ fn lead_and_worker_can_find_and_page_preexisting_reports() -> Result<()> {
             .is_err()
         );
         if reader.worker {
-            assert_eq!(tools(true).as_array().unwrap().len(), 2);
+            let worker_tools = tools(true);
+            let names: Vec<_> = worker_tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "workshop_find_reports",
+                    "workshop_read_report",
+                    "workshop_report_result"
+                ]
+            );
             assert!(call("workshop_delegate", json!({"tasks":[]})).is_err());
         }
     }
@@ -309,11 +323,13 @@ fn older_projects_keep_model_settings_and_accept_per_chat_effort() -> Result<()>
         "ALTER TABLE attempts DROP COLUMN effort;
          ALTER TABLE team_settings DROP COLUMN lead_effort;
          ALTER TABLE team_settings DROP COLUMN worker_effort;
+         ALTER TABLE team_settings DROP COLUMN auto_delegate;
          UPDATE team_settings SET worker_model='existing-worker';",
     )?;
     drop(store);
     let store = Store::open(&project, &home)?;
     assert_eq!(store.team_settings()?.worker_model, "existing-worker");
+    assert!(store.team_settings()?.auto_delegate);
     assert_eq!(store.attempt(a.id)?.model, "existing-model");
     assert!(store.attempt(a.id)?.effort.is_empty());
     store.set_chat_inference(a.id, "changed-model", "high")?;

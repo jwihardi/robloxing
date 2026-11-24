@@ -22,8 +22,34 @@ class FixtureProvider {
     static object Assignment(string key, params string[] dependencies) {
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
+    static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }
+    static void Delegate(List<object> tasks) {
+        Send(new {id="assignment",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="batch",tool="workshop_delegate",arguments=new {tasks=tasks}}});
+    }
+    static object Audit(params string[] dependencies) {
+        return new {key="audit",title="Write audit",deliverable="Independently inspect both files",acceptance="Both contain their own name",files=new string[0],depends_on=dependencies};
+    }
+    static void Report(string status, string summary) {
+        Send(new {id="report",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="report",tool="workshop_report_result",arguments=new {status=status,summary=summary}}});
+    }
     static void Worker(string prompt) {
         task = prompt.Split('\n')[0].Substring("Write ".Length).Trim();
+        if (Mode("autonomous")) {
+            if (!prompt.Contains("Deliver a release bundle")) throw new InvalidDataException("Missing creator goal");
+            if (task == "audit") {
+                if (!prompt.Contains("REPORT-LEFT-42")) throw new InvalidDataException("Missing prerequisite handoff");
+                bool passed = File.ReadAllText("right.txt").Trim() == "right";
+                Report(passed ? "complete" : "needs_changes", passed ? "Joined outputs pass acceptance" : "right.txt contains rigth; expected right");
+                return;
+            }
+            if (task == "fix-right") {File.WriteAllText("right.txt","right\n"); Done("Corrected spelling"); return;}
+            if (task == "publish") {
+                if (!prompt.Contains("Joined outputs pass acceptance")) throw new InvalidDataException("Reviewer evidence missing");
+                File.WriteAllText("publish.txt", "release ready\n"); Done("Release verified"); return;
+            }
+            File.WriteAllText(task+".txt",(task=="right" ? "rigth" : task)+"\n");
+            Report("complete", task=="left" ? "REPORT-LEFT-42" : "First version of right.txt"); return;
+        }
         if (task == "guide" && File.ReadAllText("left.txt").Trim() != "left") throw new InvalidDataException("Missing first integration");
         if (task == "summary" && (File.ReadAllText("guide.txt").Trim() != "guide" || File.ReadAllText("right.txt").Trim() != "right")) throw new InvalidDataException("Missing joined integrations");
         int pid=Process.GetCurrentProcess().Id;
@@ -54,6 +80,16 @@ class FixtureProvider {
             if(args[1]=="add" || args[1]=="install"){File.WriteAllText(file,args[2]);return;}
             if(args[1]=="remove" || args[1]=="uninstall"){File.Delete(file);return;}
         }
+        if(args.Length==1 && args[0]=="joined-check"){
+            File.AppendAllText(Path.Combine(Dir,"joins.log"),"check\n");
+            foreach(string key in new[]{"left","right","guide","summary"}) if(!File.Exists(key+".txt")) {Console.WriteLine("Missing "+key); Environment.Exit(8);}
+            return;
+        }
+        if(args.Length==1 && args[0]=="content-check"){
+            if(Mode("check.hold")) { File.WriteAllText(Path.Combine(Dir,"check.ready"),Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(Timeout.Infinite); }
+            if(File.ReadAllText("answer.txt").Trim()!="correct") {Console.WriteLine("answer.txt must contain correct");Environment.Exit(7);}
+            return;
+        }
         if(args.Length==1 && args[0]=="check"){ if(File.Exists(Path.Combine(Dir,"fail-check"))){Console.WriteLine("fixture verification failed");Environment.Exit(9);} return;}
         if(args.Length==1 && args[0]=="sleeper"){Thread.Sleep(Timeout.Infinite);return;}
         string line;
@@ -61,6 +97,8 @@ class FixtureProvider {
             var msg=Json.Deserialize<Dictionary<string,object>>(line);
             if(!msg.ContainsKey("method")){
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
+                if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
+                if(Convert.ToString(msg["id"])=="block") Done("Waiting for the release input.");
                 continue;
             }
             string method=(string)msg["method"];
@@ -75,6 +113,9 @@ class FixtureProvider {
                     new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}}}});
             }
             if(method=="thread/start" || method=="thread/resume"){
+                if (Mode("check-isolation") && (Environment.GetEnvironmentVariable("CODEX_WINDOWS_REGISTERED_CORE") != null ||
+                    !Object.Equals(p["sandbox"], "workspace-write") || !Object.Equals(p["approvalPolicy"], "never")))
+                    throw new InvalidDataException("Unexpected provider process identity or sandbox settings");
                 session=p.ContainsKey("threadId")?(string)p["threadId"]:ThreadId;
                 worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop Codex worker");
                 studio=p.ContainsKey("ephemeral") && Object.Equals(p["ephemeral"],true);
@@ -109,6 +150,32 @@ class FixtureProvider {
                     continue;
                 }
                 if(worker){Worker((string)first["text"]);continue;}
+                string message=(string)first["text"];
+                if (Mode("small-talk")) { Done("Hello!"); continue; }
+                if (Mode("blocker")) {
+                    File.WriteAllText("answer.txt","partial");
+                    Send(new {id="block",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="block",tool="workshop_blocked",arguments=new {reason="Missing release input"}}});
+                    continue;
+                }
+                if (Mode("runner-error")) {
+                    Send(new {method="item/completed",@params=new {threadId=session,turnId=turn,item=new {type="commandExecution",status="failed",exitCode=-1,aggregatedOutput="Unable to start the test command runner"}}});
+                    Done("Work could not run"); continue;
+                }
+                if (Mode("direct-repair")) {
+                    Send(new {method="item/started",@params=new {threadId=session,turnId=turn,item=new {type="fileChange"}}});
+                    File.WriteAllText("answer.txt",message.Contains("answer.txt must contain correct") ? "correct" : "wrong");
+                    Done("Updated the answer"); continue;
+                }
+                if (Mode("autonomous")) {
+                    if (message.StartsWith("Workshop verification")) {
+                        if (!message.Contains("right.txt contains rigth")) throw new InvalidDataException("Missing review finding in repair turn");
+                        var fix = new {key="fix-right",title="Write fix-right",deliverable="Fix spelling",acceptance="right.txt contains right",files=new[]{"right.txt"},depends_on=new string[0]};
+                        Delegate(new List<object>{fix, Audit("left","right","fix-right")});
+                    } else {
+                        Delegate(new List<object>{Assignment("left"),Assignment("right"),Audit("left","right"),Assignment("publish","audit")});
+                    }
+                    continue;
+                }
                 var tasks=new List<object>{Assignment("left"),Assignment("right")};
                 if(File.Exists(Path.Combine(Dir,"mixed"))){
                     tasks.Add(Assignment("guide","left"));

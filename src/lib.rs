@@ -103,7 +103,7 @@ impl Store {
             "SELECT id,kind,summary FROM events
             WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot')
+                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -124,7 +124,10 @@ impl Store {
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
                 from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
-                delivery_notice: matches!(kind.as_str(), "steer/error" | "steer/unavailable"),
+                delivery_notice: matches!(
+                    kind.as_str(),
+                    "steer/error" | "steer/unavailable" | "workshop/repair"
+                ),
                 dispatched_workers,
                 text,
             });
@@ -177,10 +180,15 @@ impl Store {
             db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.studio_tools(name TEXT PRIMARY KEY, path TEXT NOT NULL)")?;
         }
         let tx = db.transaction()?;
-        for (table, column) in [
-            ("team_settings", "lead_effort"),
-            ("team_settings", "worker_effort"),
-            ("attempts", "effort"),
+        for (table, column, definition) in [
+            ("team_settings", "lead_effort", "TEXT NOT NULL DEFAULT ''"),
+            ("team_settings", "worker_effort", "TEXT NOT NULL DEFAULT ''"),
+            (
+                "team_settings",
+                "auto_delegate",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+            ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
         ] {
             let missing: bool = tx.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
@@ -189,7 +197,7 @@ impl Store {
             )?;
             if missing {
                 tx.execute_batch(&format!(
-                    "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 ))?;
             }
         }
@@ -548,15 +556,9 @@ impl Store {
         }
         if !self.worker {
             ensure!(
-                self.workers(id)?.iter().all(|w| w.state == "finished"),
-                "Resolve the unfinished workers before accepting this change."
+                self.candidate_ready(&a, &self.workers(id)?)?,
+                "Resolve unfinished work and verify the final revision before accepting."
             );
-            if !self.workers(id)?.is_empty() {
-                ensure!(
-                    self.verified(id, &a.candidate, &self.team_settings()?)?,
-                    "The combined revision needs verification. Resume the lead before accepting."
-                );
-            }
             if a.state == "review" && a.patch.is_empty() && self.has_checkpoint(id)? {
                 return self.decide(id, "accepted", "Decisions saved for the next chat");
             }

@@ -456,10 +456,11 @@ export component Desk inherits Window {
     callback reload-models();
     callback choose-inference(bool,string);
     in property <bool> parallel-workers;
+    in property <bool> auto-delegate;
     in property <bool> checkpoint-only;
     in property <string> checkpoint;
     private property <bool> show-checkpoint;
-    callback save-parallel(bool);
+    callback save-scheduling(bool,bool);
     callback stop-worker(int);
     private property <int> expanded-worker: -1;
     private property <bool> show-workers: true;
@@ -1103,7 +1104,8 @@ export component Desk inherits Window {
             AgentPolicyFields { inherited-policy:root.inherited-policy; allowed-model-names:root.allowed-model-names;
                 all-models:root.all-models; policy-models:root.policy-models; cap-levels:root.cap-levels; cap-index:root.cap-index;
                 effort-name:"Maximum subagent effort"; change-policy(f,v)=>{root.change-policy(f,v);} dismiss=>{root.dismiss-panel();} }
-            if !root.editing-chat-policy: CheckBox { checked: root.parallel-workers; text: "Allow two workers in this project"; toggled => {root.save-parallel(self.checked);} }
+            if !root.editing-chat-policy: CheckBox { checked: root.auto-delegate; text: "Auto-delegate project tasks"; toggled => {root.save-scheduling(self.checked,root.parallel-workers);} }
+            if !root.editing-chat-policy: CheckBox { checked: root.parallel-workers; text: "Allow two workers in this project"; toggled => {root.save-scheduling(root.auto-delegate,self.checked);} }
             if !root.editing-chat-policy || !root.catalog-ready: Action { label: "Refresh models"; enabled: root.catalog-status != "Loading models…"; activate => {root.reload-models();} }
             Action { label: root.editing-chat-policy ? "Edit global defaults" : "Back to chat settings"; activate => {root.open-policy(!root.editing-chat-policy);} }
         }

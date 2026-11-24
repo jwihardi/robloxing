@@ -44,6 +44,9 @@ enum Action {
         worker_effort: Option<String>,
         #[arg(long)]
         parallelism: Option<usize>,
+        /// Automatically assign divisible work. Set false to delegate only by request.
+        #[arg(long)]
+        auto_delegate: Option<bool>,
         #[arg(long)]
         check_args: Option<String>,
     },
@@ -302,6 +305,7 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             lead_effort,
             worker_effort,
             parallelism,
+            auto_delegate,
             check_args,
         } => {
             let mut s = store.team_settings()?;
@@ -316,6 +320,9 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             }
             if let Some(v) = worker_effort {
                 s.worker_effort = v;
+            }
+            if let Some(v) = auto_delegate {
+                s.auto_delegate = v;
             }
             if let Some(v) = parallelism {
                 s.parallelism = v;

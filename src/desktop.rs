@@ -511,6 +511,7 @@ impl App {
             picker(&catalog, &s.lead_model, &s.lead_effort, true)
         });
         ui.set_parallel_workers(s.parallelism == 2);
+        ui.set_auto_delegate(s.auto_delegate);
         Ok(())
     }
     fn selected_policy(&self, store: &Store) -> Result<Option<WorkerPolicy>> {
@@ -830,11 +831,10 @@ impl App {
             );
             ui.set_checkpoint_only(checkpoint_only);
             let workers = store.workers(a.id)?;
-            let verified = workers.is_empty() || store.verified_candidate(a)?;
+            let verified = store.candidate_ready(a, &workers)?;
             ui.set_can_review(
                 ((done || a.state == "applying") && !a.patch.is_empty() || checkpoint_only)
-                    && verified
-                    && workers.iter().all(|w| w.state == "finished"),
+                    && verified,
             );
             ui.set_can_discard(done);
             ui.set_can_resume(done && !a.session.is_empty());
@@ -1352,15 +1352,16 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
-    ui.on_save_parallel(move |parallel| {
+    ui.on_save_scheduling(move |auto, parallel| {
         let result = (|| -> Result<()> {
             let slot = a.store.borrow();
             let store = slot.as_ref().context("Open a project")?;
             let mut s = store.team_settings()?;
-            let previous_limit = s.parallelism;
+            let changed = s.auto_delegate != auto || (s.parallelism == 2) != parallel;
+            s.auto_delegate = auto;
             s.parallelism = if parallel { 2 } else { 1 };
             store.configure_team(&s)?;
-            if s.parallelism != previous_limit {
+            if changed {
                 // The lead receives its worker limit when opening or resuming its thread.
                 a.session.take();
             }

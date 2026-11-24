@@ -20,7 +20,13 @@ For automation, pass `--headless` first to run a command in the desktop executab
 
 ## Working with agents
 
-The Codex lead chooses how to split a task. New projects allow two workers at once. For example, the lead can assign a settings screen and a file importer in parallel, then start importer tests as soon as the importer passes its checks, even while work on the screen continues. Tasks that edit overlapping paths run in order.
+Give Workshop the outcome and any constraints. The lead handles quick questions directly. Automatic delegation is on by default. For a divisible project task the lead can assign independent work in parallel and add dependent work as results arrive. Each dependent worker receives the integrated files and its prerequisites’ findings, including read-only reviews. Overlapping edit scopes run in order.
+
+Open **Subagents → Edit global defaults** to set scheduling for the current project. Turn off **Auto-delegate project tasks** to use workers only when you ask. **Allow two workers in this project** controls whether independent assignments can run together. The CLI equivalents are `workshop-cli team --auto-delegate false` and `workshop-cli team --parallelism 1`.
+
+Workers can report unmet acceptance criteria and return a concrete finding to the lead. An unresolved owner holds dependent work in the queue. When the owner is repaired, its waiting tasks become eligible automatically. Workshop checks intermediate patches before releasing dependencies and runs the configured project command on the joined revision. With no configured command the automatic check is `git diff --check`. The lead and workers can also run the project’s own behavioral checks in their provider sessions.
+
+If the lead finishes with an unresolved assignment or a failing final check, Workshop sends it the evidence in the same conversation. It can delegate a repair or fix the integrated copy itself. The transcript shows each automatic repair pass. Workshop stops after two extra passes, sooner if the same failure recurs on the same revision, the user stops an assignment, or the lead reports an external blocker. Use **Accept change** to apply the reviewed result. To configure a project check, pass its executable and arguments as a JSON array to `workshop-cli team --check-args`.
 
 Use **+** on the left of the composer to attach files, reference a folder, or paste text. Attachments appear above the draft and can be removed individually. Codex receives PNG, JPEG and WebP files as images, small UTF-8 files as text, and local paths for larger files, binary documents and folders. Keep the original files available when sending or retrying.
 

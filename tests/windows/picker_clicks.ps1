@@ -203,6 +203,17 @@ try {
     Wait-For { Named 'Edit global defaults' } 'defaults entry in Subagents'
     Click 'Edit global defaults'
     Wait-For { Named 'Subagent defaults' } 'global settings'
+    $toggle = [System.Windows.Automation.TogglePattern]::Pattern
+    $auto = 'Auto-delegate project tasks'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
+    Click $auto
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'delegation by request'
+    Click 'Back to chat settings'
+    Wait-For { Named 'Edit global defaults' } 'chat settings restored'
+    Click 'Edit global defaults'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
+    Click $auto
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'restore automatic delegation'
     Click 'Subagents'
     Wait-For { !(Named 'Subagent defaults') } 'toggle closed'
     Click 'Settings'

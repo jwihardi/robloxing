@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, attempt INTEGER NOT
 
 CREATE TABLE IF NOT EXISTS team_settings(id INTEGER PRIMARY KEY CHECK(id=1), lead_model TEXT NOT NULL,
     worker_model TEXT NOT NULL, parallelism INTEGER NOT NULL CHECK(parallelism IN (1,2)), check_args TEXT NOT NULL,
+    auto_delegate INTEGER NOT NULL DEFAULT 1,
     lead_effort TEXT NOT NULL DEFAULT '', worker_effort TEXT NOT NULL DEFAULT '');
 INSERT OR IGNORE INTO team_settings(id,lead_model,worker_model,parallelism,check_args) VALUES(1,'','',2,'[]');
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL REFERENCES attempts,

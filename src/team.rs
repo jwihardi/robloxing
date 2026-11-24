@@ -13,6 +13,7 @@ pub struct Settings {
     pub lead_effort: String,
     pub worker_effort: String,
     pub parallelism: usize,
+    pub auto_delegate: bool,
     pub check_args: Vec<String>,
 }
 
@@ -129,15 +130,27 @@ fn validate(a: &Assignment) -> Result<()> {
 
 impl Store {
     pub fn team_settings(&self) -> Result<Settings> {
-        let (lead_model,worker_model,parallelism,argv,lead_effort,worker_effort):(_,_,_,String,_,_)= self.db.lock().unwrap().query_row("SELECT lead_model,worker_model,parallelism,check_args,lead_effort,worker_effort FROM team_settings WHERE id=1",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
-        Ok(Settings {
-            lead_model,
-            worker_model,
-            lead_effort,
-            worker_effort,
-            parallelism,
-            check_args: serde_json::from_str(&argv)?,
-        })
+        let (mut settings, argv) = self.db.lock().unwrap().query_row(
+            "SELECT lead_model, worker_model, parallelism, check_args, lead_effort,
+                    worker_effort, auto_delegate FROM team_settings WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    Settings {
+                        lead_model: row.get(0)?,
+                        worker_model: row.get(1)?,
+                        parallelism: row.get(2)?,
+                        lead_effort: row.get(4)?,
+                        worker_effort: row.get(5)?,
+                        auto_delegate: row.get(6)?,
+                        check_args: Vec::new(),
+                    },
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        settings.check_args = serde_json::from_str(&argv)?;
+        Ok(settings)
     }
     pub fn configure_team(&self, settings: &Settings) -> Result<()> {
         ensure!(
@@ -151,7 +164,19 @@ impl Store {
                 .is_none_or(|x| !x.trim().is_empty()),
             "Choose a check executable"
         );
-        self.db.lock().unwrap().execute("UPDATE team_settings SET lead_model=?1,worker_model=?2,parallelism=?3,check_args=?4,lead_effort=?5,worker_effort=?6 WHERE id=1",params![settings.lead_model.trim(),settings.worker_model.trim(),settings.parallelism,serde_json::to_string(&settings.check_args)?,settings.lead_effort,settings.worker_effort])?;
+        self.db.lock().unwrap().execute(
+            "UPDATE team_settings SET lead_model=?1, worker_model=?2, parallelism=?3,
+             check_args=?4, lead_effort=?5, worker_effort=?6, auto_delegate=?7 WHERE id=1",
+            params![
+                settings.lead_model.trim(),
+                settings.worker_model.trim(),
+                settings.parallelism,
+                serde_json::to_string(&settings.check_args)?,
+                settings.lead_effort,
+                settings.worker_effort,
+                settings.auto_delegate
+            ],
+        )?;
         Ok(())
     }
     pub fn workers(&self, lead: i64) -> Result<Vec<Worker>> {
@@ -347,6 +372,37 @@ impl Store {
         }
         Ok(clipped(&text, 10000))
     }
+    fn assignment_context(&self, lead: i64, assignment: &Assignment) -> Result<String> {
+        let attempt = self.attempt(lead)?;
+        let latest: Option<String> = self.db.lock().unwrap().query_row(
+            "SELECT summary FROM events WHERE attempt=?1 AND kind='user/followup' ORDER BY id DESC LIMIT 1",
+            [lead], |row| row.get(0),
+        ).optional()?;
+        let mut context = format!("Project request: {}", clipped(&attempt.prompt, 3500));
+        if let Some(direction) = latest {
+            context.push_str(&format!("\nCurrent request: {}", clipped(&direction, 3500)));
+        }
+        let budget = 12000 / assignment.depends_on.len().max(1);
+        for w in self
+            .workers(lead)?
+            .into_iter()
+            .filter(|w| assignment.depends_on.contains(&w.assignment.key))
+        {
+            context.push_str(&format!(
+                "\nPrerequisite {} [{}]: {}",
+                w.assignment.key,
+                w.state,
+                clipped(&w.detail, budget.min(4000))
+            ));
+        }
+        Ok(context)
+    }
+    pub(crate) fn reported_result(&self, run: i64) -> Result<Option<(String, String)>> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT kind,summary FROM events WHERE attempt=?1 AND kind IN ('worker/complete','worker/needs_changes') ORDER BY id DESC LIMIT 1",
+            [run], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
     pub fn current_checkpoint(&self, lead: i64) -> Result<Option<(String, String)>> {
         Ok(self
             .db
@@ -380,6 +436,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the optional AI summary, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log","summary"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
     ];
     if worker {
+        available.push(json!({"type":"function","name":"workshop_report_result","description":"Report your assignment outcome, verification and actionable findings to the lead and dependent workers. Use needs_changes for a blocker or failed acceptance review.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["complete","needs_changes"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}}));
         return Value::Array(available);
     }
     let lead_tools = json!([
@@ -387,6 +444,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
         {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_blocked","description":"Report a genuine external blocker that prevents completion after available alternatives have been tried. Include the missing input or capability and saved progress. This ends autonomous repair for this request.","inputSchema":{"type":"object","properties":{"reason":string},"required":["reason"],"additionalProperties":false}},
         {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
     ]);
     available.extend(lead_tools.as_array().unwrap().iter().cloned());
@@ -404,9 +462,18 @@ impl Store {
             })
             .optional()?)
     }
-    pub(crate) fn interrupt_workers(&self, lead: i64) -> Result<()> {
+    pub(crate) fn interrupt_workers(&self, lead: i64, cancelled: bool) -> Result<()> {
         self.controls.lock().unwrap().clear();
-        self.db.lock().unwrap().execute("UPDATE workers SET state='blocked',detail='Interrupted by the creator. Resume to retry this assignment.' WHERE lead=?1 AND state IN ('running','queued','checking')",[lead])?;
+        let reason = if cancelled {
+            "Interrupted by the creator. Resume to retry this assignment."
+        } else {
+            "The lead stopped before this assignment finished. Resume to retry."
+        };
+        self.db.lock().unwrap().execute(
+            "UPDATE workers SET state='blocked',detail=?2 WHERE lead=?1
+             AND (state='running' OR (?3 AND state IN ('queued','checking')))",
+            params![lead, reason, cancelled],
+        )?;
         Ok(())
     }
     pub fn stop_worker(&self, worker: i64) -> Result<()> {
@@ -440,12 +507,13 @@ impl Store {
         };
         let s = &w.assignment;
         let prompt = format!(
-            "{}\n\nDeliverable: {}\nAcceptance: {}\nAllowed edit paths: {:?}\nAn empty path list means read-only. Dependencies: {:?}.\n{}\n{}",
+            "{}\n\nDeliverable: {}\nAcceptance: {}\nAllowed edit paths: {:?}\nAn empty path list means read-only. Dependencies: {:?}.\n{}\n{}\n{}",
             s.title,
             s.deliverable,
             s.acceptance,
             s.files,
             s.depends_on,
+            self.assignment_context(lead, s)?,
             self.handoff(lead)?,
             last
         );
@@ -486,7 +554,7 @@ impl Store {
         if let Some(e) = update_error.into_inner() {
             return Err(e);
         }
-        result?;
+        let report = result?;
         let a = child.attempt(a.id)?;
         for path in git::changed_paths(&child.work(a.id), &a.base, &a.candidate)? {
             ensure!(
@@ -494,7 +562,7 @@ impl Store {
                 "Worker edited {path} outside its assigned scope"
             );
         }
-        self.worker_state(w.id, "review", &a.action)?;
+        self.worker_state(w.id, "review", report.as_deref().unwrap_or(&a.action))?;
         notify(provider::ReplyUpdate::WorkersChanged);
         Ok(())
     }
@@ -520,12 +588,19 @@ impl Store {
         }
         self.worker_state(w.id, "checking", &w.detail)
     }
+    fn check_patch(&self, lead: &Attempt) -> Result<()> {
+        let work = self.work(lead.id);
+        let (tree, _) = git::capture(&work, &lead.base)?;
+        git::git(&work, &["diff", "--check", &lead.base, &tree])?;
+        Ok(())
+    }
     async fn verify_combined(&self, lead: &Attempt, settings: &Settings) -> Result<()> {
         let work = self.work(lead.id);
         let (tree, _) = git::capture(&work, &lead.base)?;
-        if settings.check_args.is_empty() {
-            git::git(&work, &["diff", "--check", &lead.base, &tree])?;
-        } else {
+        if self.verified(lead.id, &tree, settings)? {
+            return Ok(());
+        }
+        if !settings.check_args.is_empty() {
             tokio::time::timeout(
                 std::time::Duration::from_secs(300),
                 self.run_check(lead.id, &settings.check_args, &tree),
@@ -536,27 +611,67 @@ impl Store {
                 git::capture(&work, &lead.base)?.0 == tree,
                 "The check modified the files being verified"
             );
+        } else {
+            git::git(&work, &["diff", "--check", &lead.base, &tree])?;
         }
-        self.db.lock().unwrap().execute("INSERT INTO verified_team VALUES(?1,?2,?3) ON CONFLICT(lead) DO UPDATE SET tree=?2,check_args=?3",params![lead.id,tree,serde_json::to_string(&settings.check_args)?])?;
+        self.record_verification(lead.id, &tree, &settings.check_args)
+    }
+    pub(crate) fn record_verification(&self, id: i64, tree: &str, args: &[String]) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO verified_team(lead,tree,check_args) VALUES(?1,?2,?3)
+             ON CONFLICT(lead) DO UPDATE SET tree=excluded.tree,check_args=excluded.check_args",
+            params![id, tree, serde_json::to_string(args)?],
+        )?;
         Ok(())
     }
-    pub fn verified_candidate(&self, attempt: &Attempt) -> Result<bool> {
-        self.verified(attempt.id, &attempt.candidate, &self.team_settings()?)
+    pub(crate) fn has_open_blocker(&self, id: i64) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT COALESCE((SELECT kind='workshop/blocker' FROM events WHERE attempt=?1
+             AND kind IN ('workshop/blocker','workshop/blocker_resolved') ORDER BY id DESC LIMIT 1),0)",
+            [id], |row| row.get(0),
+        )?)
+    }
+    pub fn candidate_ready(&self, a: &Attempt, workers: &[Worker]) -> Result<bool> {
+        if workers.iter().any(|w| w.state != "finished") || self.has_open_blocker(a.id)? {
+            return Ok(false);
+        }
+        let settings = self.team_settings()?;
+        if workers.is_empty() {
+            if a.patch.is_empty() {
+                return Ok(true);
+            }
+            if settings.check_args.is_empty() {
+                let repaired: bool = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM events WHERE attempt=?1 AND kind='workshop/repair')", [a.id], |r| r.get(0))?;
+                if !repaired {
+                    return Ok(true);
+                }
+            }
+        }
+        self.verified(a.id, &a.candidate, &settings)
     }
     pub(crate) fn verified(&self, id: i64, tree: &str, settings: &Settings) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM verified_team WHERE lead=?1 AND tree=?2 AND check_args=?3)",params![id,tree,serde_json::to_string(&settings.check_args)?],|r|r.get(0))?)
     }
     pub(crate) async fn verify_final(&self, lead: &Attempt) -> Result<()> {
+        let workers = self.workers(lead.id)?;
+        let pending = workers
+            .iter()
+            .filter(|w| w.state != "finished")
+            .map(|w| {
+                format!(
+                    "{} [{}]: {}",
+                    w.assignment.key,
+                    w.state,
+                    clipped(&w.detail, 1200)
+                )
+            })
+            .collect::<Vec<_>>();
         ensure!(
-            self.workers(lead.id)?.iter().all(|w| w.state == "finished"),
-            "Delegated work is blocked. Resume the lead to resolve it."
+            pending.is_empty(),
+            "Unfinished assignments:\n{}",
+            clipped(&pending.join("\n"), 16000)
         );
-        let settings = self.team_settings()?;
-        let (tree, _) = git::capture(&self.work(lead.id), &lead.base)?;
-        if !self.verified(lead.id, &tree, &settings)? {
-            self.verify_combined(lead, &settings).await?;
-        }
-        Ok(())
+        self.verify_combined(lead, &self.team_settings()?).await
     }
     async fn execute_queue(
         &self,
@@ -586,7 +701,13 @@ impl Store {
                 .collect();
             if !checked.is_empty() {
                 notify(provider::ReplyUpdate::WorkersChanged);
-                let result = self.verify_combined(lead, &settings).await;
+                // A downstream deliverable may be required by the project-wide test suite.
+                // Release verified patch dependencies now and run the full check on the joined result.
+                let result = if workers.iter().any(|w| w.state == "queued") {
+                    self.check_patch(lead)
+                } else {
+                    self.verify_combined(lead, &settings).await
+                };
                 // An in-flight sibling may supply the other half of a combined check.
                 if result.is_err() && !running.is_empty() {
                     running.next().await.transpose()?;
@@ -614,13 +735,7 @@ impl Store {
             if let Some(done) = running.next().await {
                 done?;
             } else {
-                for w in workers.iter().filter(|w| w.state == "queued") {
-                    self.worker_state(
-                        w.id,
-                        "blocked",
-                        "A prerequisite is blocked. Complete it before retrying this task.",
-                    )?;
-                }
+                // Keep waiting branches queued so fixing their owner unblocks them automatically.
                 break;
             }
         }
@@ -656,6 +771,19 @@ pub(crate) async fn dispatch(
 ) -> Result<String> {
     let args = &request["arguments"];
     match request["tool"].as_str() {
+        Some("workshop_report_result") if store.worker => {
+            let kind = match args["status"].as_str() {
+                Some("complete") => "worker/complete",
+                Some("needs_changes") => "worker/needs_changes",
+                _ => anyhow::bail!("Choose complete or needs_changes."),
+            };
+            let summary = args["summary"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("Describe the result and verification.")?;
+            store.event(lead.id, kind, Some(&clipped(summary, 4000)))?;
+            return Ok("Assignment result recorded.".into());
+        }
         Some("workshop_find_reports") => {
             return Ok(serde_json::to_string(&store.report_archive()?.search(
                 args["query"].as_str().context("Provide a search query.")?,
@@ -716,10 +844,22 @@ pub(crate) async fn dispatch(
                 .into_iter()
                 .find(|w| w.assignment.key == key && w.state == "blocked")
                 .context("Select a blocked worker")?;
-            store.verify_combined(lead, &store.team_settings()?).await?;
+            if store.workers(lead.id)?.iter().any(|w| w.state == "queued") {
+                store.check_patch(lead)?;
+            } else {
+                store.verify_combined(lead, &store.team_settings()?).await?;
+            }
             store.worker_state(w.id, "finished", detail)?;
             notify(provider::ReplyUpdate::WorkersChanged);
-            Ok("Resolution verified and recorded.".into())
+            store.execute_queue(lead, notify).await
+        }
+        Some("workshop_blocked") => {
+            let reason = args["reason"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("Explain the external blocker.")?;
+            store.event(lead.id, "workshop/blocker", Some(&clipped(reason, 4000)))?;
+            Ok("Blocker recorded. Describe what is needed to continue.".into())
         }
         Some("workshop_checkpoint") => {
             store.checkpoint(

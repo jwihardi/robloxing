@@ -88,12 +88,9 @@ def conflict(case):
     assert (integration / "left.txt").read_text() == "left\n"
     (integration / "right.txt").write_text("concurrent lead edit\n")
     case.release("right")
-    finish(proc, False)
-    assert (integration / "right.txt").read_text() == "concurrent lead edit\n"
-    assert case.workers()[1][1] == "blocked"
-    case.call("accept", "1", ok=False)
+    # The lead receives the integration conflict and repairs it on the same user request.
+    finish(proc, True)
     assert not (case.project / "left.txt").exists()
-    case.call("resume", "1", "retry the owner")
     assert [w[2] for w in case.workers()] == [1, 2]
     case.call("accept", "1")
     case.call("accept", "1")
@@ -132,6 +129,7 @@ def overlap(case):
 
 
 def mixed_plan(case):
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "joined-check"]))
     (case.root / "mixed").touch()
     for key in ("left", "right", "guide"):
         case.hold(key)
@@ -153,6 +151,7 @@ def mixed_plan(case):
             proc.kill()
             proc.wait()
     case.call("accept", "1")
+    assert (case.root / "joins.log").read_text().splitlines() == ["check"]
     for key in ("left", "right", "guide", "summary"):
         assert (case.project / (key + ".txt")).read_text() == key + "\n"
 
@@ -167,16 +166,117 @@ def repeated_check(case):
     case.call("accept", "1", ok=False)
 
 
+def autonomous_release(case):
+    (case.root / "autonomous").touch()
+    case.call("run", "Deliver a release bundle with two outputs and a checked release note.")
+    by_key = {key: (state, tries) for key, state, tries, _ in case.workers()}
+    assert by_key == {"left": ("finished", 1), "right": ("finished", 1), "audit": ("finished", 2),
+                      "fix-right": ("finished", 1), "publish": ("finished", 1)}, by_key
+    with sqlite3.connect(case.db) as db:
+        repairs = db.execute("SELECT summary FROM events WHERE kind='workshop/repair'").fetchall()
+        assert len(repairs) == 1 and "rigth" in repairs[0][0], repairs
+        assert not db.execute("SELECT 1 FROM events WHERE kind='user/followup'").fetchone()
+    assert not (case.project / "right.txt").exists()
+    case.call("accept", "1")
+    assert (case.project / "right.txt").read_text().strip() == "right"
+    assert (case.project / "publish.txt").read_text().strip() == "release ready"
+
+
+def direct_repair(case):
+    (case.root / "direct-repair").touch()
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "content-check"]))
+    case.call("run", "Update the answer.")
+    assert case.workers() == []
+    case.call("accept", "1")
+    assert (case.project / "answer.txt").read_text() == "correct"
+
+
+def unavailable_runner(case):
+    (case.root / "runner-error").touch()
+    case.call("run", "Update the project.", ok=False)
+    with sqlite3.connect(case.db) as db:
+        state, action = db.execute("SELECT state,action FROM attempts WHERE id=1").fetchone()
+        assert state == "failed" and "test command runner" in action
+        assert db.execute("SELECT count(*) FROM events WHERE kind='workshop/repair'").fetchone() == (1,)
+    case.call("accept", "1", ok=False)
+
+
+def small_talk(case):
+    for flag in ("small-talk", "fail-check", "check-isolation", "record-inference"):
+        (case.root / flag).touch()
+    case.env["CODEX_WINDOWS_REGISTERED_CORE"] = "inherited-test-marker"
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "check"]))
+    case.call("run", "hi")
+    assert not case.workers()
+    assert len(list(case.root.glob("lead-*.json"))) == 1
+    assert not list(case.home.rglob("checks.log"))
+
+
+def manual_recheck(case):
+    (case.root / "direct-repair").touch()
+    case.call("run", "answer.txt must contain correct")
+    command = [case.env["WORKSHOP_CODEX"], "check"]
+    case.call("team", "--check-args", json.dumps(command))
+    case.call("accept", "1", ok=False)
+    case.call("check", "1", "--", *command)
+    marker = case.root / "fail-check"
+    marker.touch()
+    case.call("check", "1", "--", *command, ok=False)
+    case.call("accept", "1", ok=False)
+    marker.unlink()
+    case.call("check", "1", "--", *command)
+    case.call("accept", "1")
+
+
+def external_blocker(case):
+    marker = case.root / "blocker"
+    marker.touch()
+    case.call("run", "Prepare the release.", ok=False)
+    case.call("accept", "1", ok=False)
+    assert not (case.project / "answer.txt").exists()
+    marker.unlink()
+    (case.root / "direct-repair").touch()
+    case.call("resume", "1", "The release input is here. answer.txt must contain correct.")
+    case.call("accept", "1")
+    assert (case.project / "answer.txt").read_text() == "correct"
+
+
+def cancel_check(case):
+    (case.root / "direct-repair").touch()
+    case.hold("check")
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "content-check"]))
+    proc = case.run("run", "Update the answer.")
+    wait_for(lambda: (case.root / "check.ready").exists() and (case.root / "check.ready").stat().st_size, "check not running")
+    check_pid = int((case.root / "check.ready").read_text())
+    proc.stdin.write(b"/cancel\n")
+    proc.stdin.flush()
+    finish(proc, True)
+    wait_for(lambda: exited(check_pid), "cancelled check still running")
+    case.call("accept", "1", ok=False)
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT state FROM attempts WHERE id=1").fetchone() == ("cancelled",)
+        assert not db.execute("SELECT 1 FROM events WHERE kind='workshop/repair'").fetchone()
+
+
 def model_effort(case):
     (case.root / "record-inference").touch()
     case.call("team", "--lead-model", "fixture-deep", "--lead-effort", "high",
               "--worker-model", "fixture-fast", "--worker-effort", "low")
     case.call("run", "delegate")
-    case.call("resume", "1", "follow up")
+    case.call("team", "--auto-delegate", "false")
+    case.call("resume", "1", "Use workers for the follow-up.")
     for role, expected in (("lead", ("fixture-deep", "high")), ("worker", ("fixture-fast", "low"))):
         requests = [json.loads(p.read_text()) for p in case.root.glob(role + "-*.json")]
         assert len(requests) == 2, (role, requests)
         assert all((r["model"], r["effort"]) == expected for r in requests)
+        hints = [item["text"] for r in requests for item in r["input"]
+                 if item.get("text", "").startswith("[Workshop project setting:")]
+        if role == "worker":
+            assert not hints, hints
+        else:
+            assert len(hints) == 2
+            assert any("automatic delegation]" in hint for hint in hints)
+            assert any("delegation by request]" in hint for hint in hints)
 
 
 def main():
@@ -189,7 +289,8 @@ def main():
         compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
-        for test in (model_effort, mixed_plan, conflict, stop_one, overlap, repeated_check):
+        for test in (autonomous_release, direct_repair, unavailable_runner, small_talk, manual_recheck, external_blocker,
+                     mixed_plan, conflict, stop_one, cancel_check, overlap, repeated_check, model_effort):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))
             print(test.__name__ + " passed", flush=True)
 
