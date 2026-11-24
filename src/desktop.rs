@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use anyhow::{Context, Result};
-use slint::{ComponentHandle, ModelRc, StandardListViewItem, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use std::{
     cell::{Cell, RefCell},
     fs,
@@ -10,11 +10,11 @@ use std::{
     time::Duration,
 };
 use workshop::{
-    Attempt, Store, data_dir,
+    Activity, Attempt, Store, data_dir,
     provider::{self, Control},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Desk, RunRow, UpdateRow} from "ui/workshop.slint"; }
 
 enum Update {
     Opened(Arc<Store>),
@@ -25,6 +25,7 @@ struct App {
     ui: slint::Weak<Desk>,
     store: RefCell<Option<Arc<Store>>>,
     attempts: RefCell<Vec<Attempt>>,
+    activity: RefCell<Vec<Activity>>,
     id: Cell<Option<i64>>,
     control: RefCell<Option<tokio::sync::mpsc::UnboundedSender<Control>>>,
     updates: mpsc::Sender<Update>,
@@ -46,6 +47,33 @@ fn title(state: &str) -> &str {
     }
 }
 impl App {
+    fn show_activity(&self, store: &Store, id: i64) -> Result<()> {
+        let rows = store.recent_activity(id)?;
+        if rows == *self.activity.borrow() {
+            return Ok(());
+        }
+        let entries = rows
+            .iter()
+            .map(|e| UpdateRow {
+                time: e.time.as_str().into(),
+                speaker: match e.kind.as_str() {
+                    "agent/message" | "item/completed" => "Codex",
+                    "steer/sent" => "You",
+                    "check" => "Check",
+                    "turn/started" => "Session",
+                    "error" | "steer/error" | "steer/unavailable" => "Attention",
+                    _ => "Agent",
+                }
+                .into(),
+                message: e.summary.as_str().into(),
+            })
+            .collect::<Vec<_>>();
+        self.ui
+            .unwrap()
+            .set_activity(ModelRc::new(VecModel::from(entries)));
+        self.activity.replace(rows);
+        Ok(())
+    }
     fn render(&self) -> Result<()> {
         let ui = self.ui.unwrap();
         let slot = self.store.borrow();
@@ -55,11 +83,9 @@ impl App {
         let rows = store.attempts()?;
         ui.set_rows(ModelRc::new(VecModel::from(
             rows.iter()
-                .map(|a| {
-                    StandardListViewItem::from(
-                        format!("#{}  {}", a.id, a.prompt.lines().next().unwrap_or("Task"))
-                            .as_str(),
-                    )
+                .map(|a| RunRow {
+                    assignment: a.prompt.lines().next().unwrap_or("Task").into(),
+                    description: format!("Run {:02}   ·   {}", a.id, title(&a.state)).into(),
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -71,7 +97,8 @@ impl App {
             ui.set_task(a.prompt.as_str().into());
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
-            ui.set_revision(format!("Base  {}", a.base.chars().take(8).collect::<String>()).into());
+            ui.set_run_name(format!("Run {:02}", a.id).into());
+            ui.set_model_name(a.model.as_str().into());
             ui.set_running(a.state == "running" && self.control.borrow().is_some());
             let done = matches!(
                 a.state.as_str(),
@@ -86,7 +113,7 @@ impl App {
                     && a.state != "running"
                     && store.work(a.id).join("check.luau").is_file(),
             );
-            ui.set_patch(String::from_utf8_lossy(&store.patch(a)?).as_ref().into());
+            self.show_activity(store, a.id)?;
         }
         self.attempts.replace(rows);
         Ok(())
@@ -129,13 +156,13 @@ impl App {
                             .as_ref()
                             .into(),
                     );
-                    ui.set_milestone(store.milestone()?.into());
                     self.id.set(store.attempts()?.first().map(|a| a.id));
                     self.store.replace(Some(store));
                     ui.set_draft("".into());
                     ui.set_direction("".into());
                 }
                 Update::Started(id) => {
+                    ui.set_notice("".into());
                     self.id.set(Some(id));
                     ui.set_draft("".into());
                     ui.set_direction("".into());
@@ -161,6 +188,7 @@ impl App {
             && let Some(store) = self.store.borrow().as_ref()
         {
             ui.set_action(store.attempt(id)?.action.as_str().into());
+            self.show_activity(store, id)?;
         }
         Ok(())
     }
@@ -265,6 +293,7 @@ fn main() -> Result<()> {
         ui: ui.as_weak(),
         store: Default::default(),
         attempts: Default::default(),
+        activity: Default::default(),
         id: Cell::new(None),
         control: Default::default(),
         updates: tx,

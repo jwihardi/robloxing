@@ -48,7 +48,35 @@ pub struct Store {
     _lock: File,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct Activity {
+    pub time: String,
+    pub kind: String,
+    pub summary: String,
+}
+
 impl Store {
+    /// Recent human-readable updates for the agent window, including older provider events.
+    pub fn recent_activity(&self, id: i64) -> Result<Vec<Activity>> {
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare(
+            "SELECT strftime('%H:%M',recorded,'localtime'),kind,summary FROM events
+             WHERE attempt=? AND summary IS NOT NULL AND
+             (kind IN ('agent/message','item/completed','turn/started','check','steer/sent',
+                       'steer/error','steer/unavailable','error') OR
+              (kind='item/started' AND summary IN ('Editing project files','Thinking through the task')))
+             ORDER BY id DESC LIMIT 40",
+        )?;
+        Ok(query
+            .query_map([id], |r| {
+                Ok(Activity {
+                    time: r.get(0)?,
+                    kind: r.get(1)?,
+                    summary: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     pub fn open(folder: &Path, home: &Path) -> Result<Self> {
         fs::create_dir_all(folder)?;
         fs::create_dir_all(home)?;

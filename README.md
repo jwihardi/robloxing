@@ -1,6 +1,6 @@
 # Workshop
 
-Workshop is a single-agent Windows desktop app for a Git project. Give Codex a task, inspect the resulting diff, run a check and accept the change. You can close Workshop midway through a run and review its edits when you reopen the project.
+Workshop is a single-agent Windows desktop app for a Git project. Give Codex an assignment, follow its activity, and send direction while it works. Reopen the project to continue an interrupted run. The CLI can display the full diff.
 
 ## Run on Windows
 
@@ -10,7 +10,7 @@ Install Git, stable Rust with its C/C++ build tools, and the standalone Codex CL
 cargo run --locked --bin workshop
 ```
 
-Choose **Open folder** for an existing repository root or a folder for a new project. For a new project, Workshop initializes Git and snapshots its contents, respecting Git ignores. The next launch opens the most recent project. You can also pass its folder as the first argument.
+Use **Choose folder** for an existing repository root or a folder for a new project. For a new project, Workshop initializes Git and snapshots its contents, respecting Git ignores. The next launch opens the most recent project. You can also pass its folder as the first argument.
 
 ## Try the failing Luau fixture
 
@@ -27,7 +27,7 @@ try {
 cargo run --locked --bin workshop -- $project
 ```
 
-The initial check fails on collecting two of five items. Assign **Fix the failing capacity test by editing src/Salvage.luau.** Once the agent edits the file, close the app, then reopen the same folder. Select the recovered attempt, inspect the diff, choose **Run Luau check**, then **Accept change**. Run `luau check.luau` in the project folder to verify the accepted result. Repeat with a fresh copy and an uncommitted comment in the same module.
+The initial check fails on collecting two of five items. Assign **Fix the failing capacity test by editing src/Salvage.luau.** Once the agent edits the file, close the app, then reopen the same folder. Select the recovered run, read its activity, choose **Run check**, then **Accept change**. To inspect the patch first, close the window and use the CLI diff command below. Run `luau check.luau` in the project folder to verify the accepted result. Repeat with a fresh copy and an uncommitted comment in the same module.
 
 ## CLI
 

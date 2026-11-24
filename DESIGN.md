@@ -1,14 +1,15 @@
 ---
 version: alpha
 name: Workshop
-description: A Windows workbench for assigning a task and reviewing a file change.
+description: A dark Windows workspace for directing Codex and following its runs.
 colors:
-  text: "#203449"
-  muted: "#526778"
-  rail: "#eaf0f4"
-  page: "#fbfcfd"
-  edge: "#c5d2dc"
-  accent: "#155a83"
+  page: "#1c1c22"
+  rail: "#15151a"
+  panel: "#26262d"
+  edge: "#38383f"
+  text: "#f1ede7"
+  muted: "#b0aeb8"
+  accent: "#edb487"
 typography:
   sans: { fontFamily: "Segoe UI" }
   display: { fontFamily: "Georgia" }
@@ -16,31 +17,31 @@ typography:
 rounded:
   controls: "4px"
 spacing:
-  pane: "26px"
-  rail: "18px"
+  pane: "32px"
+  rail: "16px"
 components:
+  signal: {}
+  run-link: {}
   heading: {}
-  caption: {}
+  label: {}
   rule: {}
 ---
 
 # Workshop
 
-The desktop window is a project notebook for a creator working across sessions. The current task and its patch share a reading column. A quiet blue-gray rail keeps the milestone and previous attempts within reach.
-
-The window uses English, a left-to-right layout and Windows system fonts. Georgia identifies the workbench once in the header. Segoe UI carries task instructions and actions. Consolas preserves the indentation, context and change markers of a Git patch.
+Workshop is a single-agent desktop tool for Windows creators. The dark rail holds project navigation and run history. Each run opens onto the agent, its assignment and its recent activity. A four-bar copper mark identifies the agent across the assignment and session views.
 
 ## Layout and controls
 
-Use the single row of project navigation for the folder name and folder picker. Keep the rail at 220 logical pixels and give additional width and height to review. The blue accent marks the product name. Slint's light system palette owns focus, selection, disabled states and primary buttons. Status is always readable as text.
+Reserve 244 logical pixels for the rail and let the reading column grow with the window. Show the assignment once above the feed. Keep directions and decisions within reach while history and activity scroll independently.
 
-The active task controls the available actions. Place acceptance beside the check, with discard on its own action row. A discarded attempt keeps its working copy and artifacts. Long diffs scroll independently. Use the window's existing whitespace and one-pixel dividers for grouping. Transitions are immediate.
+Use Georgia for the Workshop name, Segoe UI for instructions and controls, and Consolas for local event times. Use the accent for the selected run, agent mark and status text. Group content with space and quieter surfaces. The `Ink` global in `ui/workshop.slint` owns the runtime palette. Native Slint controls use the dark Fluent palette.
 
-The `Ink` global and shared text components in `ui/workshop.slint` own the project palette and type at runtime. Use standard Slint widgets for editing, buttons and keyboard list navigation.
+Activity comes from saved events for the selected attempt. Display recent agent messages, directions, checks and named actions in reverse chronological order. The CLI provides the full patch and provider logs.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|
-| Form | Desk task editor | Task prompt or steering direction | New task, active turn, resumed turn | Keyboard input and retained text on setup failure |
-| Select/Listbox | StandardListView | Saved attempts ordered newest first | Project task history | Selection loads the matching patch |
-| Scrollbar | Slint text and list widgets | Available pane height | History and diff | Scroll without moving the decision buttons |
+| Form | Desk task editor | Task prompt or steering direction | New assignment, active turn, resumed turn | Keyboard input and retained text on setup failure |
+| Select/Listbox | RunLink in the history ListView | Saved attempts ordered newest first | Selected, idle and busy | Selecting a run loads its assignment and activity |
+| Scrollbar | Slint scroll and list widgets | Available pane height | Assignment, history and activity | Scroll independently from the run controls |
 | CRUD | Store and Desk | SQLite attempt state and saved patch | Submit, resume, retry, accept and discard | Recovery tests and native exit demo |
