@@ -72,6 +72,10 @@ enum Action {
         #[arg(default_value = "Continue the task and verify the result.")]
         direction: String,
     },
+    /// Send the first queued message and continue the queue after each successful run.
+    SendNext {
+        id: i64,
+    },
     Diff {
         id: i64,
     },
@@ -267,7 +271,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
     );
     Ok(())
 }
-fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
+fn run(store: &Store, a: Attempt, prompt: provider::Message) -> Result<()> {
     eprintln!("Attempt {} in {}", a.id, store.work(a.id).display());
     let (tx, rx) = provider::channel();
     let input = tx.clone();
@@ -278,6 +282,21 @@ fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
             }
             let c = if line.trim() == "/cancel" {
                 Control::Cancel
+            } else if let Some(text) = line.strip_prefix("/queue ") {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                Control::Queue(text.into())
+            } else if let Some(direction) = line.strip_prefix("/steer-worker ") {
+                let Some((id, text)) = direction
+                    .trim()
+                    .split_once(' ')
+                    .and_then(|(id, text)| Some((id.parse().ok()?, text)))
+                else {
+                    eprintln!("Use /steer-worker ID MESSAGE");
+                    continue;
+                };
+                Control::SteerWorker(id, text.into())
             } else if let Some(id) = line
                 .strip_prefix("/stop-worker ")
                 .and_then(|id| id.trim().parse().ok())
@@ -389,21 +408,33 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                         && store.team_settings()?.lead_model.starts_with("claude:") =>
                 {
                     let a = store.prepare_inference(&prompt, "", "", None, None, &[])?;
-                    return run(&store, a, &prompt);
+                    return run(&store, a, prompt.as_str().into());
                 }
                 _ => model,
             };
-            run(&store, store.prepare(&prompt, &model, None)?, &prompt)?
+            run(
+                &store,
+                store.prepare(&prompt, &model, None)?,
+                prompt.as_str().into(),
+            )?
         }
         Action::Retry { id } => {
             let a = store.attempt(id)?;
             run(
                 &store,
                 store.prepare(&a.prompt, &a.model, Some(id))?,
-                &a.prompt,
+                a.prompt.as_str().into(),
             )?;
         }
-        Action::Resume { id, direction } => run(&store, store.resume(id)?, &direction)?,
+        Action::Resume { id, direction } => {
+            run(&store, store.resume(id)?, direction.as_str().into())?
+        }
+        Action::SendNext { id } => {
+            let (attempt, message) = store
+                .resume_queued(id)?
+                .ok_or_else(|| anyhow::anyhow!("The queue is empty."))?;
+            run(&store, attempt, message)?;
+        }
         Action::Diff { id } => io::stdout().write_all(&store.patch(&store.attempt(id)?)?)?,
         Action::Accept { id } => {
             store.accept(id)?;

@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -6,6 +6,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($StudioOnly) { $parameters.StudioOnly = $true }
     if ($SketchOnly) { $parameters.SketchOnly = $true }
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
+    if ($DeliveryOnly) { $parameters.DeliveryOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
     return
 }
@@ -197,6 +198,63 @@ function Test-Recommendations {
     Click 'Codex'
     Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'Codex installation survives provider switch'
     'Recommended catalog, search and both provider install paths passed'
+}
+function Test-Delivery {
+    function Draft($text) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($text) }
+    function Queue-Draft($text) {
+        Draft $text
+        Click 'Send options'
+        Wait-For { Named 'Send after this run' } 'send options'
+        Click 'Send after this run'
+        Wait-For { (Named 'Remove queued message') -and !(Named 'Send after this run') } 'queued draft'
+    }
+    Wait-For { (Named 'New chat').Current.IsEnabled } 'previous chat to finish'
+    Click 'New chat'
+    $mode = Join-Path $root 'delivery-mode'
+    [void](New-Item -ItemType File $mode)
+    try {
+        Draft 'Wait for a correction'
+        Click 'Send message'
+        Wait-For { (Named 'Stop response') -and (Test-Path (Join-Path $root 'delivery.log')) } 'active lead'
+        Queue-Draft 'Follow up discard'
+        Click 'Remove queued message'
+        Wait-For { !(Named 'Remove queued message') } 'removed queued message'
+        [void](New-Item -ItemType File -Force (Join-Path $root 'record-inference'))
+        $attachment = Join-Path $root 'queued-reference.txt'
+        Set-Content -LiteralPath $attachment -Value 'Queued attachment payload'
+        Click 'Add to message'
+        Wait-For { Named 'Attach files…' } 'queued attachment picker'
+        Click 'Attach files…'
+        Choose-Attachment 'Attach files' $attachment
+        Wait-For { Named 'Remove queued-reference.txt' } 'queued attachment in draft'
+        Queue-Draft 'Follow up after stop'
+        Click 'Stop response'
+        Wait-For { Named 'Send next' } 'paused queue'
+        Draft 'Keep my draft'
+        Click 'Send next'
+        Wait-For { (Named 'Codex reply') -and (Named 'New chat').Current.IsEnabled -and
+            (Select-String -Quiet -LiteralPath (Join-Path $root 'delivery.log') -Pattern '^Follow up after stop$') } 'resumed queue'
+        $wire = Get-ChildItem $root -Filter 'lead-*.json' | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json } |
+            Where-Object { $_.input[0].text -like 'Follow up after stop*' }
+        if (!(($wire.input | Where-Object type -eq 'text').text -match 'Queued attachment payload')) { throw 'Queued attachment was not delivered' }
+        if ((Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -ne 'Keep my draft') {throw 'Queue consumed an unrelated draft'}
+        Click 'New chat'
+        Draft 'delegate'
+        Click 'Send message'
+        Wait-For { (Named 'Dispatched 2 subagents') -and (Test-Path (Join-Path $root 'waiting-worker')) } 'running worker'
+        Click 'Dispatched 2 subagents'
+        Wait-For { Named 'Write left' } 'dispatched workers'
+        Click 'Write left'
+        Wait-For { Named 'Send direction' } 'worker controls'
+        Click 'Send direction'
+        Wait-For { Named 'Return to lead' } 'addressed composer'
+        Draft 'Use the blue version'
+        Click 'Send to worker'
+        Wait-For { (Named 'New chat').Current.IsEnabled -and !(Named 'Return to lead') } 'directed completion'
+        if (!(Select-String -Quiet -LiteralPath (Join-Path $root 'lead-feedback') -Pattern 'Use the blue version')) { throw 'Missing lead receipt' }
+        if (Select-String -Quiet -LiteralPath (Join-Path $root 'delivery.log') -Pattern 'Follow up discard|Keep my draft') { throw 'Sent an unrequested message' }
+        'Queued delivery, removal, pause, draft retention and direct worker steering passed'
+    } finally { Remove-Item -LiteralPath $mode }
 }
 function Test-Attention {
     $toggle = "Notify me when I$([char]0x2019)m needed"
@@ -481,6 +539,7 @@ try {
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($DeliveryOnly) { Test-Delivery; return }
     if ($RecommendedOnly) {
         Click 'Settings'
         Wait-For { Named 'Plugins' } 'settings navigation'
@@ -798,6 +857,7 @@ try {
     Wait-For { Named 'Acceptance · File contains its name' } 'worker acceptance criteria'
     Click 'Close activity'
     Wait-For { !(Named 'Session activity') } 'return to transcript'
+    Test-Delivery
     Test-Sketch
     'Headless mode, navigation, composer, Studio, provider settings and agent activity passed'
 } finally {

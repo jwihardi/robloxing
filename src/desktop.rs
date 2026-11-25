@@ -42,7 +42,7 @@ enum Update {
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
     AccountUsage(PathBuf, String, Vec<UsageWindow>),
-    Started(i64),
+    Started(i64, bool),
     Delta(String),
     ReplyStored,
     TranscriptChanged,
@@ -467,6 +467,7 @@ impl App {
     }
     fn refresh_chat(&self, store: &Store, attempt: &Attempt) -> Result<()> {
         let ui = self.ui.unwrap();
+        self.render_queue(store, attempt.id)?;
         let switching = self.displayed.get() != Some(attempt.id);
         let follow = switching || ui.invoke_at_end();
         if switching {
@@ -830,6 +831,7 @@ impl App {
             return;
         }
         let ui = self.ui.unwrap();
+        ui.invoke_clear_recipient();
         let mut drafts = self.drafts.borrow_mut();
         drafts.insert(self.id.get(), ui.get_draft().to_string());
         self.session.take();
@@ -868,6 +870,7 @@ impl App {
             selected.is_some_and(|i| rows[i].state == "running") && self.control.borrow().is_some(),
         );
         if selected.is_none() {
+            ui.set_queued(Default::default());
             self.turns.set_vec(self.preceding_shots(store, None)?);
             ui.set_context_meter(context_meter(ContextUsage::default(), true));
         }
@@ -1143,17 +1146,17 @@ impl App {
                         }
                     }
                 }
-                Update::Started(id) => {
+                Update::Started(id, clear_draft) => {
                     ui.set_notice("".into());
                     if self.id.get().is_none() {
                         self.draft_policy.take();
                         self.chat_offset.set(0);
                     }
-                    self.attachments.borrow_mut().remove(&self.id.get());
-                    self.sketches.borrow_mut().remove(&self.id.get());
+                    if clear_draft {
+                        self.clear_draft();
+                    }
                     self.id.set(Some(id));
                     self.render_attachments();
-                    ui.set_draft("".into());
                     self.displayed.set(None);
                     self.render()?;
                 }
@@ -1180,6 +1183,7 @@ impl App {
                     partial = Some(String::new());
                     self.control.take();
                     ui.set_busy(false);
+                    ui.invoke_close_delivery();
                     ui.set_notice(
                         match result {
                             Ok(msg) => msg,
@@ -1278,9 +1282,29 @@ impl App {
         }
         Ok(message)
     }
+    fn render_queue(&self, store: &Store, id: i64) -> Result<()> {
+        let rows = store
+            .queued_messages(id)?
+            .into_iter()
+            .map(|(key, text)| PickerOption {
+                value: key.to_string().into(),
+                label: text.lines().next().unwrap_or("").into(),
+            })
+            .collect::<Vec<_>>();
+        self.ui
+            .unwrap()
+            .set_queued(ModelRc::new(VecModel::from(rows)));
+        Ok(())
+    }
+    fn clear_draft(&self) {
+        self.attachments.borrow_mut().remove(&self.id.get());
+        self.sketches.borrow_mut().remove(&self.id.get());
+        self.render_attachments();
+        self.ui.unwrap().set_draft("".into());
+    }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
         let ui = self.ui.unwrap();
-        if matches!(op, "submit" | "resume" | "steer") {
+        if matches!(op, "submit" | "resume" | "steer" | "queue" | "steer-worker") {
             if ui.get_capturing() {
                 return Ok(());
             }
@@ -1289,6 +1313,23 @@ impl App {
                 self.capture(Some(draft));
                 return Ok(());
             }
+        }
+        if matches!(op, "queue" | "steer-worker") {
+            let slot = self.store.borrow();
+            let store = slot.as_ref().context("Open a project.")?;
+            let id = self.id.get().context("Select a chat.")?;
+            let message = self.draft_message()?;
+            if op == "queue" {
+                store.queue_message(id, &message)?;
+                self.render_queue(store, id)?;
+            } else {
+                store.steer_worker(id, ui.get_direction_worker().into(), message)?;
+                ui.invoke_clear_recipient();
+                self.refresh_chat(store, &store.attempt(id)?)?;
+            }
+            self.clear_draft();
+            ui.set_notice("".into());
+            return Ok(());
         }
         if op == "steer" || op == "cancel" {
             let c = if op == "cancel" {
@@ -1303,10 +1344,7 @@ impl App {
                 .send(c)
                 .map_err(|_| anyhow::anyhow!("Run has ended."))?;
             if op == "steer" {
-                self.attachments.borrow_mut().remove(&self.id.get());
-                self.sketches.borrow_mut().remove(&self.id.get());
-                self.render_attachments();
-                ui.set_draft("".into());
+                self.clear_draft();
             }
             return Ok(());
         }
@@ -1315,7 +1353,7 @@ impl App {
         }
         let store = self.store.borrow().clone().context("Open a project.")?;
         let id = self.id.get();
-        let draft = if matches!(op, "submit" | "resume") {
+        let mut draft = if matches!(op, "submit" | "resume") {
             self.draft_message()?
         } else {
             "".into()
@@ -1332,9 +1370,12 @@ impl App {
             }
             .into(),
         );
-        let mut session = self.session.take().filter(|_| op == "resume");
+        let mut session = self
+            .session
+            .take()
+            .filter(|_| matches!(op.as_str(), "resume" | "send-next"));
         self.start(move |events| {
-            if op == "submit" || op == "retry" || op == "resume" {
+            if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
                 let a = match op.as_str() {
                     "submit" => store.prepare_with_files(
                         &draft.text,
@@ -1347,9 +1388,16 @@ impl App {
                         let old = store.attempt(id.context("Select a task.")?)?;
                         store.prepare(&old.prompt, &old.model, Some(old.id))?
                     }
+                    "send-next" => {
+                        let (attempt, next) = store
+                            .resume_queued(id.context("Select a chat.")?)?
+                            .context("The queue is empty.")?;
+                        draft = next;
+                        attempt
+                    }
                     _ => store.resume(id.context("Select a task.")?)?,
                 };
-                let prompt = if op == "resume" {
+                let prompt = if matches!(op.as_str(), "resume" | "send-next") {
                     draft
                 } else {
                     a.prompt.as_str().into()
@@ -1357,7 +1405,7 @@ impl App {
                 if op == "submit" {
                     store.bind_draft_screenshots(a.id)?;
                 }
-                events.send(Update::Started(a.id))?;
+                events.send(Update::Started(a.id, op != "send-next"))?;
                 let earlier_image = store.last_chat_image_event(a.id)?;
                 let earlier_checkpoint = store.current_checkpoint(a.id)?;
                 let outcome =
@@ -1511,6 +1559,19 @@ fn main() -> Result<()> {
     ui.on_stop_worker(move |id| {
         if let Some(tx) = a.control.borrow().as_ref() {
             let _ = tx.send(Control::StopWorker(id.into()));
+        }
+    });
+    let a = app.clone();
+    ui.on_remove_queued(move |key| {
+        let result = (|| -> Result<()> {
+            let slot = a.store.borrow();
+            let store = slot.as_ref().context("Open a project.")?;
+            let id = a.id.get().context("Select a chat.")?;
+            store.remove_queued(id, key.parse()?)?;
+            a.render_queue(store, id)
+        })();
+        if let Err(error) = result {
+            a.ui.unwrap().set_notice(error.to_string().into());
         }
     });
     let a = app.clone();

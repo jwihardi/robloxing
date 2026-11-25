@@ -30,6 +30,27 @@ class FixtureProvider {
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
     static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }
+    // Leave the input pipe live while a lead or a worker waits for a correction.
+    static bool Delivery(string text) {
+        if (!Mode("delivery-mode")) return false;
+        if (worker && text.StartsWith("Write left\n")) {
+            File.WriteAllText(Path.Combine(Dir, "waiting-worker"), "left");
+            return true;
+        }
+        if (worker && text == "Use the blue version") {
+            File.WriteAllText("left.txt", "blue\n");
+            Done("Wrote the blue version");
+            return true;
+        }
+        if (!worker) {
+            File.AppendAllText(Path.Combine(Dir, "delivery.log"), text.Split('\n')[0] + "\n");
+            if (text == "Wait for a correction") return true;
+            if (text.StartsWith("Follow up") || text.StartsWith("Actually ")) {
+                Done("Received " + text); return true;
+            }
+        }
+        return false;
+    }
     static void Delegate(List<object> tasks) {
         Send(new {id="assignment",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="batch",tool="workshop_delegate",arguments=new {tasks=tasks}}});
     }
@@ -80,6 +101,10 @@ class FixtureProvider {
             var frame = Json.Deserialize<Dictionary<string,object>>(line);
             switch ((string)frame["type"]) {
                 case "control_request":
+                    if (Convert.ToString(frame["request_id"]) == "workshop-steer" && Mode("delivery-mode")) {
+                        Send(new {type="result",subtype="error_during_execution",is_error=true,terminal_reason="aborted_by_interrupt"});
+                        break;
+                    }
                     Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=new[]{new {value="default",supportedEffortLevels=new[]{"low","high"}}}}}});
                     break;
                 case "user":
@@ -87,12 +112,14 @@ class FixtureProvider {
                     var msg=(Dictionary<string,object>)frame["message"];
                     var blocks=(System.Collections.ArrayList)msg["content"];
                     var first=(Dictionary<string,object>)blocks[0];
+                    if (Delivery((string)first["text"])) break;
                     if (worker) { Worker((string)first["text"]); break; }
                     var tasks = new[]{Assignment("left"),Assignment("right")};
                     Send(new {type="control_request",request_id="batch", request=new {subtype="mcp_message",server_name="workshop",message=new {jsonrpc="2.0",id=4,method="tools/call",@params=new {name="workshop_delegate",arguments=new {tasks=tasks}}}}});
                     break;
                 case "control_response":
                     if (!line.Contains("mcp_response")) throw new InvalidDataException("Missing MCP result");
+                    if (Mode("delivery-mode")) File.WriteAllText(Path.Combine(Dir,"lead-feedback"),line);
                     Done("Worker batch returned.");
                     break;
             }
@@ -140,6 +167,7 @@ class FixtureProvider {
         while((line=Console.ReadLine())!=null){
             var msg=Json.Deserialize<Dictionary<string,object>>(line);
             if(!msg.ContainsKey("method")){
+                if(Mode("delivery-mode") && Convert.ToString(msg["id"])=="assignment") File.WriteAllText(Path.Combine(Dir,"lead-feedback"),line);
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
                 if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
@@ -180,6 +208,7 @@ class FixtureProvider {
                 turn=Guid.NewGuid().ToString();
                 Send(new {id=id,result=new {turn=new {id=turn}}});
                 var first=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
+                if (Delivery((string)first["text"])) continue;
                 while (Mode("notice.hold")) Thread.Sleep(40);
                 if(studio){
                     if(File.Exists(Path.Combine(Dir,"studio.hold"))) Thread.Sleep(Timeout.Infinite);
@@ -243,6 +272,11 @@ class FixtureProvider {
                     tasks.Add(Assignment("summary","guide","right"));
                 }
                 Send(new {id="assignment",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="call",tool="workshop_delegate",arguments=new {tasks=tasks}}});
+            }
+            if(method=="turn/steer"){
+                Send(new {id=id,result=new {}});
+                var direction=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
+                Delivery((string)direction["text"]);
             }
             if(method=="turn/interrupt"){
                 Send(new {id=id,result=new {}});

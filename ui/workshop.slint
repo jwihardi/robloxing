@@ -24,7 +24,7 @@ export struct PickerData {
     current-model: string, current-effort: string
 }
 
-enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs, activity }
+enum OpenPanel { closed, add, effort, models, policy, usage, options, outputs, activity, delivery }
 
 component Flyout inherits FocusScope {
     callback escape();
@@ -76,6 +76,7 @@ component WorkerGroup inherits VerticalLayout {
     callback toggle();
     callback choose-worker(int);
     callback stop-worker(int);
+    callback direct-worker(int,string);
     alignment: start; spacing: 0px;
     Action {
         label: root.label;
@@ -104,7 +105,10 @@ component WorkerGroup inherits VerticalLayout {
                     if agent.criteria != "": Text { text: "Acceptance · " + agent.criteria; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     if agent.dependencies != "": Text { text: "Depends on · " + agent.dependencies; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     Text { text: agent.stats; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
-                    if agent.running: Action { label: "Stop worker"; activate => {root.stop-worker(agent.id);} }
+                    if agent.running: HorizontalLayout { alignment: start; spacing: 6px;
+                        Action { label: "Send direction"; activate => {root.direct-worker(agent.id,agent.title);} }
+                        Action { label: "Stop worker"; activate => {root.stop-worker(agent.id);} }
+                    }
                 }
             }
         }
@@ -319,6 +323,9 @@ component Composer inherits Rectangle {
     in property <bool> can-send;
     callback send();
     callback stop();
+    in property <string> recipient;
+    callback clear-recipient();
+    callback delivery(length,length,length,length);
     callback subagents();
     in property <bool> policy-enabled;
     out property <length> subagent-x: subagent-button.absolute-position.x;
@@ -328,15 +335,22 @@ component Composer inherits Rectangle {
     in property <bool> custom-subagents;
     forward-focus: input;
     private property <length> attachment-height: min(2,root.attachments.length) * 32px;
-    height: 74px + min(108px, max(38px, input.preferred-height)) + root.attachment-height; border-radius: 23px; background: Theme.surface;
+    private property <length> recipient-height: root.recipient == "" ? 0px : 32px;
+    height: 74px + min(108px, max(38px, input.preferred-height)) + root.attachment-height + root.recipient-height; border-radius: 23px; background: Theme.surface;
     border-width: 1px; border-color: input.has-focus ? Theme.accent.mix(Theme.line,0.55) : Theme.line;
     public function focus-input() { input.focus(); }
     public function focus-add() { plus.focus(); }
     public function paste-text() { input.focus(); input.paste(); }
     public function focus-picker() { inference.focus(); }
     public function focus-subagents() { subagent-button.focus(); }
+    public function focus-delivery() { delivery-button.focus(); }
+    if root.recipient != "": HorizontalLayout {
+        x: 15px; y: 6px; height: 30px; width: parent.width - 30px; spacing: 6px;
+        Text { text: "To " + root.recipient; color: Theme.accent; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        Action { label: "Return to lead"; glyph: "\u{e711}"; icon-only: true; width: 32px; activate => {root.clear-recipient();} }
+    }
     if root.attachments.length > 0: attached := ListView {
-        x: 14px; y: 9px; width: parent.width - 28px; height: root.attachment-height;
+        x: 14px; y: 9px + root.recipient-height; width: parent.width - 28px; height: root.attachment-height;
         for file[i] in root.attachments: HorizontalLayout {
             width: attached.visible-width - 4px; height: 32px; spacing: 8px;
             Text { width: 20px; text: "\u{e723}"; font-family: "Segoe MDL2 Assets"; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
@@ -346,7 +360,7 @@ component Composer inherits Rectangle {
         }
     }
     scroller := ScrollView {
-        x: 18px; y: 15px + root.attachment-height; width: parent.width - 36px; height: parent.height - 74px - root.attachment-height;
+        x: 18px; y: 15px + root.attachment-height + root.recipient-height; width: parent.width - 36px; height: parent.height - 74px - root.attachment-height - root.recipient-height;
         content-width: self.visible-width; content-height: max(self.visible-height, input.preferred-height);
         input := TextInput {
             width: scroller.visible-width; height: max(scroller.visible-height, self.preferred-height);
@@ -378,19 +392,30 @@ component Composer inherits Rectangle {
     subagent-button := Action { x: plus.x + plus.width + 2px; y: parent.height - 48px; width: 95px; height: 34px;
         label: "Subagents"; selected: root.custom-subagents; accessible-description: root.custom-subagents ? "Chat override" : "Global defaults"; enabled: root.policy-enabled; activate => { root.subagents(); } }
     inference := InferencePicker {
-        private property <length> right-edge: parent.width - (root.running ? 114px : 64px);
+        private property <length> right-edge: parent.width - (root.running ? (delivery-button.visible ? 144px : 114px) : 64px);
         width: min(self.preferred-width, self.right-edge - subagent-button.x - subagent-button.width - 6px); x: self.right-edge - self.width; y: parent.height - 48px;
         role-name: "Chat"; choices: root.choices; enabled: root.picking;
         open => { root.open-picker(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
     }
-    if root.running: Action { x: parent.width - 108px; y: parent.height - 53px; width: 44px; height: 44px;
+    if root.running: Action { x: parent.width - (delivery-button.visible ? 140px : 108px); y: parent.height - 53px; width: 44px; height: 44px;
         label: "Stop response"; glyph: "\u{e71a}"; icon-only: true; activate => {root.stop();} }
+    delivery-button := Action { visible: root.running && root.recipient == ""; x: parent.width - 89px; y: parent.height - 51px; width: 30px; height: 40px;
+        label: "Send options"; glyph: "\u{e70d}"; icon-only: true; activate => {root.delivery(self.absolute-position.x,self.absolute-position.y,self.width,self.height);} }
     Action { x: parent.width - 58px; y: parent.height - 53px; width: 44px; height: 44px; border-radius: 22px;
-        label: "Send message"; glyph: "\u{e74a}"; icon-only: true; primary: true;
+        label: root.recipient != "" ? "Send to worker" : root.running ? "Steer now" : "Send message"; glyph: "\u{e74a}"; icon-only: true; primary: true;
         enabled: root.enabled && root.can-send; activate => {root.send();} }
 }
 
 export component Desk inherits Window {
+    in property <[PickerOption]> queued;
+    callback remove-queued(string);
+    in-out property <int> direction-worker: -1;
+    in-out property <string> direction-title;
+    function direct-worker(id:int,title:string) {
+        root.direction-worker=id; root.direction-title=title; root.open-panel=OpenPanel.closed; composer.focus-input();
+    }
+    public function clear-recipient() { root.direction-worker=-1; root.direction-title=""; }
+    public function close-delivery() { if root.open-panel == OpenPanel.delivery {root.open-panel=OpenPanel.closed;} }
     in property <[AlbumItem]> album;
     in property <[AlbumItem]> outputs;
     in property <string> album-error;
@@ -540,7 +565,8 @@ export component Desk inherits Window {
         if root.open-panel == OpenPanel.effort || root.open-panel == OpenPanel.models { composer.focus-picker(); }
         else if root.open-panel == OpenPanel.policy {
             composer.focus-subagents();
-        } else if root.open-panel == OpenPanel.add { composer.focus-add(); }
+        } else if root.open-panel == OpenPanel.delivery { composer.focus-delivery(); }
+        else if root.open-panel == OpenPanel.add { composer.focus-add(); }
         else if root.open-panel == OpenPanel.usage { usage-button.focus(); }
         else if root.open-panel == OpenPanel.activity { activity-button.focus(); }
         else if root.open-panel == OpenPanel.options { options.focus(); }
@@ -560,7 +586,7 @@ export component Desk inherits Window {
     public pure function at-end() -> bool { return transcript.content-height + transcript.content-y <= transcript.visible-height + 30px; }
     function send-message() {
         if composer.can-send && root.writable && (!root.busy || root.running) {
-            root.operate(root.home ? "submit" : root.running ? "steer" : "resume");
+            root.operate(root.direction-worker >= 0 ? "steer-worker" : root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
     function new-chat() {root.visit("chat"); root.chat-query=""; root.select-row(-1); composer.focus-input();}
@@ -582,7 +608,7 @@ export component Desk inherits Window {
     callback find-chats(string) -> [PickerOption];
     callback select-hit(string);
     changed chat-query => {root.search-hits = root.find-chats(root.chat-query);}
-    public function reset-chat-navigation() {root.chat-query = ""; root.compact-context = false;}
+    public function reset-chat-navigation() {root.chat-query = ""; root.compact-context = false; root.clear-recipient();}
     changed compact => {root.compact-context = false;}
     function toggle-context() {
         if root.compact {
@@ -672,7 +698,7 @@ export component Desk inherits Window {
         }
         transcript := ScrollView {
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: 61px; width: pane.measure;
-            height: max(0px, (root.writable ? pad.y : closed.y) - self.y - 18px);
+            height: max(0px, queue-strip.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 8px; padding-bottom: 10px; spacing: 25px; alignment: start;
@@ -696,6 +722,7 @@ export component Desk inherits Window {
                         toggle => { root.open-dispatch = self.open ? -1 : turn.dispatch-id; }
                         choose-worker(id) => { root.toggle-worker(id); }
                         stop-worker(id) => { root.stop-worker(id); }
+                        direct-worker(id,title) => {root.direct-worker(id,title);}
                     }
                     bubble := Rectangle {
                         visible: turn.dispatch-id == 0 && turn.shot == "";
@@ -743,6 +770,22 @@ export component Desk inherits Window {
                 }
             }
         }
+        queue-strip := VerticalLayout {
+            x: composer.x; width: composer.width;
+            visible: root.queued.length > 0 && !root.home;
+            height: self.visible ? 32px + min(root.queued.length,2) * 31px : 0px;
+            y: (root.writable ? pad.y : closed.y) - self.height;
+            HorizontalLayout { height: 30px; spacing: 8px;
+                Text { text: "Queued (" + root.queued.length + ")"; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 1; font-size: 13px; }
+                if !root.busy && root.can-resume: Action { label: "Send next"; height: 30px; activate => {root.operate("send-next");} }
+            }
+            queue-list := ListView {
+                for item in root.queued: HorizontalLayout { width: queue-list.visible-width; height: 31px; spacing: 6px;
+                    Text { text: item.label; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; color: Theme.text; font-size: 13px; }
+                    Action { label: "Remove queued message"; accessible-description: item.label; glyph: "\u{e711}"; icon-only: true; width: 32px; activate => {root.remove-queued(item.value);} }
+                }
+            }
+        }
         pad := SketchPad {
             visible: composer.visible && composer.enabled && (Sketch.expanded || Sketch.has-content);
             x: composer.x; width: composer.width;
@@ -761,6 +804,8 @@ export component Desk inherits Window {
             open-picker(x,y,w,h) => { root.show-panel(OpenPanel.effort, x, y, w, h); }
             custom-subagents: root.custom-subagents; policy-enabled: !root.busy; subagents => {root.open-policy(true);}
             send => { root.send-message(); } stop => { root.operate("cancel"); }
+            recipient: root.direction-title; clear-recipient => {root.clear-recipient();composer.focus-input();}
+            delivery(x,y,w,h) => {root.show-panel(OpenPanel.delivery,x,y,w,h);}
         }
         closed := Rectangle {
             visible: !root.home && !root.writable; x: (parent.width - self.width) / 2; width: pane.measure;
@@ -991,6 +1036,15 @@ export component Desk inherits Window {
         }
         clicked => {root.dismiss-panel();}
     }
+    if root.open-panel == OpenPanel.delivery && root.running: Flyout {
+        width: 196px; height: delivery-rows.preferred-height; x: clamp(root.anchor-right - self.width, 8px,root.width - self.width - 8px); y: root.anchor-y - self.height - 6px;
+        escape => {root.dismiss-panel();} init => {after-run.focus();}
+        Rectangle {background: Theme.popup; border-color: Theme.line; border-width: 1px; border-radius: 16px;}
+        delivery-rows := VerticalLayout { padding: 6px; spacing: 1px;
+            after-run := Action {label: "Send after this run"; glyph: "\u{e823}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("queue");composer.focus-input();}}
+            Action {label: "Steer current run"; glyph: "\u{e74a}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("steer");composer.focus-input();}}
+        }
+    }
     if root.open-panel == OpenPanel.add: Flyout {
         x: root.anchor-x; y: root.anchor-y - self.height - 6px; width: 212px; height: add-rows.preferred-height;
         escape => {root.dismiss-panel();} init => {files.focus();}
@@ -1052,7 +1106,7 @@ export component Desk inherits Window {
                 if root.workers.length > 0: Rectangle { height:1px; background:Theme.line; }
                 if root.workers.length > 0: WorkerGroup { label:"Subagents (" + root.workers.length + ")"; workers:root.workers;
                     open:root.show-workers; expanded-worker:root.expanded-worker; toggle=>{root.show-workers=!root.show-workers;}
-                    choose-worker(id)=>{root.toggle-worker(id);} stop-worker(id)=>{root.stop-worker(id);} }
+                    choose-worker(id)=>{root.toggle-worker(id);} stop-worker(id)=>{root.stop-worker(id);} direct-worker(id,title)=>{root.direct-worker(id,title);} }
                 if root.workers.length == 0: Text { text:root.running ? "No subagents dispatched yet." : "No subagents were dispatched."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
                 if root.checkpoint != "": Rectangle { height:1px; background:Theme.line; }
                 if root.checkpoint != "": Action { label:"Project handoff"; glyph:root.show-checkpoint ? "\u{e70d}" : "\u{e76c}";

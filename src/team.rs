@@ -492,6 +492,32 @@ impl Store {
             .send(provider::Control::Cancel)
             .map_err(|_| anyhow::anyhow!("Worker has already stopped"))
     }
+    pub fn steer_worker(&self, lead: i64, id: i64, message: provider::Message) -> Result<()> {
+        ensure!(
+            !message.text.trim().is_empty() || !message.files.is_empty(),
+            "Enter a direction for this worker."
+        );
+        let controls = self.controls.lock().unwrap();
+        let worker = self
+            .workers(lead)?
+            .into_iter()
+            .find(|w| w.id == id && w.state == "running")
+            .context("This worker has finished. Your direction was not sent.")?;
+        let receipt = format!("To {} · {}", worker.assignment.title, message.text);
+        let image = self.attached_chat_image(&message.files).cloned();
+        controls
+            .get(&id)
+            .context("This worker has stopped.")?
+            .send(provider::Control::Steer(message))
+            .map_err(|_| anyhow::anyhow!("This worker has stopped."))?;
+        self.event_with_image(
+            lead,
+            "worker/direction",
+            Some(&receipt),
+            image.as_ref(),
+            None,
+        )
+    }
     async fn run_assignment(
         &self,
         lead: i64,
@@ -507,10 +533,23 @@ impl Store {
         {
             assignment.model = "claude:default".into();
         }
-        let (model, effort) = tokio::select! {
-            biased;
-            _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
-            result = self.worker_inference(policy, &assignment) => result?,
+        let mut directions = String::new();
+        let mut files = std::collections::BTreeSet::new();
+        let inference = self.worker_inference(policy, &assignment);
+        tokio::pin!(inference);
+        let (model, effort) = loop {
+            tokio::select! {
+                biased;
+                input = controls.recv() => match input {
+                    Some(provider::Control::Steer(message)) => {
+                        directions.push_str("\nCreator direction: ");
+                        directions.push_str(&message.text);
+                        files.extend(message.files);
+                    }
+                    _ => anyhow::bail!("Worker stopped during preparation"),
+                },
+                result = &mut inference => break result?,
+            }
         };
         let child = self.child_store(lead, w.id)?;
         let last = if let Some(run) = w.run {
@@ -526,7 +565,7 @@ impl Store {
         };
         let s = &w.assignment;
         let prompt = format!(
-            "{}\n\nDeliverable: {}\nAcceptance: {}\nAllowed edit paths: {:?}\nAn empty path list means read-only. Dependencies: {:?}.\n{}\n{}\n{}",
+            "{}\n\nDeliverable: {}\nAcceptance: {}\nAllowed edit paths: {:?}\nAn empty path list means read-only. Dependencies: {:?}.\n{}\n{}\n{}{directions}",
             s.title,
             s.deliverable,
             s.acceptance,
@@ -536,16 +575,32 @@ impl Store {
             self.handoff(lead)?,
             last
         );
-        let a = child.prepare_inference(&prompt, &model, &effort, None, None, &[])?;
+        let files: Vec<_> = files.into_iter().collect();
+        let a = child.prepare_inference(&prompt, &model, &effort, None, None, &files)?;
         self.db.lock().unwrap().execute(
             "UPDATE workers SET run=?2,model=?3,effort=?4,detail='Working in isolated copy' WHERE id=?1",
             params![w.id, a.id, a.model, a.effort],
         )?;
         notify(provider::ReplyUpdate::WorkersChanged);
         let update_error = std::cell::RefCell::new(None);
+        let last_event = std::cell::Cell::new(0);
         let result = provider::worker_turn(&child, &a, controls, &|event| {
             let updated = match event {
                 provider::ReplyUpdate::AccountUsage(..) => return notify(event),
+                provider::ReplyUpdate::TranscriptChanged => (|| {
+                    for message in child.messages_after(a.id, last_event.get())? {
+                        last_event.set(message.id);
+                        if message.delivery_notice {
+                            self.event(
+                                lead,
+                                "worker/delivery_error",
+                                Some(&format!("{} · {}", s.title, message.text)),
+                            )?;
+                            notify(provider::ReplyUpdate::TranscriptChanged);
+                        }
+                    }
+                    Ok(())
+                })(),
                 provider::ReplyUpdate::Usage(tokens) => self
                     .db
                     .lock()
@@ -701,6 +756,11 @@ impl Store {
     ) -> Result<String> {
         let settings = self.team_settings()?;
         let policy = self.effective_worker_policy(lead.id)?;
+        let first_event: i64 = self.db.lock().unwrap().query_row(
+            "SELECT COALESCE(MAX(id),0) FROM events WHERE attempt=?1",
+            [lead.id],
+            |r| r.get(0),
+        )?;
         let mut running = FuturesUnordered::new();
         loop {
             let workers = self.workers(lead.id)?;
@@ -777,6 +837,18 @@ impl Store {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let directions: String = self.db.lock().unwrap().query_row(
+            "SELECT COALESCE(group_concat(summary,char(10)),'') FROM
+             (SELECT summary FROM events WHERE attempt=?1 AND id>?2
+              AND kind IN ('worker/direction','worker/delivery_error') ORDER BY id)",
+            params![lead.id, first_event],
+            |row| row.get(0),
+        )?;
+        let output = if directions.is_empty() {
+            output
+        } else {
+            format!("{output}\nWorker directions from the creator:\n{directions}")
+        };
         let output = clipped(&output, 24000);
         ensure!(
             self.workers(lead.id)?.iter().all(|w| w.state == "finished"),

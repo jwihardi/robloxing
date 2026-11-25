@@ -157,6 +157,29 @@ def read_only_models(case):
         finish(proc, True)
 
 
+def steer_preparing_worker(case):
+    case.call("team", "--parallelism", "1", "--worker-model", "fixture-fast")
+    (case.root / "record-inference").touch()
+    case.hold("catalog")
+    proc = case.run("run", "delegate")
+    try:
+        wait_for(lambda: (case.root / "catalog.ready").exists(), "worker did not start preparation")
+        proc.stdin.write(b"/steer-worker 1 Preserve the original proportions\n")
+        proc.stdin.flush()
+        def routed():
+            with sqlite3.connect(case.db) as db:
+                return db.execute("SELECT 1 FROM events WHERE kind='worker/direction'").fetchone()
+        wait_for(routed, "direction was not routed during preparation")
+    finally:
+        case.release("catalog")
+        finish(proc, True)
+    requests = [json.loads(path.read_text())["input"][0]["text"]
+                for path in case.root.glob("worker-*.json")]
+    assert len(requests) == 2
+    for request in requests:
+        assert ("Creator direction: Preserve the original proportions" in request) == request.startswith("Write left\n")
+
+
 def overlap(case):
     case.call("team", "--parallelism", "2")
     (case.root / "overlap").touch()
@@ -316,6 +339,32 @@ def cancel_check(case):
         assert not db.execute("SELECT 1 FROM events WHERE kind='workshop/repair'").fetchone()
 
 
+def steer_during_check(case):
+    (case.root / "direct-repair").touch()
+    (case.root / "delivery-mode").touch()
+    case.hold("check")
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "content-check"]))
+    proc = case.run("run", "Update the answer.")
+    marker = case.root / "check.ready"
+    wait_for(lambda: marker.exists() and marker.stat().st_size, "check never started")
+    pid = int(marker.read_text())
+    proc.stdin.write(b"/queue Follow up after verification\n")
+    proc.stdin.flush()
+    def queued():
+        with sqlite3.connect(case.db) as db:
+            return db.execute("SELECT count(*) FROM queued_messages").fetchone() == (1,)
+    wait_for(queued, "queue should be available during checks")
+    case.release("check")
+    proc.stdin.write(b"Please ensure answer.txt must contain correct\n")
+    proc.stdin.flush()
+    finish(proc, True)
+    assert exited(pid)
+    assert (case.root / "delivery.log").read_text().splitlines() == [
+        "Update the answer.", "Please ensure answer.txt must contain correct", "Follow up after verification"]
+    case.call("accept", "1")
+    assert (case.project / "answer.txt").read_text().strip() == "correct"
+
+
 def model_effort(case):
     (case.root / "record-inference").touch()
     case.call("team", "--lead-model", "fixture-deep", "--lead-effort", "high",
@@ -360,6 +409,60 @@ def mixed_provider_conflict(case):
     conflict(case)
 
 
+def delivery(case, provider):
+    (case.root / "delivery-mode").touch()
+    case.hold("right")
+    proc = case.run("run", "--provider", provider, "delegate")
+    def send(text):
+        proc.stdin.write((text + "\n").encode())
+        proc.stdin.flush()
+    try:
+        wait_for(lambda: (case.root / "waiting-worker").exists(), "worker not ready for direction")
+        case.started("right")
+        send("/queue Follow up one")
+        send("/queue Follow up two")
+        def pending():
+            with sqlite3.connect(case.db) as db:
+                return [r[0] for r in db.execute("SELECT body FROM queued_messages ORDER BY id")]
+        wait_for(lambda: pending() == ["Follow up one", "Follow up two"], "queue did not retain FIFO order")
+        send("/steer-worker 1 Use the blue version")
+        wait_for(lambda: case.workers()[0][1] == "review", "worker did not act on direction")
+        assert case.workers()[1][1] == "running"
+        assert (case.root / "delivery.log").read_text().splitlines() == ["delegate"]
+    finally:
+        case.release("right")
+        if not (case.root / "waiting-worker").exists() or case.workers()[0][1] == "running":
+            send("/cancel")
+        finish(proc, True)
+    assert "To Write left" in (case.root / "lead-feedback").read_text()
+    assert "Use the blue version" in (case.root / "lead-feedback").read_text()
+    assert (case.root / "delivery.log").read_text().splitlines() == ["delegate", "Follow up one", "Follow up two"]
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT summary FROM events WHERE kind='user/followup' ORDER BY id").fetchall() == [
+            ("Follow up one",), ("Follow up two",)]
+        assert not pending()
+    case.call("accept", "1")
+    assert (case.project / "left.txt").read_text().strip() == "blue"
+    assert (case.project / "right.txt").read_text().strip() == "right"
+    proc = case.run("run", "--provider", provider, "Wait for a correction")
+    wait_for(lambda: "Wait for a correction" in (case.root / "delivery.log").read_text(), "lead did not start")
+    send("Actually use green")
+    finish(proc, True)
+    assert (case.root / "delivery.log").read_text().splitlines()[-1] == "Actually use green"
+    proc = case.run("run", "--provider", provider, "Wait for a correction")
+    wait_for(lambda: (case.root / "delivery.log").read_text().count("Wait for a correction") == 2,
+             "second lead did not start")
+    send("/queue Follow up after restart")
+    wait_for(lambda: pending() == ["Follow up after restart"], "missing pending message")
+    send("/cancel")
+    finish(proc, True)
+    assert pending() == ["Follow up after restart"]
+    assert "Follow up after restart" not in (case.root / "delivery.log").read_text()
+    case.call("send-next", "3")
+    assert not pending()
+    assert (case.root / "delivery.log").read_text().splitlines().count("Follow up after restart") == 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", type=Path, default=Path("target/debug/workshop-cli.exe"))
@@ -372,11 +475,14 @@ def main():
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
         for test in (autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
                      small_talk, manual_recheck, external_blocker, mixed_plan, conflict,
-                     stop_one, stop_preparing_worker, cancel_check, overlap,
+                     stop_one, stop_preparing_worker, steer_preparing_worker, cancel_check, steer_during_check, overlap,
                      repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,
                      mixed_provider_conflict, claude_without_codex):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))
             print(test.__name__ + " passed", flush=True)
+        for provider in ("codex", "claude"):
+            delivery(Case(base / ("delivery-" + provider), args.cli.resolve(), fixture), provider)
+            print(provider + " queue and steering passed", flush=True)
 
 
 if __name__ == "__main__":

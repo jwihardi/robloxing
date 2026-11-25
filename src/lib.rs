@@ -2,6 +2,7 @@ mod check;
 pub mod cli;
 mod git;
 mod image_comparison;
+mod message_queue;
 pub use image_comparison::ImageComparison;
 pub mod provider;
 pub mod screenshots;
@@ -116,7 +117,7 @@ impl Store {
             LEFT JOIN event_images ON event_images.event=events.id
             WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/image_error')
+                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -142,11 +143,15 @@ impl Store {
                 image: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
-                from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
+                from_user: matches!(
+                    kind.as_str(),
+                    "steer/sent" | "user/followup" | "worker/direction"
+                ),
                 delivery_notice: matches!(
                     kind.as_str(),
                     "steer/error"
                         | "steer/unavailable"
+                        | "worker/delivery_error"
                         | "workshop/repair"
                         | "workshop/image_error"
                 ),
@@ -192,6 +197,7 @@ impl Store {
         let project = git::project(&folder)?;
         let mut db = Connection::open(dir.join("workshop.sqlite"))?;
         db.execute_batch(include_str!("schema.sql"))?;
+        db.execute("UPDATE queued_messages SET sending=0 WHERE sending=1", [])?;
         if !worker {
             db.execute(
                 "ATTACH DATABASE ?1 AS preferences",
@@ -446,7 +452,7 @@ impl Store {
         let mut png = std::io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png)?;
         let path = self.save_chat_image(png.get_ref())?;
-        self.event_with_image(id, "workshop/image", Some(caption), Some(&path))
+        self.event_with_image(id, "workshop/image", Some(caption), Some(&path), None)
     }
     pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
         let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3,provider=?4 WHERE id=?1 AND (session='' OR provider=?4) AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort,provider::provider_for(model)])?;
@@ -537,7 +543,7 @@ impl Store {
         Ok(())
     }
     pub fn event(&self, id: i64, kind: &str, action: Option<&str>) -> Result<()> {
-        self.event_with_image(id, kind, action, None)
+        self.event_with_image(id, kind, action, None, None)
     }
     fn message_event(&self, id: i64, kind: &str, message: &provider::Message) -> Result<()> {
         self.event_with_image(
@@ -545,6 +551,7 @@ impl Store {
             kind,
             Some(&message.text),
             self.attached_chat_image(&message.files),
+            message.queued_id,
         )
     }
     fn event_with_image(
@@ -553,9 +560,19 @@ impl Store {
         kind: &str,
         action: Option<&str>,
         image: Option<&PathBuf>,
+        queued_id: Option<i64>,
     ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        if let Some(queued) = queued_id {
+            ensure!(
+                tx.execute(
+                    "DELETE FROM queued_messages WHERE attempt=?1 AND id=?2 AND sending=1",
+                    params![id, queued]
+                )? == 1,
+                "Queued message is no longer available"
+            );
+        }
         tx.execute(
             "INSERT INTO events(attempt,kind,summary) VALUES(?1,?2,?3)",
             params![id, kind, action],

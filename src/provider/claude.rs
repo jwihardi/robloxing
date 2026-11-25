@@ -206,14 +206,10 @@ pub(super) async fn exchange(
     store: &Store,
     a: &Attempt,
     prompt: &Message,
-    mut controls: Controls,
+    controls: &mut Controls,
     stream: bool,
     notify: &dyn Fn(ReplyUpdate<'_>),
 ) -> Result<bool> {
-    if !a.session.is_empty() {
-        store.message_event(a.id, "user/followup", prompt)?;
-        notify(ReplyUpdate::TranscriptChanged);
-    }
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
     store.artifact(a.id, "events", "events.jsonl")?;
     store.artifact(a.id, "stderr", "provider.stderr.log")?;
@@ -223,6 +219,7 @@ pub(super) async fn exchange(
         send(&mut io.stdin, init(&["workshop"])).await?;
     } else {
         send(&mut io.stdin, first.take().unwrap()).await?;
+        prompt.record_followup(store, a, notify)?;
     }
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
     let mut queued = VecDeque::new();
@@ -286,6 +283,11 @@ pub(super) async fn exchange(
                         }
                         notify(ReplyUpdate::TranscriptChanged);
                     }
+                    Some(Control::Queue(message)) => {
+                        store.queue_message(a.id, &message)?;
+                        notify(ReplyUpdate::TranscriptChanged);
+                    }
+                    Some(Control::SteerWorker(id, text)) => route_worker_direction(store, a.id, id, &text, notify)?,
                 }
                 continue;
             }
@@ -317,6 +319,7 @@ pub(super) async fn exchange(
                 );
                 if let Some(input) = first.take() {
                     send(&mut io.stdin, input).await?;
+                    prompt.record_followup(store, a, notify)?;
                 }
             }
             "control_request" => {
@@ -475,7 +478,7 @@ pub(super) async fn exchange(
                         .verify(
                             store,
                             a,
-                            &mut controls,
+                            controls,
                             notify,
                             io.used_tools,
                             !store.workers(a.id)?.is_empty(),
@@ -486,9 +489,7 @@ pub(super) async fn exchange(
                     {
                         Finish::Done => return Ok(true),
                         Finish::Cancelled => return Ok(false),
-                        Finish::Repair(direction) => {
-                            user_message(&Message::from(direction.as_str()), preference)?
-                        }
+                        Finish::Continue(direction) => user_message(&direction, preference)?,
                     }
                 };
                 last_message.clear();

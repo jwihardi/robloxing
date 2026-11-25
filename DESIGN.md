@@ -38,6 +38,8 @@ Keep the model and stepped effort selector beside Send. Attachments and subagent
 
 Sketches open inline above the composer from **Add to message**. **Annotate** opens a returned image on the same pad and keeps its aspect ratio. Keep the caption editable while the pad is open. The paper and pen colors are fixed across themes, with a white pen for dark images. The toolbar and chat bubble use the current theme. A collapsed sketch stays in its chat draft, and a sent sketch can expand inside its original message.
 
+During a run, Enter steers the lead. The arrow beside Send opens delivery options. Pending follow-ups sit above the composer in a short scrollable list, each with its own remove action. Selecting **Send direction** on an expanded worker addresses the same composer to that worker. The recipient stays visible until the direction is sent or the user returns to the lead.
+
 ## Studio, settings and album
 
 Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.

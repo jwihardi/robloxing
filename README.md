@@ -34,6 +34,10 @@ Open the model and effort pill beside Send. Select the header showing the effort
 
 Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
+While the lead is working, Enter or **Steer now** sends a correction to the current run. For a separate follow-up, open **Send options** beside the send arrow and choose **Send after this run**. Messages wait above the composer in the order you added them. You can remove one before it starts. Each follow-up starts after the preceding run finishes its checks. Stopping a run or encountering a failure pauses delivery. The queue stays with the chat after restart. Choose **Send next** to continue.
+
+To address a single worker, expand its dispatch or open **Activity**, select the worker, and choose **Send direction**. The composer names the recipient. Send your text or attachment there, or choose **Return to lead** to keep editing the draft. Directions appear in the chat, and the lead receives them with the worker results.
+
 Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Album** in the navigation rail. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
 
 Choose **+ → Draw a sketch** to open a drawing pad above the message box. Draw with the mouse or pen and type your explanation in the composer. **Undo stroke** removes the last mark. **Done** folds the sketch into the draft so you can edit or remove it before sending. Send a sketch by itself or with a caption. The selected model receives the drawing as a PNG, and clicking it in the conversation enlarges it.
@@ -128,6 +132,8 @@ Search returns run IDs and up to eight matching function locations per run. Use 
 `run --model MODEL "task"` selects a provider model. Each run streams structured events to stdout. Type a direction or `/cancel` on stdin while it runs. Use `resume ID "direction"` to continue the same session in the same working copy. `retry ID` makes a fresh attempt from the project's current files. `discard ID` records the decision and retains the previous output. To run a project-specific command in the reviewed copy, use `check ID -- COMMAND [ARGS...]`. Close the desktop project before opening the same project in the CLI.
 
 Use `team --parallelism 2` to enable the second worker. Use `team --check-args` with a JSON argument array such as `["cargo","test","--locked"]` to set the combined-revision check. The default is Git’s whitespace check. Worker state events include IDs for `/stop-worker ID` on stdin. After a turn, `agents ID` lists that chat’s assignments and handoff.
+
+On stdin, plain text steers the lead, `/steer-worker ID MESSAGE` directs one worker, and `/queue MESSAGE` adds a follow-up. After a stopped run, `workshop-cli send-next ID` continues that chat’s saved queue.
 
 ## What acceptance applies
 
