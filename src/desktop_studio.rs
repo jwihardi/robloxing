@@ -237,7 +237,17 @@ impl App {
                 let (stop, cancel) = tokio::sync::oneshot::channel();
                 self.studio_cancel.replace(Some(stop));
                 studio.set_working(true);
-                studio.set_message(format!("Running in {}…", request.area()).into());
+                studio.set_message(
+                    match request {
+                        Recipe::Image { .. } => "Generating an image…",
+                        Recipe::Texture { .. } => "Generating a texture…",
+                        Recipe::ModelBrief { .. } => "Designing the model…",
+                        Recipe::Model { .. } => "Building the model…",
+                        Recipe::Blend { .. } => "Exporting the scene…",
+                        Recipe::Decompile { .. } => "Decompiling the binary…",
+                    }
+                    .into(),
+                );
                 let tx = self.updates.clone();
                 let worker = Arc::clone(&store);
                 let fresh = cmd == "fresh";

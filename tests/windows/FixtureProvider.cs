@@ -127,7 +127,12 @@ class FixtureProvider {
                     var msg=(Dictionary<string,object>)frame["message"];
                     var blocks=(System.Collections.ArrayList)msg["content"];
                     var first=(Dictionary<string,object>)blocks[0];
-                    if (((string)first["text"]).Contains("Usage fixture greeting")) { Done("Hello."); break; }
+                    if (((string)first["text"]).Contains("Usage fixture greeting")) {
+                        Send(new {type="stream_event",@event=new {type="content_block_start",content_block=new {type="thinking"}}});
+                        while(Mode("thinking.hold")) Thread.Sleep(30);
+                        File.AppendAllText(Path.Combine(Dir, "claude-greetings"), Process.GetCurrentProcess().Id+"\n");
+                        Done("Hello."); break;
+                    }
                     if (Delivery((string)first["text"])) break;
                     if (worker) { Worker((string)first["text"]); break; }
                     var tasks = new[]{Assignment("left"),Assignment("right")};
@@ -141,7 +146,28 @@ class FixtureProvider {
             }
         }
     }
+    static void Acp() {
+        string line; string sid=ThreadId;
+        while ((line=Console.ReadLine())!=null) {
+            var frame=Json.Deserialize<Dictionary<string,object>>(line);
+            var id=frame["id"]; var p=(Dictionary<string,object>)frame["params"];
+            switch(Convert.ToString(frame["method"])) {
+                case "initialize": Send(new {id=id,result=new {protocolVersion=1}}); break;
+                case "session/new": case "session/load":
+                    if(p.ContainsKey("sessionId")) sid=(string)p["sessionId"];
+                    Send(new {id=id,result=new {sessionId=sid,modes=new {currentModeId="accept-edits"},
+                        models=new {currentModelId="gemini-test-high",availableModels=new[]{new {modelId="gemini-test-high",name="Gemini Test (High)"}}}}}); break;
+                case "session/set_model": case "session/set_mode": Send(new {id=id,result=new {}});break;
+                case "session/prompt":
+                    Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_thought_chunk",content=new {type="text",text="fixture"}}}});
+                    while(Mode("thinking.hold")) Thread.Sleep(30);
+                    Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_message_chunk",content=new {type="text",text="Hello."}}}});
+                    Send(new {id=id,result=new {stopReason="end_turn"}});break;
+            }
+        }
+    }
     static void Main(string[] args) {
+        if(Array.IndexOf(args,"--acp")>=0 || (args.Length==2 && args[0]=="acp" && args[1]=="--stdio")){Acp();return;}
         if (args.Length == 1 && args[0] == "models") {
             Console.WriteLine("gemini-test-high    Gemini Test (High)");
             Console.WriteLine("gemini-test-low     Gemini Test (Low)");
@@ -289,6 +315,8 @@ class FixtureProvider {
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
                 if (message == "Show the reference drawing" && Mode("chat-image.png")) {
+                    Send(new {method="item/started", @params=new {threadId=session,turnId=turn,item=new {type="imageGeneration"}}});
+                    while(Mode("image.hold")) Thread.Sleep(30);
                     Send(new {method="item/completed", @params=new {threadId=session,turnId=turn,
                         item=new {type="imageGeneration",status="completed",savedPath=Path.Combine(Dir,"chat-image.png")}}});
                     Done("Here is the reference."); continue;

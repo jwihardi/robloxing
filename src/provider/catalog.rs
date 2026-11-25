@@ -1,6 +1,7 @@
 use super::{Connection, send};
 use crate::usage::{UsageWindow, account_windows};
 use anyhow::{Context, Result, ensure};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -204,6 +205,43 @@ pub fn model_catalog(project: &Path) -> Result<Catalog> {
         .build()?
         .block_on(all_providers(project))
         .map(|(_, catalog)| catalog)
+}
+
+/// Publish the available providers as each local CLI responds. Keep picker ordering
+/// and the Codex default stable regardless of which CLI answered first.
+pub fn discover_models(project: &Path, mut publish: impl FnMut(Catalog)) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let sources = ["codex", "claude", "antigravity", "gemini"];
+            let mut pending: FuturesUnordered<_> = sources
+                .iter()
+                .enumerate()
+                .map(|(i, source)| async move { (i, worker_catalog(project, Some(source)).await) })
+                .collect();
+            let mut catalogs: [Option<Catalog>; 4] = Default::default();
+            let mut errors = Vec::new();
+            while let Some((i, result)) = pending.next().await {
+                match result {
+                    Ok(found) => {
+                        catalogs[i] = Some(found);
+                        let mut combined = catalogs[0].clone().unwrap_or_default();
+                        for other in catalogs[1..].iter().flatten() {
+                            combined.models.extend_from_slice(&other.models);
+                        }
+                        publish(combined);
+                    }
+                    Err(e) => errors.push(format!("{}: {e:#}", sources[i])),
+                }
+            }
+            ensure!(
+                catalogs.iter().any(Option::is_some),
+                "{}",
+                errors.join(". ")
+            );
+            Ok(())
+        })
 }
 
 pub fn load_models_and_usage(

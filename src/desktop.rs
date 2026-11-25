@@ -46,16 +46,17 @@ enum Update {
         recommendation: bool,
     },
     Opened(Arc<Store>, Option<notifications::Target>),
-    Models(PathBuf, Result<provider::Catalog>),
+    Models(PathBuf, u64, Result<provider::Catalog>),
     Context(i64, ContextUsage),
     AccountUsage(PathBuf, String, Vec<UsageWindow>),
     UsageSnapshot(&'static str, u64, Option<provider::AccountLimits>),
     Started(i64, bool),
     Delta(String),
+    Activity(i64, String),
     ReplyStored,
     TranscriptChanged,
     WorkersChanged,
-    Warm(Box<provider::Session>),
+    Warm(i64, u64, Box<provider::Session>),
     Finished(Result<String>),
 }
 
@@ -90,6 +91,7 @@ struct App {
     plugin_limit: Cell<usize>,
     usage: RefCell<desktop_usage::AccountUsage>,
     catalog: RefCell<provider::Catalog>,
+    catalog_generation: Cell<u64>,
     ui: slint::Weak<Desk>,
     store: RefCell<Option<Arc<Store>>>,
     attempts: RefCell<Vec<Attempt>>,
@@ -106,10 +108,12 @@ struct App {
     control: RefCell<Option<tokio::sync::mpsc::UnboundedSender<Control>>>,
     updates: Updates,
     receiver: mpsc::Receiver<Update>,
-    session: RefCell<Option<provider::Session>>,
+    warm_sessions: RefCell<std::collections::VecDeque<(i64, Instant, provider::Session)>>,
+    session_generation: Cell<u64>,
 }
 const DEFAULT_MODEL: &str = "Default model";
 const PLUGINS_PER_PAGE: usize = 50;
+const SESSION_IDLE: Duration = Duration::from_secs(300);
 
 struct CachedPlugins {
     rows: Rc<Vec<preferences::Row>>,
@@ -668,17 +672,22 @@ impl App {
         } else {
             store.save_worker_defaults(&policy)?;
         }
-        self.session.take();
+        self.clear_sessions();
         self.render_worker_policy(store, &self.catalog.borrow())
     }
     fn load_models(&self, project: PathBuf) {
+        let generation = self.catalog_generation.get() + 1;
+        self.catalog_generation.set(generation);
         self.ui
             .unwrap()
             .set_catalog_status("Loading models…".into());
         let updates = self.updates.clone();
         std::thread::spawn(move || {
-            let catalog = provider::model_catalog(&project);
-            let _ = updates.send(Update::Models(project, catalog));
+            if let Err(error) = provider::discover_models(&project, |catalog| {
+                let _ = updates.send(Update::Models(project.clone(), generation, Ok(catalog)));
+            }) {
+                let _ = updates.send(Update::Models(project, generation, Err(error)));
+            }
         });
     }
     fn filter_preferences(&self, query: &str) {
@@ -797,7 +806,9 @@ impl App {
                 .and_then(|rt| {
                     rt.block_on(async {
                         tokio::select! {
-                            rows = preferences::list(&tab, p, section, store.as_deref(), refresh) => rows,
+                            rows = preferences::list(&tab, p, section, store.as_deref(), refresh, |partial| {
+                                let _ = tx.send(Update::Preferences(generation, Ok(partial), message.clone()));
+                            }) => rows,
                             _ = cancelled => Ok(Vec::new()),
                         }
                     })
@@ -855,7 +866,8 @@ impl App {
             let _ = tx.send(Update::PreferenceChanged {
                 result,
                 provider: p,
-                account_changed: tab == "Providers",
+                account_changed: tab == "Providers"
+                    && matches!(action.as_str(), "login" | "logout"),
                 recommendation: action == "recommend",
             });
         });
@@ -910,6 +922,11 @@ impl App {
         ui.set_chat_choices(choices);
         Ok(())
     }
+    fn clear_sessions(&self) {
+        self.session_generation
+            .set(self.session_generation.get() + 1);
+        self.warm_sessions.borrow_mut().clear();
+    }
     fn select_chat(&self, selected: Option<i64>) {
         if selected == self.id.get() {
             return;
@@ -918,7 +935,6 @@ impl App {
         ui.invoke_clear_recipient();
         let mut drafts = self.drafts.borrow_mut();
         drafts.insert(self.id.get(), ui.get_draft().to_string());
-        self.session.take();
         self.id.set(selected);
         self.render_attachments();
         self.displayed.set(None);
@@ -1088,8 +1104,19 @@ impl App {
                     if generation == self.settings_generation.get() =>
                 {
                     match rows {
-                        Ok(rows) => {
+                        Ok(mut rows) => {
                             let empty = rows.is_empty();
+                            if ui.get_settings_tab() == "Providers" {
+                                let previous = self.settings_rows.borrow();
+                                for row in rows.iter_mut().filter(|row| row.is_checking_provider())
+                                {
+                                    if let Some(known) =
+                                        previous.iter().find(|known| known.id == row.id)
+                                    {
+                                        *row = known.clone();
+                                    }
+                                }
+                            }
                             let rows = Rc::new(rows);
                             if ui.get_settings_tab() == "Plugins"
                                 && ui.get_plugin_section() == PluginSection::Marketplace
@@ -1139,6 +1166,14 @@ impl App {
                         Ok(note) => {
                             if account_changed {
                                 self.plugin_catalogs.borrow_mut().clear();
+                                if let Some(row) =
+                                    Rc::make_mut(&mut self.settings_rows.borrow_mut())
+                                        .iter_mut()
+                                        .find(|r| r.id == id.as_str())
+                                {
+                                    *row = preferences::Row::checking_provider(id.as_str());
+                                }
+                                self.filter_preferences(&ui.get_settings_query());
                             } else {
                                 self.plugin_catalogs.borrow_mut().remove(&provider);
                             }
@@ -1153,7 +1188,7 @@ impl App {
                                 }
                                 self.filter_preferences(&ui.get_settings_query());
                             }
-                            self.session.take();
+                            self.clear_sessions();
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
                                 self.usage.borrow_mut().clear();
                                 ui.set_usage_meters(usage_meters(Vec::new()));
@@ -1210,7 +1245,10 @@ impl App {
                     self.store.replace(Some(store));
                     ui.set_draft("".into());
                 }
-                Update::Models(project, result) => {
+                Update::Models(project, generation, result) => {
+                    if generation != self.catalog_generation.get() {
+                        continue;
+                    }
                     let slot = self.store.borrow();
                     let store = slot.as_ref();
                     if store.map_or_else(
@@ -1225,8 +1263,17 @@ impl App {
                                 self.catalog.replace(catalog);
                                 ui.set_catalog_ready(true);
                                 ui.set_catalog_status("".into());
-                                if store.is_some() {
-                                    self.render()?;
+                                if let Some(store) = store {
+                                    self.render_settings(store)?;
+                                    if let Some(id) = self.id.get() {
+                                        ui.set_model_name(
+                                            model_label(
+                                                &self.catalog.borrow(),
+                                                &store.attempt(id)?.model,
+                                            )
+                                            .into(),
+                                        );
+                                    }
                                 }
                                 if ui.global::<Studio>().get_editing_run()
                                     || (ui.get_settings_open() && ui.get_settings_tab() == "Tasks")
@@ -1275,8 +1322,17 @@ impl App {
                     self.render_attachments();
                     self.displayed.set(None);
                     self.render()?;
+                    ui.set_live_activity(
+                        format!("Connecting to {}…", ui.get_chat_provider()).into(),
+                    );
+                }
+                Update::Activity(id, label) => {
+                    if self.id.get() == Some(id) {
+                        ui.set_live_activity(label.into());
+                    }
                 }
                 Update::Delta(delta) => {
+                    ui.set_live_activity("".into());
                     let text = partial.get_or_insert_with(|| ui.get_partial().to_string());
                     if text.len() < 128 * 1024 {
                         let remaining = 128 * 1024 - text.len();
@@ -1292,11 +1348,27 @@ impl App {
                     transcript_changed = true;
                 }
                 Update::WorkersChanged | Update::TranscriptChanged => transcript_changed = true,
-                Update::Warm(session) => {
-                    self.session.replace(Some(*session));
+                Update::Warm(id, generation, session) => {
+                    if generation == self.session_generation.get() {
+                        let mut pool = self.warm_sessions.borrow_mut();
+                        pool.retain(|(chat, _, _)| *chat != id);
+                        if pool.len() >= 3 {
+                            pool.pop_front();
+                        }
+                        pool.push_back((id, Instant::now(), *session));
+                        let owner = Rc::downgrade(self);
+                        Timer::single_shot(SESSION_IDLE, move || {
+                            if let Some(app) = owner.upgrade() {
+                                app.warm_sessions
+                                    .borrow_mut()
+                                    .retain(|(_, used, _)| used.elapsed() < SESSION_IDLE);
+                            }
+                        });
+                    }
                 }
                 Update::Finished(result) => {
                     partial = Some(String::new());
+                    ui.set_live_activity("".into());
                     if self.control.take().is_some() && ui.get_chat_provider() == "Antigravity" {
                         self.usage.borrow_mut().expire("antigravity");
                     }
@@ -1342,7 +1414,7 @@ impl App {
         {
             return;
         }
-        self.session.take();
+        self.clear_sessions();
         self.ui.unwrap().set_notice("Opening project…".into());
         self.start(move |tx| {
             let home = data_dir()?;
@@ -1488,10 +1560,16 @@ impl App {
             }
             .into(),
         );
-        let mut session = self
-            .session
-            .take()
-            .filter(|_| matches!(op.as_str(), "resume" | "send-next"));
+        let generation = self.session_generation.get();
+        let mut session = if matches!(op.as_str(), "resume" | "send-next") {
+            let mut pool = self.warm_sessions.borrow_mut();
+            pool.iter()
+                .position(|(chat, _, _)| Some(*chat) == id)
+                .and_then(|index| pool.remove(index))
+                .map(|(_, _, session)| session)
+        } else {
+            None
+        };
         self.start(move |events| {
             if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
                 let a = match op.as_str() {
@@ -1536,9 +1614,9 @@ impl App {
                             provider::ReplyUpdate::AccountUsage(source, windows) => {
                                 Update::AccountUsage(store.project.clone(), source.into(), windows)
                             }
-                            provider::ReplyUpdate::Usage(_)
-                            | provider::ReplyUpdate::Activity(_) => {
-                                return;
+                            provider::ReplyUpdate::Usage(_) => return,
+                            provider::ReplyUpdate::Activity(label) => {
+                                Update::Activity(a.id, label.to_owned())
                             }
                             provider::ReplyUpdate::WorkersChanged => Update::WorkersChanged,
                             provider::ReplyUpdate::Stored => Update::ReplyStored,
@@ -1566,7 +1644,7 @@ impl App {
                 }
                 outcome?;
                 if let Some(live) = session {
-                    events.send(Update::Warm(Box::new(live)))?;
+                    events.send(Update::Warm(a.id, generation, Box::new(live)))?;
                 }
                 return Ok(String::new());
             }
@@ -1616,6 +1694,7 @@ fn main() -> Result<()> {
         plugin_limit: Cell::new(PLUGINS_PER_PAGE),
         usage: Default::default(),
         catalog: Default::default(),
+        catalog_generation: Default::default(),
         ui: ui.as_weak(),
         store: Default::default(),
         attempts: Default::default(),
@@ -1636,7 +1715,8 @@ fn main() -> Result<()> {
             ui: ui.as_weak(),
         },
         receiver: rx,
-        session: Default::default(),
+        warm_sessions: Default::default(),
+        session_generation: Default::default(),
     });
     desktop_studio::connect(&ui, &app);
     desktop_tasks::connect(&ui, &app);
@@ -1720,7 +1800,7 @@ fn main() -> Result<()> {
             store.configure_team(&s)?;
             if changed {
                 // The lead receives its worker limit when opening or resuming its thread.
-                a.session.take();
+                a.clear_sessions();
             }
             a.render_settings(store)
         })();

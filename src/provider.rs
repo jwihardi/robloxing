@@ -23,7 +23,9 @@ pub fn provider_for(model: &str) -> &'static str {
 use anyhow::{Context, Result, bail, ensure};
 pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
-pub use catalog::{Catalog, Model as CatalogModel, load_models_and_usage, model_catalog};
+pub use catalog::{
+    Catalog, Model as CatalogModel, discover_models, load_models_and_usage, model_catalog,
+};
 
 pub type AccountLimits = std::collections::HashMap<String, Vec<UsageWindow>>;
 
@@ -197,14 +199,29 @@ impl Message {
         Ok(Value::Array(items))
     }
 }
+fn tool_activity(name: &str) -> &str {
+    match name.rsplit("__").next().unwrap_or(name) {
+        "generate_image" | "image_generation" | "imagegen" => "Generating an image…",
+        "workshop_delegate" => "Dispatching subagents…",
+        "Bash" | "PowerShell" => "Running a command…",
+        "WebSearch" | "web_search" => "Searching the web…",
+        "Read" | "read_file" => "Reading a file…",
+        "Edit" | "Write" | "write_file" => "Editing project files…",
+        _ => name,
+    }
+}
 fn label(v: &Value) -> Option<String> {
     let p = &v["params"];
     let s = match v["method"].as_str()? {
         "item/started" => match p["item"]["type"].as_str()? {
             "commandExecution" => p["item"]["command"].as_str().unwrap_or("Running a command"),
             "fileChange" => "Editing project files",
-            "reasoning" => "Thinking through the task",
-            "mcpToolCall" => p["item"]["tool"].as_str().unwrap_or("Using a tool"),
+            "reasoning" => "Thinking…",
+            "imageGeneration" => "Generating an image…",
+            "webSearch" => "Searching the web…",
+            "mcpToolCall" | "dynamicToolCall" => {
+                p["item"]["tool"].as_str().unwrap_or("Using a tool")
+            }
             _ => return None,
         },
         "item/completed" if p["item"]["type"] == "agentMessage" => {
@@ -815,10 +832,21 @@ async fn exchange(
                         };
                         let action = label(&v);
                         store.event(a.id, kind, action.as_deref())?;
+                        if method == "turn/started" && v["params"]["threadId"] == session.as_str() {
+                            notify(ReplyUpdate::Activity("Waiting for a reply…"));
+                        }
                         if method == "item/started"
+                            && v["params"]["threadId"] == session.as_str()
                             && let Some(action) = action.as_deref()
                         {
-                            notify(ReplyUpdate::Activity(action));
+                            let display = if v["params"]["item"]["type"] == "commandExecution"
+                                && !store.worker
+                            {
+                                "Running a command…"
+                            } else {
+                                tool_activity(action)
+                            };
+                            notify(ReplyUpdate::Activity(display));
                         }
                         if kind == "agent/message" {
                             notify(ReplyUpdate::Stored);

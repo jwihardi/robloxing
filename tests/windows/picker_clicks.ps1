@@ -447,8 +447,11 @@ function Test-Sketch {
         $portrait.Save($reference,[Drawing.Imaging.ImageFormat]::Png)
     } finally { $portrait.Dispose() }
     $originalHash = (Get-FileHash -LiteralPath $reference).Hash
+    Set-Content (Join-Path $root 'image.hold') 'generating'
     (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Show the reference drawing')
     Click 'Send message'
+    Wait-For { (Named 'Generating an image…') -and (Named 'Stop response') } 'native image generation status'
+    Remove-Item -LiteralPath (Join-Path $root 'image.hold')
     Wait-For { (Named 'Enlarge image') -and (Named 'New chat').Current.IsEnabled } 'agent image reply'
     $refinement = 'Move the highlighted area to the right'
     (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($refinement)
@@ -593,6 +596,12 @@ try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
     if ($UsageOnly) {
         Wait-For { (Named '100%') -and (Named '88%') -and (Named '31%') } 'empty-chat context and account usage before model discovery finishes'
+        Wait-For { (Named 'Chat model and effort').Current.IsEnabled } 'other providers ready while Codex discovery is blocked'
+        Click 'Chat model and effort'
+        Click 'Chat model'
+        Wait-For { Named 'Claude Sonnet 5.5' } 'Claude selectable independently of Codex'
+        [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+        [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
         Remove-Item -LiteralPath (Join-Path $root 'catalog.hold')
     }
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
@@ -627,11 +636,40 @@ try {
         [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
         [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
         (Named 'Message Claude').GetCurrentPattern($valuePattern).SetValue('Usage fixture greeting')
+        Set-Content (Join-Path $root 'thinking.hold') 'thinking'
         Click 'Send message'
+        Wait-For { (Named 'Thinking…') -and (Named 'Stop response') } 'live Claude thinking status'
+        Save-PrivateWindow (Join-Path $root 'thinking.png')
+        Remove-Item -LiteralPath (Join-Path $root 'thinking.hold')
         Wait-For { (Named 'New chat').Current.IsEnabled -and (Named '73%') } 'context after a Claude turn'
         Click 'New chat'
         Wait-For { (Named '100%') -and (Named '75%') -and (Named '52%') } 'fresh context with the same account usage'
-        "Header alignment and new-chat usage passed. Screenshots in $root"
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](1060*$scale),[int](700*$scale),0x16)
+        foreach ($provider in @('Antigravity','Gemini')) {
+            Click 'Chat model and effort'
+            Click 'Chat model'
+            [void][WorkshopPointer]::PostMessage($appWindow,0x100,0x23,1)
+            [void][WorkshopPointer]::PostMessage($appWindow,0x101,0x23,1)
+            Wait-For { Named 'Gemini Fixture' } 'Google models visible'
+            Click (@{Antigravity='Gemini Test (Antigravity)';Gemini='Gemini Fixture'}[$provider])
+            Wait-For { Named "Message $provider" } "selected $provider"
+            [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+            [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+            (Named "Message $provider").GetCurrentPattern($valuePattern).SetValue("Hello from $provider")
+            Set-Content (Join-Path $root 'thinking.hold') 'thinking'
+            Click 'Send message'
+            Wait-For { Named 'Thinking…' } "$provider live thinking status"
+            Remove-Item -LiteralPath (Join-Path $root 'thinking.hold')
+            Wait-For { (Named "$provider reply") -and (Named 'New chat').Current.IsEnabled -and !(Named 'Thinking…') } "$provider completed response"
+            Click 'New chat'
+        }
+        Click 'Usage fixture greeting'
+        Wait-For { Named 'Message Claude' } 'back to the original Claude chat'
+        (Named 'Message Claude').GetCurrentPattern($valuePattern).SetValue('Usage fixture greeting again')
+        Click 'Send message'
+        Wait-For { @(Get-Content (Join-Path $root 'claude-greetings')).Count -eq 2 -and (Named 'New chat').Current.IsEnabled } 'follow-up after switching providers'
+        if (@(Get-Content (Join-Path $root 'claude-greetings') | Select-Object -Unique).Count -ne 1) {throw 'Returning to a recent chat restarted its provider'}
+        "Header alignment, provider readiness, activity and warm follow-ups passed. Screenshots in $root"
         return
     }
     if ($DeliveryOnly) { Test-Delivery; return }
@@ -859,7 +897,7 @@ try {
     (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Forest icon')
     [void](New-Item -ItemType File (Join-Path $root 'studio.hold'))
     Click 'Generate image'
-    Wait-For { Named 'Cancel run' } 'cancellable studio job'
+    Wait-For { (Named 'Cancel run') -and (Named 'Generating an image…') } 'cancellable image generation with progress'
     Click 'Cancel run'
     Wait-For { $retry=Named 'Retry run'; $retry -and $retry.Current.IsEnabled } 'cancelled job saved in library'
     Remove-Item -LiteralPath (Join-Path $root 'studio.hold')

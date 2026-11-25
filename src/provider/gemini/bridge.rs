@@ -21,6 +21,7 @@ pub(in crate::provider) struct Bridge {
     dir: tempfile::TempDir,
     pub(super) tools: Value,
     pub(in crate::provider) project_trusted: bool,
+    pub(super) instructions: String,
 }
 
 impl Bridge {
@@ -44,6 +45,7 @@ impl Bridge {
             dir,
             tools,
             project_trusted,
+            instructions: String::new(),
         })
     }
     pub(super) fn policy(&self) -> std::path::PathBuf {

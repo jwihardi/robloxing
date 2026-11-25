@@ -318,6 +318,7 @@ pub(super) async fn exchange(
         send(&mut io.stdin, init(&["workshop"])).await?;
     } else {
         send(&mut io.stdin, first.take().unwrap()).await?;
+        notify(ReplyUpdate::Activity("Waiting for a reply…"));
         prompt.record_followup(store, a, notify)?;
     }
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
@@ -418,6 +419,7 @@ pub(super) async fn exchange(
                 );
                 if let Some(input) = first.take() {
                     send(&mut io.stdin, input).await?;
+                    notify(ReplyUpdate::Activity("Waiting for a reply…"));
                     prompt.record_followup(store, a, notify)?;
                 }
             }
@@ -488,6 +490,12 @@ pub(super) async fn exchange(
             "stream_event" => {
                 deadline = None;
                 let e = &event["event"];
+                if matches!(
+                    e["content_block"]["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                ) {
+                    notify(ReplyUpdate::Activity("Thinking…"));
+                }
                 if e["delta"]["type"] == "text_delta"
                     && let Some(text) = e["delta"]["text"].as_str()
                 {
@@ -497,7 +505,7 @@ pub(super) async fn exchange(
                     && let Some(name) = e["content_block"]["name"].as_str()
                 {
                     io.used_tools = true;
-                    notify(ReplyUpdate::Activity(name));
+                    notify(ReplyUpdate::Activity(tool_activity(name)));
                     store.event(a.id, "item/started", Some(name))?;
                 }
             }

@@ -1,4 +1,4 @@
-import { Theme, ThemeColors, Action } from "common.slint";
+import { Theme, ThemeColors, Action, ActivityLine } from "common.slint";
 import { ReplyView } from "transcript.slint";
 export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
 export { ThemeColors } from "common.slint";
@@ -459,6 +459,7 @@ export component Desk inherits Window {
     private property <bool> browse-plugins: root.settings-tab == "Plugins" && root.plugin-section == PluginSection.marketplace;
     in property <[SettingRow]> settings-rows;
     in property <string> settings-status;
+    in property <string> live-activity;
     in property <bool> settings-working;
     in property <string> settings-working-id;
     in property <bool> more-plugins;
@@ -786,7 +787,7 @@ export component Desk inherits Window {
                 if !root.later-messages && root.running && root.partial != "": ReplyView {
                     provider: root.chat-provider; body: root.partial; streaming: true;
                 }
-                if !root.later-messages && root.running && root.partial == "": Text { text: root.chat-provider + " is working…"; color: Theme.muted; font-size: 14px; }
+                if !root.later-messages && root.running && root.live-activity != "": ActivityLine { label: root.live-activity; }
                 if !root.home && (root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled"): Text {
                     text: root.action; color: Theme.state-color(root.state-label); font-size: 14px; wrap: word-wrap;
                 }
@@ -1128,7 +1129,7 @@ export component Desk inherits Window {
                     Text { text:"Session activity"; color:Theme.text; font-size:18px; font-weight:600; vertical-alignment:center; horizontal-stretch:1; }
                     Action { label:"Close activity"; glyph:"\u{e711}"; icon-only:true; width:30px; height:30px; activate=>{root.dismiss-panel();} }
                 }
-                Text { text:root.running ? root.chat-provider + " is working" : root.state-label; color:Theme.state-color(root.running ? "In progress" : root.state-label); font-family:Theme.mono; font-size:14px; }
+                Text { text:root.running ? (root.live-activity != "" ? root.live-activity : root.chat-provider + " is responding") : root.state-label; color:Theme.state-color(root.running ? "In progress" : root.state-label); font-family:Theme.mono; font-size:14px; overflow: elide; }
                 if root.action != "": Text { text:root.action; color:Theme.muted; wrap:word-wrap; font-size:14px; }
                 if root.workers.length > 0: Rectangle { height:1px; background:Theme.line; }
                 if root.workers.length > 0: WorkerGroup { label:"Subagents (" + root.workers.length + ")"; workers:root.workers;

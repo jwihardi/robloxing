@@ -1,6 +1,7 @@
 mod recommended;
 use crate::PluginSection;
 use anyhow::{Context, Result, bail, ensure};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde_json::Value;
 use std::{
     collections::HashSet,
@@ -20,6 +21,21 @@ pub struct Row {
     pub detail: String,
     pub action: &'static str,
     pub button: &'static str,
+}
+
+impl Row {
+    pub fn checking_provider(name: &str) -> Self {
+        Self {
+            id: name.into(),
+            label: name.into(),
+            detail: "Checking sign-in…".into(),
+            action: "",
+            button: "",
+        }
+    }
+    pub fn is_checking_provider(&self) -> bool {
+        self.detail == "Checking sign-in…" && self.action.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -156,15 +172,16 @@ pub async fn list(
     section: PluginSection,
     project: Option<&workshop::Store>,
     refresh: bool,
+    mut publish: impl FnMut(Vec<Row>),
 ) -> Result<Vec<Row>> {
     match tab {
         "Providers" => {
-            let (codex, claude, agy) = tokio::join!(
-                account(Provider::Codex),
-                account(Provider::Claude),
-                account(Provider::Antigravity)
-            );
-            let mut rows = vec![codex, claude, agy, gemini_account()];
+            let providers = [Provider::Codex, Provider::Claude, Provider::Antigravity];
+            let mut rows: Vec<_> = providers
+                .iter()
+                .map(|p| Row::checking_provider(p.label()))
+                .collect();
+            rows.push(gemini_account());
             if let Some(store) = project
                 && workshop::provider::gemini::installed()
             {
@@ -189,6 +206,29 @@ pub async fn list(
                     action,
                     button,
                 });
+            }
+            publish(rows.clone());
+            let mut checks: FuturesUnordered<_> = providers
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| async move {
+                    let row = tokio::time::timeout(Duration::from_secs(12), account(p))
+                        .await
+                        .unwrap_or_else(|_| Row {
+                            id: p.label().into(),
+                            label: p.label().into(),
+                            detail: "Sign-in check timed out. Select Refresh to retry.".into(),
+                            action: "",
+                            button: "",
+                        });
+                    (i, row)
+                })
+                .collect();
+            while let Some((i, row)) = checks.next().await {
+                rows[i] = row;
+                if !checks.is_empty() {
+                    publish(rows.clone());
+                }
             }
             Ok(rows)
         }

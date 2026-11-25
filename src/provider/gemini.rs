@@ -277,6 +277,11 @@ pub(super) async fn next(lines: &mut Frames) -> Result<Value> {
 pub(super) fn result<'a>(msg: &'a Value, provider: &str) -> Result<&'a Value> {
     if let Some(e) = msg.get("error") {
         if e["code"] == -32000 {
+            if provider == "Gemini CLI" {
+                bail!(
+                    "Gemini CLI needs authentication. For a personal Google account, choose an Antigravity model. For Gemini CLI, configure your API key or Vertex AI credentials."
+                );
+            }
             bail!(
                 "{provider} needs authentication. Open Settings → Providers → {provider} to sign in."
             );
@@ -478,19 +483,24 @@ pub(super) async fn exchange(
     store.artifact(a.id, "stderr", "provider.stderr.log")?;
     let bridge = io
         .gemini_bridge
-        .as_ref()
+        .as_mut()
         .context("Missing Workshop bridge")?;
     let agy = a.provider == "antigravity";
     let provider = if agy { "Antigravity" } else { "Gemini CLI" };
     let mut set_edit_mode = false;
     let mut first = content(prompt)?;
-    first.insert(0, json!({"type":"text","text":instructions(store,a)?}));
+    let instructions = instructions(store, a)?;
+    if instructions != bridge.instructions {
+        first.insert(0, json!({"type":"text","text":instructions}));
+        bridge.instructions = instructions;
+    }
     if let Some(pref) = team_preference(store)? {
         first.push(json!({"type":"text","text":pref}));
     }
     let mut queued = VecDeque::from([first]);
     let mut waiting = io.session.is_empty();
     let mut first_prompt = true;
+    let mut thinking = false;
     if waiting {
         initialize(&mut io.stdin).await?;
     }
@@ -520,6 +530,8 @@ pub(super) async fn exchange(
                 json!({"sessionId":io.session,"prompt":blocks}),
             )
             .await?;
+            thinking = false;
+            notify(ReplyUpdate::Activity("Waiting for a reply…"));
             if first_prompt {
                 prompt.record_followup(store, a, notify)?;
                 first_prompt = false;
@@ -600,7 +612,15 @@ pub(super) async fn exchange(
                 let u = &msg["params"]["update"];
                 // session/load replays history before its response. Only record the live turn.
                 match u["sessionUpdate"].as_str() {
+                    Some("agent_thought_chunk") => {
+                        if !thinking {
+                            thinking = true;
+                            notify(ReplyUpdate::Activity("Thinking…"));
+                        }
+                        continue;
+                    }
                     Some("agent_message_chunk") if let Some(s) = u["content"]["text"].as_str() => {
+                        thinking = false;
                         if u["_meta"]["reset"] == true {
                             text.clear();
                             notify(ReplyUpdate::Stored);
@@ -609,11 +629,19 @@ pub(super) async fn exchange(
                         notify(ReplyUpdate::Delta(s));
                     }
                     Some("tool_call") => {
+                        thinking = false;
                         save_text(store, a.id, &mut text, notify)?;
                         io.used_tools = true;
                         let title = u["title"].as_str().unwrap_or("Provider tool");
                         store.event(a.id, "item/started", Some(title))?;
-                        notify(ReplyUpdate::Activity(title));
+                        let phase = if u["rawInput"]["TypeName"] == "image-generator"
+                            || u["name"] == "generate_image"
+                        {
+                            "Generating an image…"
+                        } else {
+                            tool_activity(title)
+                        };
+                        notify(ReplyUpdate::Activity(phase));
                     }
                     Some("usage_update") => {
                         context = ContextUsage {

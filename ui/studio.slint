@@ -1,5 +1,5 @@
 import { ComboBox, LineEdit, ListView, TextEdit } from "std-widgets.slint";
-import { Action, Theme } from "common.slint";
+import { Action, Theme, ActivityLine } from "common.slint";
 
 export struct StudioItem { id: int, title: string, state: string, detail: string, date: string }
 
@@ -211,7 +211,8 @@ export component StudioPage inherits Rectangle {
                 enabled: Studio.working || (root.binary ? Studio.binary-path != "" : root.import-scene ? Studio.scene-path != "" :
                     root.tile ? Studio.seed != "" : root.images ? Studio.brief != "" : Studio.model-mode == 0 ? Studio.model-brief != "" : Studio.model-name != "");
                 activate => {Studio.command(Studio.working ? "cancel" : "run");} }
-            Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            if Studio.working: ActivityLine { label: Studio.message; horizontal-stretch: 1; }
+            if !Studio.working: Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
             if root.binary || (root.images && !root.tile) || (root.models && Studio.model-mode==0): Action {
                 label:Studio.custom-task ? "Custom run settings" : "Run settings"; width:Studio.custom-task ? 181px : 137px;
                 glyph:"\u{e713}"; activate=>{Studio.command("edit-task");}
