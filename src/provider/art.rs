@@ -16,6 +16,13 @@ async fn art_turn(
     item_type: &str,
     inference: &(String, String),
 ) -> Result<Value> {
+    if super::provider_for(&inference.0) == "claude" {
+        ensure!(
+            item_type != "imageGeneration",
+            "Claude Code does not provide native image generation. Choose a Codex image model."
+        );
+        return super::claude::studio(dir, instructions, prompt, schema, inference).await;
+    }
     let mut io = Connection::spawn(dir.to_owned(), tempfile::tempfile()?)?;
     request(
         &mut io,
@@ -128,7 +135,7 @@ pub(crate) async fn summarize_report(
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .context("Codex returned an empty summary.")?;
+        .context("The selected model returned an empty summary.")?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     if excerpt {
         writeln!(file, "Based on the first 48 KiB of the saved report.\n")?;

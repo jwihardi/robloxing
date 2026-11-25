@@ -44,6 +44,7 @@ pub struct Attempt {
     pub head: String,
     pub base: String,
     pub session: String,
+    pub provider: String,
     pub model: String,
     pub effort: String,
     pub patch: String,
@@ -209,6 +210,8 @@ impl Store {
                 "auto_delegate",
                 "INTEGER NOT NULL DEFAULT 1",
             ),
+            ("workers", "model", "TEXT"),
+            ("workers", "effort", "TEXT"),
             ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
         ] {
             let missing: bool = tx.query_row(
@@ -321,7 +324,7 @@ impl Store {
         } else {
             "WHERE ?1 IS NULL"
         };
-        let mut stmt=db.prepare(&format!("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate,a.effort FROM attempts a JOIN tasks t ON a.task=t.id {filter} ORDER BY a.id DESC LIMIT ?2 OFFSET ?3"))?;
+        let mut stmt=db.prepare(&format!("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate,a.effort,a.provider FROM attempts a JOIN tasks t ON a.task=t.id {filter} ORDER BY a.id DESC LIMIT ?2 OFFSET ?3"))?;
         Ok(stmt
             .query_map(params![id, limit, offset], |r| {
                 Ok(Attempt {
@@ -335,6 +338,7 @@ impl Store {
                     session: r.get(7)?,
                     model: r.get(8)?,
                     effort: r.get(11)?,
+                    provider: r.get(12)?,
                     patch: r.get(9)?,
                     candidate: r.get(10)?,
                 })
@@ -376,7 +380,14 @@ impl Store {
         let settings = self.team_settings()?;
         if let Some(id) = retry {
             let old = self.attempt(id)?;
-            return self.prepare_inference(prompt, model, &old.effort, retry, policy, &[]);
+            return self.prepare_inference(
+                prompt,
+                if model.is_empty() { &old.model } else { model },
+                &old.effort,
+                retry,
+                policy,
+                &[],
+            );
         }
         let effort = if model.is_empty() || model == settings.lead_model {
             &settings.lead_effort
@@ -438,10 +449,10 @@ impl Store {
         self.event_with_image(id, "workshop/image", Some(caption), Some(&path))
     }
     pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
-        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3 WHERE id=?1 AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort])?;
+        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3,provider=?4 WHERE id=?1 AND (session='' OR provider=?4) AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort,provider::provider_for(model)])?;
         ensure!(
             n == 1,
-            "Wait for the current response before changing the model."
+            "Change models between responses. Start a new chat to switch providers."
         );
         Ok(())
     }
@@ -478,7 +489,7 @@ impl Store {
                 }
                 task
             };
-            tx.execute("INSERT INTO attempts(task,head,model,effort,state,action) VALUES(?1,?2,?3,?4,'preparing','Creating isolated copy')",params![task,head,model,effort])?;
+            tx.execute("INSERT INTO attempts(task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,'preparing','Creating isolated copy')",params![task,head,model,effort,provider::provider_for(model)])?;
             let id = tx.last_insert_rowid();
             if let Some(policy) = policy {
                 policy.validate()?;
@@ -494,7 +505,7 @@ impl Store {
         };
         match git::isolate(&self.project, &self.work(id), &head) {
             Ok(base) => {
-                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action='Connecting to Codex' WHERE id=?1",params![id,base])?;
+                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action=CASE provider WHEN 'claude' THEN 'Connecting to Claude' ELSE 'Connecting to Codex' END WHERE id=?1",params![id,base])?;
             }
             Err(e) => {
                 self.status(id, "failed", &format!("{e:#}"))?;
@@ -613,7 +624,7 @@ impl Store {
             use rusqlite::OptionalExtension;
             if let Some(last)=db.query_row("SELECT summary FROM events WHERE attempt=?1 AND kind='agent/message' ORDER BY id DESC LIMIT 1",[id],|r|r.get::<_,String>(0)).optional()? {
                 summary=last;
-            } else if bytes.is_empty() { summary="Codex finished without changing the working copy.".into(); }
+            } else if bytes.is_empty() { summary="Finished without changing the working copy.".into(); }
         }
         db.execute(
             "UPDATE attempts SET state=?2,action=?3,candidate=?4,patch=?5 WHERE id=?1",

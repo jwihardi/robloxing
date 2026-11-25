@@ -4,6 +4,15 @@ use crate::{
 };
 mod art;
 mod catalog;
+mod claude;
+
+pub fn provider_for(model: &str) -> &'static str {
+    if model.starts_with("claude:") {
+        "claude"
+    } else {
+        "codex"
+    }
+}
 use anyhow::{Context, Result, bail, ensure};
 pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
@@ -164,28 +173,32 @@ fn label(v: &Value) -> Option<String> {
     Some(s.chars().take(500).collect())
 }
 
-async fn open_thread(stdin: &mut ChildStdin, store: &Store, a: &Attempt) -> Result<()> {
-    let mut params = json!({"cwd":store.work(a.id),"approvalPolicy":"never","sandbox":"workspace-write",
-        "developerInstructions":"Work only in the current project copy. Keep edits available for the creator to review."});
-    params["config"] = json!({"features.multi_agent":false});
-    if !store.worker {
+fn instructions(store: &Store, a: &Attempt) -> Result<String> {
+    let mut instructions = if !store.worker {
         let context = store.handoff(a.id)?;
         let limit = store.team_settings()?.parallelism;
         let policy = store.effective_worker_policy(a.id)?;
         let policy = serde_json::to_string(&policy)?;
-        params["developerInstructions"] = json!(format!(
-            "You are the lead Codex agent in Workshop. Work inside this isolated project. Follow the project’s delegation setting attached to the current request. When the creator specifically requests workers in the task itself, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Answer greetings and small, indivisible requests directly. When automatic delegation is enabled, or the creator asks for workers, manage the task from intake through verification without waiting for the user to divide it up or request workers. Inspect just enough to decide scope, then dispatch independent deliverables together. You own the acceptance criteria, interfaces and integrated result. Use a sequential or mixed plan where one assignment needs another's output. Include a scoped test or read-only acceptance review when it adds independent coverage. Honor explicit limits and requests to work alone. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model and an empty max_effort means uncapped. Choose a suitable allowed model and effort for each assignment or omit them for defaults. Give each worker a stable key, a short title, exact relative edit paths ([] for read-only), a concrete deliverable and observable acceptance criteria. Use depends_on for prerequisites. You can dispatch additional work as findings arrive. When a worker or check finds a problem, inspect the evidence, repair it or retry its owning key, and continue pending work. Respect a user-stopped worker. Inspect the integrated result against the original request and run relevant behavioral checks using the project’s own tools before finishing. A clean diff alone does not establish functional correctness. Report what passed. If your local tools fail, use the available worker checkouts when feasible without asking for delegation permission. When no authorized route remains, call workshop_blocked with the external blocker before ending. Use workshop_checkpoint for lasting decisions or unfinished work. Project handoff:\n{context}"
-        ));
+        format!(
+            "You are the lead agent in Workshop. Work inside this isolated project. Follow the project’s delegation setting attached to the current request. When the creator specifically requests workers in the task itself, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Answer greetings and small, indivisible requests directly. When automatic delegation is enabled, or the creator asks for workers, manage the task from intake through verification without waiting for the user to divide it up or request workers. Inspect just enough to decide scope, then dispatch independent deliverables together. You own the acceptance criteria, interfaces and integrated result. Use a sequential or mixed plan where one assignment needs another's output. Include a scoped test or read-only acceptance review when it adds independent coverage. Honor explicit limits and requests to work alone. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model and an empty max_effort means uncapped. Claude model IDs use the claude: prefix. Omit the model to use the configured worker default. Choose a suitable allowed model and effort for each assignment or omit them for defaults. Give each worker a stable key, a short title, exact relative edit paths ([] for read-only), a concrete deliverable and observable acceptance criteria. Use depends_on for prerequisites. You can dispatch additional work as findings arrive. When a worker or check finds a problem, inspect the evidence, repair it or retry its owning key, and continue pending work. Respect a user-stopped worker. Inspect the integrated result against the original request and run relevant behavioral checks using the project’s own tools before finishing. A clean diff alone does not establish functional correctness. Report what passed. If your local tools fail, use the available worker checkouts when feasible without asking for delegation permission. When no authorized route remains, call workshop_blocked with the external blocker before ending. Use workshop_checkpoint for lasting decisions or unfinished work. Project handoff:\n{context}"
+        )
     } else {
-        params["developerInstructions"] = json!(
-            "You are a Workshop Codex worker in a private copy. Complete only the assigned deliverable within the declared edit scope, verify the acceptance criteria, and report concrete evidence and any remaining gaps. Use workshop_report_result with needs_changes when the criteria are unmet or a review finds an actionable defect. For a successful handoff, give downstream workers the relevant interfaces, findings and checks. The lead integrates your edits. Do not delegate."
-        );
-    }
-    let mut instructions = params["developerInstructions"].as_str().unwrap().to_owned();
+        String::from(
+            "You are a Workshop worker in a private copy. Complete only the assigned deliverable within the declared edit scope, verify the acceptance criteria, and report concrete evidence and any remaining gaps. Use workshop_report_result with needs_changes when the criteria are unmet or a review finds an actionable defect. For a successful handoff, give downstream workers the relevant interfaces, findings and checks. The lead integrates your edits. Do not delegate.",
+        )
+    };
     if !store.worker {
         instructions.push_str(" Return locally rendered or revised project images with workshop_send_image so the creator can mark them up in chat. Built-in image generation results already appear automatically.");
     }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
+    Ok(instructions)
+}
+
+async fn open_thread(stdin: &mut ChildStdin, store: &Store, a: &Attempt) -> Result<()> {
+    let mut params = json!({"cwd":store.work(a.id),"approvalPolicy":"never","sandbox":"workspace-write",
+        "developerInstructions":"Work only in the current project copy. Keep edits available for the creator to review."});
+    params["config"] = json!({"features.multi_agent":false});
+    let mut instructions = instructions(store, a)?;
     if a.session.is_empty() {
         params["dynamicTools"] = team::tools(store.worker);
     } else if let Some(cli) = std::env::current_exe()
@@ -250,7 +263,7 @@ impl Frames {
             if bytes.is_empty() {
                 ensure!(
                     self.pending.is_empty(),
-                    "Codex closed in the middle of an event"
+                    "Provider closed in the middle of an event"
                 );
                 return Ok(None);
             }
@@ -258,7 +271,7 @@ impl Frames {
             let count = end.unwrap_or(bytes.len());
             ensure!(
                 self.pending.len() + count <= MAX_FRAME,
-                "Codex event exceeded the 16 MiB frame limit"
+                "Provider event exceeded the 16 MiB frame limit"
             );
             self.pending.extend_from_slice(&bytes[..count]);
             self.reader.consume(count + usize::from(end.is_some()));
@@ -275,6 +288,7 @@ struct Connection {
     stdin: ChildStdin,
     lines: Frames,
     cwd: PathBuf,
+    claude_inference: Option<(String, String)>,
     session: String,
 }
 
@@ -299,6 +313,9 @@ impl Session {
 impl Connection {
     fn open(store: &Store, a: &Attempt) -> Result<Self> {
         let stderr = append(&store.folder(a.id).join("provider.stderr.log"))?;
+        if a.provider == "claude" {
+            return claude::connection(store, a, stderr);
+        }
         Self::spawn(store.work(a.id), stderr)
     }
     fn spawn(cwd: PathBuf, stderr: File) -> Result<Self> {
@@ -327,6 +344,7 @@ impl Connection {
                 pending: Vec::new(),
             },
             cwd,
+            claude_inference: None,
             session: String::new(),
         })
     }
@@ -339,7 +357,7 @@ pub enum ReplyUpdate<'a> {
     WorkersChanged,
     Usage(i64),
     Context(ContextUsage),
-    AccountUsage(Vec<UsageWindow>),
+    AccountUsage(&'static str, Vec<UsageWindow>),
     Activity(&'a str),
 }
 
@@ -369,6 +387,107 @@ async fn final_check(
     }
 }
 
+fn team_preference(store: &Store) -> Result<Option<&'static str>> {
+    Ok(if store.worker {
+        None
+    } else if store.team_settings()?.auto_delegate {
+        Some(
+            "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence.",
+        )
+    } else {
+        Some(
+            "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request.",
+        )
+    })
+}
+
+fn retries_stopped(
+    tool: Option<&str>,
+    args: &Value,
+    stopped_keys: &std::collections::HashSet<String>,
+) -> bool {
+    match tool {
+        Some("workshop_delegate") => args["tasks"].as_array().is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|t| t["key"].as_str().is_some_and(|k| stopped_keys.contains(k)))
+        }),
+        Some("workshop_resolve") => args["key"]
+            .as_str()
+            .is_some_and(|k| stopped_keys.contains(k)),
+        _ => false,
+    }
+}
+
+enum Finish {
+    Done,
+    Cancelled,
+    Repair(String),
+}
+#[derive(Default)]
+struct Repairs {
+    count: u8,
+    previous: Option<(String, String)>,
+}
+impl Repairs {
+    #[allow(clippy::too_many_arguments)]
+    async fn verify(
+        &mut self,
+        store: &Store,
+        a: &Attempt,
+        controls: &mut Controls,
+        notify: &dyn Fn(ReplyUpdate<'_>),
+        used_tools: bool,
+        has_workers: bool,
+        stopped: bool,
+        unavailable: Option<anyhow::Error>,
+    ) -> Result<Finish> {
+        if store.worker {
+            return unavailable.map_or(Ok(Finish::Done), Err);
+        }
+        if !used_tools && !has_workers && unavailable.is_none() {
+            return Ok(Finish::Done);
+        }
+        let verified = if let Some(error) = unavailable {
+            Err(error)
+        } else {
+            let Some(result) = final_check(store, a, controls, notify).await? else {
+                return Ok(Finish::Cancelled);
+            };
+            result
+        };
+        let Err(error) = verified else {
+            if store.has_open_blocker(a.id)? {
+                store.event(a.id, "workshop/blocker_resolved", None)?;
+            }
+            return Ok(Finish::Done);
+        };
+        if stopped {
+            return Err(error.context("A worker was stopped by the user."));
+        }
+        let feedback = format!("{error:#}");
+        let tree = crate::git::capture(&store.work(a.id), &a.base)?.0;
+        let fingerprint = (tree, feedback.clone());
+        if self.count >= 2 || self.previous.as_ref() == Some(&fingerprint) {
+            return Err(error.context("Automatic repair stopped. Review the remaining blocker."));
+        }
+        self.previous = Some(fingerprint);
+        self.count += 1;
+        let repairs = self.count;
+        let notice = format!(
+            "Verification needs a repair (pass {repairs} of 2). {}",
+            feedback.chars().take(1200).collect::<String>()
+        );
+        store.event(a.id, "workshop/repair", Some(&notice))?;
+        notify(ReplyUpdate::TranscriptChanged);
+        notify(ReplyUpdate::Activity(&notice));
+        let direction = format!(
+            "Workshop verification found unfinished work in the current request. Continue in this same isolated project and fix the cause. Retry the original owning keys, keep completed work, and verify the integrated result. If a worker exhausted its retries, inspect and repair directly before workshop_resolve. Report anything you genuinely cannot resolve.\n\n{feedback}"
+        );
+        Ok(Finish::Repair(direction))
+    }
+}
+
 async fn exchange(
     io: &mut Connection,
     store: &Store,
@@ -378,6 +497,9 @@ async fn exchange(
     stream: bool,
     notify: &dyn Fn(ReplyUpdate<'_>),
 ) -> Result<bool> {
+    if a.provider == "claude" {
+        return claude::exchange(io, store, a, prompt, controls, stream, notify).await;
+    }
     if !a.session.is_empty() {
         store.message_event(a.id, "user/followup", prompt)?;
         notify(ReplyUpdate::TranscriptChanged);
@@ -402,23 +524,12 @@ async fn exchange(
         )
         .await?;
     }
-    let team_preference = if store.worker {
-        None
-    } else if store.team_settings()?.auto_delegate {
-        Some(
-            "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence.",
-        )
-    } else {
-        Some(
-            "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request.",
-        )
-    };
+    let team_preference = team_preference(store)?;
     let mut turn = String::new();
     let mut next_id = 10;
     let mut cancelling = false;
     let mut stopped_keys = std::collections::HashSet::new();
-    let mut previous_repair = None;
-    let mut repairs = 0;
+    let mut repairs = Repairs::default();
     let mut external_blocker = None;
     let mut runner_failure = None;
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
@@ -548,19 +659,8 @@ async fn exchange(
                                 .filter(|s| !s.trim().is_empty())
                                 .map(|s| s.chars().take(4000).collect::<String>());
                         }
-                        let retries_stopped = match v["params"]["tool"].as_str() {
-                            Some("workshop_delegate") => {
-                                args["tasks"].as_array().is_some_and(|tasks| {
-                                    tasks.iter().any(|t| {
-                                        t["key"].as_str().is_some_and(|k| stopped_keys.contains(k))
-                                    })
-                                })
-                            }
-                            Some("workshop_resolve") => args["key"]
-                                .as_str()
-                                .is_some_and(|k| stopped_keys.contains(k)),
-                            _ => false,
-                        };
+                        let retries_stopped =
+                            retries_stopped(v["params"]["tool"].as_str(), args, &stopped_keys);
                         if retries_stopped {
                             send(stdin,json!({"id":v["id"],"result":{"success":false,"contentItems":[{"type":"inputText","text":"The user stopped this assignment. Leave it stopped until they resume the task."}]}})).await?;
                             continue;
@@ -620,7 +720,7 @@ async fn exchange(
                     if method == "account/rateLimits/updated"
                         && let Some(windows) = account_windows(&v["params"]["rateLimits"])
                     {
-                        notify(ReplyUpdate::AccountUsage(windows));
+                        notify(ReplyUpdate::AccountUsage("codex", windows));
                     }
                     if method == "thread/tokenUsage/updated"
                         && v["params"]["threadId"] == session.as_str()
@@ -706,50 +806,23 @@ async fn exchange(
                         } else {
                             None
                         };
-                        if store.worker {
-                            return unavailable.map_or(Ok(true), Err);
-                        }
-                        if !*used_tools && workers.is_empty() && unavailable.is_none() {
-                            return Ok(true);
-                        }
-                        let verified = if let Some(error) = unavailable {
-                            Err(error)
-                        } else {
-                            let Some(result) = final_check(store, a, &mut controls, notify).await?
-                            else {
-                                return Ok(false);
-                            };
-                            result
+                        let direction = match repairs
+                            .verify(
+                                store,
+                                a,
+                                &mut controls,
+                                notify,
+                                *used_tools,
+                                !workers.is_empty(),
+                                !stopped_keys.is_empty(),
+                                unavailable,
+                            )
+                            .await?
+                        {
+                            Finish::Done => return Ok(true),
+                            Finish::Cancelled => return Ok(false),
+                            Finish::Repair(direction) => direction,
                         };
-                        let Err(error) = verified else {
-                            if store.has_open_blocker(a.id)? {
-                                store.event(a.id, "workshop/blocker_resolved", None)?;
-                            }
-                            return Ok(true);
-                        };
-                        if !stopped_keys.is_empty() {
-                            return Err(error.context("A worker was stopped by the user."));
-                        }
-                        let feedback = format!("{error:#}");
-                        let tree = crate::git::capture(&store.work(a.id), &a.base)?.0;
-                        let fingerprint = (tree, feedback.clone());
-                        if repairs >= 2 || previous_repair.as_ref() == Some(&fingerprint) {
-                            return Err(error.context(
-                                "Automatic repair stopped. Review the remaining blocker.",
-                            ));
-                        }
-                        previous_repair = Some(fingerprint);
-                        repairs += 1;
-                        let notice = format!(
-                            "Verification needs a repair (pass {repairs} of 2). {}",
-                            feedback.chars().take(1200).collect::<String>()
-                        );
-                        store.event(a.id, "workshop/repair", Some(&notice))?;
-                        notify(ReplyUpdate::TranscriptChanged);
-                        notify(ReplyUpdate::Activity(&notice));
-                        let direction = format!(
-                            "Workshop verification found unfinished work in the current request. Continue in this same isolated project and fix the cause. Retry the original owning keys, keep completed work, and verify the integrated result. If a worker exhausted its retries, inspect and repair directly before workshop_resolve. Report anything you genuinely cannot resolve.\n\n{feedback}"
-                        );
                         start_turn(
                             stdin,
                             session,
@@ -812,7 +885,7 @@ pub(crate) async fn worker_turn(
     rx: Controls,
     notify: &dyn Fn(ReplyUpdate<'_>),
 ) -> Result<Option<String>> {
-    let result = {
+    let result = async {
         let mut io = Connection::open(store, a)?;
         Box::pin(exchange(
             &mut io,
@@ -824,7 +897,8 @@ pub(crate) async fn worker_turn(
             notify,
         ))
         .await
-    };
+    }
+    .await;
     let report = store.reported_result(a.id)?;
     let result = result.and_then(|finished| {
         if finished && let Some((kind, detail)) = &report {
@@ -870,7 +944,7 @@ pub fn run(
                 .map(|w| {
                     json!({
                         "id": w.id, "key": w.assignment.key, "state": w.state,
-                        "retries": w.tries.saturating_sub(1), "tokens": w.tokens
+                        "retries": w.tries.saturating_sub(1), "tokens": w.tokens, "model": w.model, "effort": w.effort
                     })
                 })
                 .collect();
@@ -904,6 +978,11 @@ pub fn run_turn(
                 if !a.session.is_empty()
                     && live.io.session == a.session
                     && live.io.cwd == store.work(a.id)
+                    && live
+                        .io
+                        .claude_inference
+                        .as_ref()
+                        .is_none_or(|(m, e)| m == &a.model && e == &a.effort)
                     && matches!(live.io.child.try_wait(), Ok(None))
                 {
                     live
@@ -933,7 +1012,14 @@ pub fn run_turn(
     }
     let failure;
     let (state, action) = match &result {
-        Ok(true) => ("review", "Codex finished. Review the change."),
+        Ok(true) => (
+            "review",
+            if a.provider == "claude" {
+                "Claude finished. Review the change."
+            } else {
+                "Codex finished. Review the change."
+            },
+        ),
         Ok(false) => (
             "cancelled",
             "Cancelled. Any edits are available for review.",

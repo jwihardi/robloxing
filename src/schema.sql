@@ -27,7 +27,7 @@ INSERT OR IGNORE INTO team_settings(id,lead_model,worker_model,parallelism,check
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL REFERENCES attempts,
     name TEXT NOT NULL, spec TEXT NOT NULL, state TEXT NOT NULL, run INTEGER, tries INTEGER NOT NULL DEFAULT 0,
     detail TEXT NOT NULL DEFAULT '', signature TEXT NOT NULL DEFAULT '', repeats INTEGER NOT NULL DEFAULT 0,
-    tokens INTEGER, UNIQUE(lead,name));
+    tokens INTEGER, model TEXT, effort TEXT, UNIQUE(lead,name));
 CREATE TABLE IF NOT EXISTS checkpoints(lead INTEGER PRIMARY KEY REFERENCES attempts, decisions TEXT NOT NULL, next_task TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_by_attempt ON events(attempt,id);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);

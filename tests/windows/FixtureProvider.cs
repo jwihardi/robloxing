@@ -10,10 +10,17 @@ class FixtureProvider {
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     static readonly string ThreadId = Guid.NewGuid().ToString();
     static string session, turn, task, studioKind;
-    static bool worker, studio;
+    static bool worker, studio, claudeStream;
     static string Dir { get { return Environment.GetEnvironmentVariable("WORKSHOP_PROBE_DIR"); } }
     static void Send(object message) { Console.WriteLine(Json.Serialize(message)); Console.Out.Flush(); }
     static void Done(string text) {
+        if (claudeStream) {
+            var usage = new {input_tokens=24,output_tokens=3};
+            Send(new {type="stream_event", @event=new {type="content_block_delta",delta=new {type="text_delta",text=text}}});
+            Send(new {type="assistant", message=new {model="fixture",usage=usage,content=new[]{new {type="text",text=text}}}});
+            Send(new {type="result",subtype="success",is_error=false,result=text,usage=usage,modelUsage=new {fixture=new {contextWindow=100}}});
+            return;
+        }
         Send(new { method="item/agentMessage/delta", @params=new {threadId=session,turnId=turn,itemId="reply",delta=text} });
         Send(new { method="item/completed", @params=new {threadId=session,turnId=turn,item=new {type="agentMessage",id="reply",text=text}} });
         Send(new { method="thread/tokenUsage/updated", @params=new {threadId=session,tokenUsage=new {total=new {totalTokens=100}}} });
@@ -62,7 +69,37 @@ class FixtureProvider {
             // The harness tears down the complete job when the worker turn ends.
         }
     }
+    static void Claude(string[] args) {
+        claudeStream = true;
+        int instructions = Array.IndexOf(args,"--append-system-prompt");
+        worker = instructions >= 0 && args[instructions+1].StartsWith("You are a Workshop worker");
+        int resume = Array.IndexOf(args,"--resume");
+        session = resume >= 0 ? args[resume+1] : ThreadId;
+        string line;
+        while ((line=Console.ReadLine())!=null) {
+            var frame = Json.Deserialize<Dictionary<string,object>>(line);
+            switch ((string)frame["type"]) {
+                case "control_request":
+                    Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=new[]{new {value="default",supportedEffortLevels=new[]{"low","high"}}}}}});
+                    break;
+                case "user":
+                    Send(new {type="system",subtype="init",session_id=session});
+                    var msg=(Dictionary<string,object>)frame["message"];
+                    var blocks=(System.Collections.ArrayList)msg["content"];
+                    var first=(Dictionary<string,object>)blocks[0];
+                    if (worker) { Worker((string)first["text"]); break; }
+                    var tasks = new[]{Assignment("left"),Assignment("right")};
+                    Send(new {type="control_request",request_id="batch", request=new {subtype="mcp_message",server_name="workshop",message=new {jsonrpc="2.0",id=4,method="tools/call",@params=new {name="workshop_delegate",arguments=new {tasks=tasks}}}}});
+                    break;
+                case "control_response":
+                    if (!line.Contains("mcp_response")) throw new InvalidDataException("Missing MCP result");
+                    Done("Worker batch returned.");
+                    break;
+            }
+        }
+    }
     static void Main(string[] args) {
+        if(args.Length>0 && args[0]=="-p") { Claude(args); return; }
         if(args.Length > 0 && (args[0]=="auth" || args[0]=="login" || args[0]=="logout")){
             bool claude=args[0]=="auth";
             string file=Path.Combine(Dir,claude ? "claude.session" : "codex.session");
@@ -123,7 +160,7 @@ class FixtureProvider {
                     !Object.Equals(p["sandbox"], "workspace-write") || !Object.Equals(p["approvalPolicy"], "never")))
                     throw new InvalidDataException("Unexpected provider process identity or sandbox settings");
                 session=p.ContainsKey("threadId")?(string)p["threadId"]:ThreadId;
-                worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop Codex worker");
+                worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop worker");
                 studio=p.ContainsKey("ephemeral") && Object.Equals(p["ephemeral"],true);
                 string instructions = (string)p["developerInstructions"];
                 studioKind = instructions.StartsWith("Summarize the supplied") ? "summary" :

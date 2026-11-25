@@ -26,10 +26,10 @@ impl ContextUsage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UsageWindow {
     pub minutes: Option<i64>,
-    pub percent_left: i64,
+    pub percent_left: Option<i64>,
 }
 
 pub(crate) fn account_windows(snapshot: &Value) -> Option<Vec<UsageWindow>> {
@@ -43,11 +43,31 @@ pub(crate) fn account_windows(snapshot: &Value) -> Option<Vec<UsageWindow>> {
                 let window = &snapshot[*key];
                 Some(UsageWindow {
                     minutes: window["windowDurationMins"].as_i64().filter(|n| *n > 0),
-                    percent_left: 100 - window["usedPercent"].as_i64()?.clamp(0, 100),
+                    percent_left: Some(100 - window["usedPercent"].as_i64()?.clamp(0, 100)),
                 })
             })
             .collect(),
     )
+}
+
+pub(crate) fn claude_window(info: &Value) -> Option<UsageWindow> {
+    let minutes = match info["rateLimitType"].as_str()? {
+        "five_hour" => 300,
+        "seven_day" => 10080,
+        _ => return None,
+    };
+    // An "allowed" event often omits utilization, even on a paid subscription.
+    let percent_left = if let Some(used) = info["utilization"].as_f64() {
+        Some(100 - (used.clamp(0.0, 1.0) * 100.0).round() as i64)
+    } else if info["status"] == "rejected" {
+        Some(0)
+    } else {
+        None
+    };
+    Some(UsageWindow {
+        minutes: Some(minutes),
+        percent_left,
+    })
 }
 
 impl Store {
@@ -154,16 +174,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_can_report_a_window_without_a_remaining_percentage() {
+        let mut report = json!({"rateLimitType":"five_hour","status":"allowed"});
+        let window = claude_window(&report).unwrap();
+        assert_eq!((window.minutes, window.percent_left), (Some(300), None));
+        report["utilization"] = json!(0.32);
+        assert_eq!(claude_window(&report).unwrap().percent_left, Some(68));
+    }
+
+    #[test]
     fn account_usage_keeps_windows_separate_and_ignores_other_buckets() {
         let mut snapshot = json!({"limitId":"codex","primary":{"usedPercent":100,"windowDurationMins":300},"secondary":{"usedPercent":17,"windowDurationMins":10080}});
         let windows = account_windows(&snapshot).unwrap();
         assert_eq!(
             (windows[0].minutes, windows[0].percent_left),
-            (Some(300), 0)
+            (Some(300), Some(0))
         );
         assert_eq!(
             (windows[1].minutes, windows[1].percent_left),
-            (Some(10080), 83)
+            (Some(10080), Some(83))
         );
         snapshot["limitId"] = json!("other");
         assert!(account_windows(&snapshot).is_none());

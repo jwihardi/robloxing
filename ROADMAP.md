@@ -26,7 +26,7 @@ Build a lightweight Windows workspace where a creator can describe a game, direc
 
 ## H2 · Add orchestration and bound its resource use
 
-The current implementation covers Codex in both roles. Claude and mixed-provider handoffs are deferred. The Windows verification record tracks the Codex exit demo, cancellation and resource measurements. [H2 verification](docs/h2-verification.md)
+The current implementation supports Claude Code and Codex as leads and workers, including mixed-provider teams and project handoffs. The Windows verification record tracks the Codex exit demo, cancellation and resource measurements. [H2 verification](docs/h2-verification.md)
 
 | Build | Behavior required for the basic harness |
 |---|---|

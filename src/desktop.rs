@@ -41,7 +41,7 @@ enum Update {
     Opened(Arc<Store>, Option<notifications::Target>),
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
-    AccountUsage(PathBuf, Vec<UsageWindow>),
+    AccountUsage(PathBuf, String, Vec<UsageWindow>),
     Started(i64),
     Delta(String),
     ReplyStored,
@@ -76,6 +76,7 @@ struct App {
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_rows: RefCell<Vec<preferences::Row>>,
+    account_limits: RefCell<std::collections::HashMap<String, Vec<UsageWindow>>>,
     catalog: RefCell<provider::Catalog>,
     ui: slint::Weak<Desk>,
     store: RefCell<Option<Arc<Store>>>,
@@ -138,7 +139,9 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
             };
             MeterData {
                 label: label.into(),
-                remaining: window.percent_left as f32 / 100.,
+                remaining: window
+                    .percent_left
+                    .map_or(-1.0, |value| value as f32 / 100.),
                 detail: detail.into(),
             }
         })
@@ -147,7 +150,16 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
 }
 
 fn model_label(id: &str) -> String {
-    if let Some(tail) = id.strip_prefix("gpt-") {
+    if let Some(name) = id.strip_prefix("claude:") {
+        let name = name.strip_prefix("claude-").unwrap_or(name);
+        format!(
+            "Claude {}",
+            name.split('-')
+                .map(capitalized)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    } else if let Some(tail) = id.strip_prefix("gpt-") {
         let mut parts = tail.split('-');
         let mut label = format!("GPT-{}", parts.next().unwrap_or_default());
         for part in parts {
@@ -193,6 +205,9 @@ fn picker(
         catalog
             .models
             .iter()
+            .filter(|m| {
+                project_default || provider::provider_for(&m.model) == provider::provider_for(model)
+            })
             .map(|m| option(&m.model, model_label(&m.model))),
     );
     let selected = if project_default && model.is_empty() {
@@ -221,9 +236,10 @@ fn picker(
             )
         })
         .collect();
-    let default = if efforts
-        .iter()
-        .any(|e| e.value == catalog.default_effort.as_str())
+    let default = if provider::provider_for(effective) == "codex"
+        && efforts
+            .iter()
+            .any(|e| e.value == catalog.default_effort.as_str())
     {
         catalog.default_effort.as_str()
     } else {
@@ -344,6 +360,17 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
         w.assignment.files.join(", ")
     };
     let mut stats = vec![scope];
+    if let Some(id) = &w.model {
+        let mut label = if id.is_empty() {
+            String::from("Codex default")
+        } else {
+            model_label(id)
+        };
+        if let Some(effort) = w.effort.as_deref().filter(|s| !s.is_empty()) {
+            label.push_str(&format!(" ({effort})"));
+        }
+        stats.push(label);
+    }
     if w.tries > 1 {
         let retries = w.tries - 1;
         stats.push(if retries == 1 {
@@ -521,15 +548,28 @@ impl App {
         let ui = self.ui.unwrap();
         let catalog = self.catalog.borrow();
         self.render_worker_policy(store, &catalog)?;
-        ui.set_chat_choices(if let Some(id) = self.id.get() {
-            let a = store.attempt(id)?;
-            picker(&catalog, &a.model, &a.effort, false)
-        } else {
-            picker(&catalog, &s.lead_model, &s.lead_effort, true)
-        });
+        let chat = self.id.get().map(|id| store.attempt(id)).transpose()?;
+        let (model, effort) = chat
+            .as_ref()
+            .map_or((s.lead_model.as_str(), s.lead_effort.as_str()), |a| {
+                (a.model.as_str(), a.effort.as_str())
+            });
+        ui.set_chat_choices(picker(&catalog, model, effort, chat.is_none()));
+        self.show_provider(&ui, model);
         ui.set_parallel_workers(s.parallelism == 2);
         ui.set_auto_delegate(s.auto_delegate);
         Ok(())
+    }
+    fn show_provider(&self, ui: &Desk, model: &str) {
+        let provider = provider::provider_for(model);
+        ui.set_chat_provider(capitalized(provider).into());
+        ui.set_usage_meters(usage_meters(
+            self.account_limits
+                .borrow()
+                .get(provider)
+                .cloned()
+                .unwrap_or_default(),
+        ));
     }
     fn selected_policy(&self, store: &Store) -> Result<Option<WorkerPolicy>> {
         match self.id.get() {
@@ -610,7 +650,7 @@ impl App {
                 let _ = updates.send(Update::Models(project.clone(), Ok(catalog)));
             }) {
                 Ok(Some(windows)) => {
-                    let _ = updates.send(Update::AccountUsage(project, windows));
+                    let _ = updates.send(Update::AccountUsage(project, "codex".into(), windows));
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -732,10 +772,7 @@ impl App {
                 .build()
                 .map_err(anyhow::Error::from)
                 .and_then(|rt| rt.block_on(preferences::change(&tab, p, &action, &arg)));
-            let _ = tx.send(Update::PreferenceChanged(
-                result,
-                tab == "Providers" && arg == "Codex",
-            ));
+            let _ = tx.send(Update::PreferenceChanged(result, tab == "Providers"));
         });
     }
     fn choose_inference(&self, changing_model: bool, value: &str) -> Result<()> {
@@ -770,10 +807,11 @@ impl App {
             (model, value.to_owned())
         };
         let choices = picker(&catalog, &model, &effort, chat.is_none());
+        let selected_model = model.clone();
         let ui = self.ui.unwrap();
         if let Some(id) = chat {
             store.set_chat_inference(id, &model, &effort)?;
-            ui.set_model_name(model.as_str().into());
+            ui.set_model_name(model_label(&model).into());
             if let Some(chat) = self.attempts.borrow_mut().iter_mut().find(|a| a.id == id) {
                 chat.model = model;
                 chat.effort = effort;
@@ -783,6 +821,7 @@ impl App {
             settings.lead_effort = effort;
             store.configure_team(&settings)?;
         }
+        self.show_provider(&ui, &selected_model);
         ui.set_chat_choices(choices);
         Ok(())
     }
@@ -837,7 +876,7 @@ impl App {
             ui.set_context_meter(context_meter(store.context_usage(a)?, false));
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
-            ui.set_model_name(a.model.as_str().into());
+            ui.set_model_name(model_label(&a.model).into());
             let done = matches!(
                 a.state.as_str(),
                 "review" | "failed" | "interrupted" | "cancelled"
@@ -992,6 +1031,7 @@ impl App {
                         Ok(note) => {
                             self.session.take();
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
+                                self.account_limits.borrow_mut().clear();
                                 ui.set_usage_meters(usage_meters(Vec::new()));
                                 self.load_models(s.project.clone());
                             }
@@ -1029,6 +1069,7 @@ impl App {
                             .as_ref()
                             .into(),
                     );
+                    self.account_limits.borrow_mut().clear();
                     ui.set_usage_meters(usage_meters(Vec::new()));
                     self.id.set(None);
                     self.chat_offset.set(0);
@@ -1068,9 +1109,9 @@ impl App {
                                     self.task_settings("open", "")?;
                                 }
                             }
-                            Err(e) => ui.set_catalog_status(
-                                format!("Couldn’t load Codex models. {e}").into(),
-                            ),
+                            Err(e) => {
+                                ui.set_catalog_status(format!("Couldn’t load models. {e}").into())
+                            }
                         }
                     }
                 }
@@ -1079,14 +1120,27 @@ impl App {
                         ui.set_context_meter(context_meter(context, false));
                     }
                 }
-                Update::AccountUsage(project, windows) => {
+                Update::AccountUsage(project, provider, windows) => {
                     if self
                         .store
                         .borrow()
                         .as_ref()
                         .is_some_and(|s| s.project == project)
                     {
-                        ui.set_usage_meters(usage_meters(windows));
+                        let mut limits = self.account_limits.borrow_mut();
+                        if provider == "claude" {
+                            let saved = limits.entry(provider.clone()).or_default();
+                            for window in windows {
+                                saved.retain(|w| w.minutes != window.minutes);
+                                saved.push(window);
+                            }
+                            saved.sort_by_key(|w| w.minutes);
+                        } else {
+                            limits.insert(provider.clone(), windows);
+                        }
+                        if provider.eq_ignore_ascii_case(ui.get_chat_provider().as_str()) {
+                            ui.set_usage_meters(usage_meters(limits[&provider].clone()));
+                        }
                     }
                 }
                 Update::Started(id) => {
@@ -1313,8 +1367,8 @@ impl App {
                             provider::ReplyUpdate::Context(context) => {
                                 Update::Context(a.id, context)
                             }
-                            provider::ReplyUpdate::AccountUsage(windows) => {
-                                Update::AccountUsage(store.project.clone(), windows)
+                            provider::ReplyUpdate::AccountUsage(source, windows) => {
+                                Update::AccountUsage(store.project.clone(), source.into(), windows)
                             }
                             provider::ReplyUpdate::Usage(_)
                             | provider::ReplyUpdate::Activity(_) => {
@@ -1386,6 +1440,7 @@ fn main() -> Result<()> {
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
+        account_limits: Default::default(),
         catalog: Default::default(),
         ui: ui.as_weak(),
         store: Default::default(),

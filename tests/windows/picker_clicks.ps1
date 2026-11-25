@@ -1,4 +1,4 @@
-param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -514,6 +514,9 @@ try {
     Wait-For { Named 'Chat reasoning effort' } 'first-click effort picker'
     Click 'Chat model'
     Wait-For { Named 'Select model' } 'model menu'
+    Click 'Claude Default'
+    Wait-For { Named 'Message Claude' } 'Claude composer'
+    Click 'Chat model'
     Click 'fixture-deep'
     Wait-For { $slider = Named 'Chat reasoning effort'; $slider -and $slider.GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Maximum -eq 1 } 'selected model with two effort levels'
     Click 'Chat reasoning effort' 0.05

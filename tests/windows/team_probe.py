@@ -38,7 +38,7 @@ class Case:
         self.project.mkdir()
         self.home = root / "data"
         self.env = dict(os.environ, WORKSHOP_HOME=str(self.home),
-                        WORKSHOP_CODEX=str(fixture), WORKSHOP_PROBE_DIR=str(root))
+                        WORKSHOP_CODEX=str(fixture), WORKSHOP_CLAUDE=str(fixture), WORKSHOP_PROBE_DIR=str(root))
         self.cmd = [str(cli), "--project", str(self.project)]
         self.call("open")
         self.db = next(self.home.glob("*/workshop.sqlite"))
@@ -279,6 +279,29 @@ def model_effort(case):
             assert any("delegation by request]" in hint for hint in hints)
 
 
+def claude_worker_stop_and_resume(case):
+    case.call("team", "--lead-model", "claude:default", "--worker-model", "claude:default")
+    stop_one(case)
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT provider,state FROM attempts").fetchall() == [("claude","accepted")]
+
+
+def claude_without_codex(case):
+    case.env["WORKSHOP_CODEX"] = str(case.root / "no-codex.exe")
+    assert "claude:default" in case.call("models")
+    case.call("run", "--provider", "claude", "delegate")
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT provider,state FROM attempts").fetchone() == ("claude", "review")
+        assert db.execute("SELECT model,state FROM workers ORDER BY id").fetchall() == [
+            ("claude:default", "finished"), ("claude:default", "finished")]
+    case.call("accept", "1")
+
+
+def mixed_provider_conflict(case):
+    case.call("team", "--lead-model", "claude:default", "--worker-model", "fixture-fast")
+    conflict(case)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", type=Path, default=Path("target/debug/workshop-cli.exe"))
@@ -290,7 +313,7 @@ def main():
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
         for test in (autonomous_release, direct_repair, unavailable_runner, small_talk, manual_recheck, external_blocker,
-                     mixed_plan, conflict, stop_one, cancel_check, overlap, repeated_check, model_effort):
+                     mixed_plan, conflict, stop_one, cancel_check, overlap, repeated_check, model_effort, claude_worker_stop_and_resume, mixed_provider_conflict, claude_without_codex):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))
             print(test.__name__ + " passed", flush=True)
 
