@@ -76,7 +76,12 @@ class FixtureProvider {
             string file=Path.Combine(Dir,"sample.plugin");
             var plugin=new {pluginId="sample@fixture",name="Sample plugin",marketplaceName="fixture"};
             var official=new {pluginId="calendar@openai-curated-remote",name="Calendar",marketplaceName="openai-curated-remote",description="Plan events"};
-            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{plugin} : new object[0],available=new object[]{plugin,official}});return;}
+            var sculpt=new {pluginId="image-to-sculpt@image-to-sculpt",name="Image to Sculpt",marketplaceName="image-to-sculpt"};
+            string market = Path.Combine(Dir,"sculpt.market");
+            if(args[1]=="marketplace" && args[2]=="list"){Send(File.Exists(market) ? new object[]{new {name="image-to-sculpt",source="github",repo="gokayfem/image-to-sculpt"}} : new object[0]);return;}
+            if(args[1]=="marketplace" && args[2]=="add" && args[3]=="gokayfem/image-to-sculpt"){File.WriteAllText(market,args[3]);return;}
+            if(args[1]=="install" && args[2]==sculpt.pluginId && !File.Exists(market)){Environment.Exit(1);}
+            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{File.ReadAllText(file)==sculpt.pluginId ? (object)sculpt : plugin} : new object[0],available=new object[]{plugin,official}});return;}
             if(args[1]=="add" || args[1]=="install"){File.WriteAllText(file,args[2]);return;}
             if(args[1]=="remove" || args[1]=="uninstall"){File.Delete(file);return;}
         }

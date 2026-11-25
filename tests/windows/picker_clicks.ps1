@@ -1,10 +1,11 @@
-param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly)
+param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
     if ($SketchOnly) { $parameters.SketchOnly = $true }
+    if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
     return
 }
@@ -15,6 +16,7 @@ using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr target, uint flags);
@@ -65,6 +67,19 @@ $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
 $env:WORKSHOP_CLAUDE = $env:WORKSHOP_CODEX
 $env:CODEX_HOME = Join-Path $root 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $root 'claude'
+# Route only this public skill URL to a temporary fixture. The normal Git installer runs offline.
+$upstream = Join-Path $root 'skill-source'
+$subdir = Join-Path $upstream 'skills/image-to-sculpt'
+[void](New-Item -ItemType Directory -Path $subdir -Force)
+Set-Content (Join-Path $subdir 'SKILL.md') 'Image to Sculpt fixture'
+& git init -q -b main $upstream
+& git -C $upstream add skills
+& git -C $upstream -c user.name=Fixture -c user.email=fixture@localhost commit -qm 'Skill source'
+if ($LASTEXITCODE -ne 0) { throw 'Could not create the test skill source' }
+$idx = [int]$env:GIT_CONFIG_COUNT
+[Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$idx", "url.$(([uri]$upstream).AbsoluteUri).insteadOf")
+[Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$idx", 'https://github.com/gokayfem/image-to-sculpt.git')
+$env:GIT_CONFIG_COUNT = $idx + 1
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /r:System.Web.Extensions.dll "/out:$env:WORKSHOP_CODEX" (Join-Path $PSScriptRoot 'FixtureProvider.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 
@@ -149,6 +164,39 @@ function Save-PrivateWindow($path) {
         if (![WorkshopPointer]::PrintWindow($appWindow,$dc,2)) { throw 'Could not render the private Workshop window' }
     } finally { $g.ReleaseHdc($dc); $g.Dispose() }
     try { $bmp.Save($path,[Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+}
+function Test-Recommendations {
+    Wait-For { (Named 'Install skill Image to Sculpt') -and (Named 'Caveman') -and (Named 'Frontend Design') } 'Codex recommendations'
+    $filter = (Named 'Filter list').GetCurrentPattern($valuePattern)
+    $filter.SetValue('terse')
+    Wait-For { (Named 'Caveman') -and !(Named 'Image to Sculpt') } 'search recommendations by use case'
+    $filter.SetValue('')
+    Wait-For { Named 'Install skill Image to Sculpt' } 'restore recommended list'
+    Save-PrivateWindow (Join-Path $root 'recommended.png')
+    $normal = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
+    $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](800*$scale),[int](650*$scale),0x16)
+    Wait-For { $button=Named 'Install skill Image to Sculpt'; $bounds=[System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
+        $button -and (Named 'Settings sections') -and $button.Current.BoundingRectangle.Right -le $bounds.Right } 'install control inside compact settings'
+    Click 'Install skill Image to Sculpt'
+    Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'recommended skill installed'
+    if ((Get-Content (Join-Path $env:CODEX_HOME 'skills/image-to-sculpt/SKILL.md')) -ne 'Image to Sculpt fixture') { throw 'Wrong skill source' }
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$normal.Width,[int]$normal.Height,0x16)
+    Click 'Claude Code'
+    Wait-For { Named 'Install plugin Image to Sculpt' } 'provider-specific plugin recommendation'
+    Click 'Install plugin Image to Sculpt'
+    Wait-For { (Named 'Installed') -and !(Named 'Install plugin Image to Sculpt') } 'Claude marketplace plugin installed'
+    Click 'Installed plugins'
+    Wait-For { (Named 'Image to Sculpt') -and (Named 'Uninstall') } 'recommended plugin in installed list'
+    Click 'Uninstall'
+    Wait-For { Named 'Confirm' } 'confirm recommended plugin removal'
+    Click 'Confirm'
+    Wait-For { !(Named 'Image to Sculpt') -and (Named 'Plugin uninstalled. No plugins installed.') } 'removed recommended plugin'
+    Click 'Recommended'
+    Wait-For { Named 'Install plugin Image to Sculpt' } 'recommendation available after uninstall'
+    Click 'Codex'
+    Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'Codex installation survives provider switch'
+    'Recommended catalog, search and both provider install paths passed'
 }
 function Test-Attention {
     $toggle = "Notify me when I$([char]0x2019)m needed"
@@ -433,6 +481,13 @@ try {
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($RecommendedOnly) {
+        Click 'Settings'
+        Wait-For { Named 'Plugins' } 'settings navigation'
+        Click 'Plugins'
+        Test-Recommendations
+        return
+    }
     if ($SketchOnly) { Test-Sketch; return }
     Click 'Explore project'
     Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -like 'Give me a tour*' } 'editable starter prompt'
@@ -530,6 +585,8 @@ try {
     Click 'Confirm'
     Wait-For { (Named 'Signed out.') -and !(Named 'Sign out') } 'provider logout result'
     Click 'Plugins'
+    Test-Recommendations
+    Click 'Installed plugins'
     Wait-For { Named 'No plugins installed.' } 'installed plugins'
     Click 'Browse plugins'
     Wait-For { (Named 'Calendar') -and !(Named 'Sample plugin') } 'official catalog'

@@ -16,6 +16,7 @@ export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, d
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string }
+export enum PluginSection { recommended, installed, marketplace }
 export struct PickerOption { value: string, label: string }
 export struct MeterData { label: string, remaining: float, detail: string }
 export struct PickerData {
@@ -416,7 +417,9 @@ export component Desk inherits Window {
     }
     in-out property <string> settings-tab: "Providers";
     in-out property <string> settings-provider: "Codex";
-    in-out property <bool> browse-plugins;
+    in-out property <PluginSection> plugin-section: PluginSection.recommended;
+    private property <bool> recommendations: root.settings-tab == "Plugins" && root.plugin-section == PluginSection.recommended;
+    private property <bool> browse-plugins: root.settings-tab == "Plugins" && root.plugin-section == PluginSection.marketplace;
     in property <[SettingRow]> settings-rows;
     in property <string> settings-status;
     in property <bool> settings-working;
@@ -432,7 +435,8 @@ export component Desk inherits Window {
     function visit-settings(tab: string, provider: string) {
         root.confirm-id = "";
         if tab != root.settings-tab || provider != root.settings-provider {
-            root.settings-query = ""; root.source-input = ""; root.source-open = false; root.browse-plugins = false;
+            root.settings-query = ""; root.source-input = ""; root.source-open = false;
+            if tab != root.settings-tab { root.plugin-section = PluginSection.recommended; }
         }
         root.settings-tab = tab; root.settings-provider = provider;
         root.load-settings();
@@ -845,8 +849,15 @@ export component Desk inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 Action { label: "Install from source"; width: 145px; selected: root.source-open; accessible-expanded: root.source-open;
                     activate => {root.source-open = !root.source-open;} }
-                if root.settings-tab == "Plugins": Action { label: root.browse-plugins ? "Installed plugins" : "Browse plugins"; width: 125px;
-                    enabled: !root.settings-working; activate => {root.browse-plugins = !root.browse-plugins; root.settings-query = ""; root.load-settings();} }
+            }
+            if root.settings-tab == "Plugins": HorizontalLayout { height: 36px; alignment: start; spacing: 4px;
+                for section[i] in [PluginSection.recommended, PluginSection.installed, PluginSection.marketplace]: Action {
+                    label: ["Recommended", "Installed", "Browse plugins"][i]; width: [130px,90px,132px][i];
+                    accessible-label: self.label + (i == 1 ? " plugins" : ""); selected: root.plugin-section == section; enabled: !root.settings-working;
+                    activate => { if root.plugin-section != section {
+                        root.plugin-section = section; root.settings-query = ""; root.confirm-id = ""; root.load-settings();
+                    } }
+                }
             }
             if root.settings-tab == "Providers": Text { text: "Sign in through your provider. Workshop uses Codex for chat."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
             if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
@@ -859,7 +870,7 @@ export component Desk inherits Window {
                     activate => {root.settings-action(root.settings-tab == "Skills" ? "folder" : "marketplace",root.source-input);} }
             }
             if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 34px; spacing: 8px;
-                LineEdit { horizontal-stretch: 1; text <=> root.settings-query; placeholder-text: root.settings-tab == "Plugins" && root.browse-plugins ? "Search marketplace plugins" : "Filter " + (root.settings-tab == "Skills" ? "skills" : "plugins"); accessible-label: "Filter list"; }
+                LineEdit { horizontal-stretch: 1; text <=> root.settings-query; placeholder-text: root.recommendations ? "Search recommendations" : root.browse-plugins ? "Search marketplace plugins" : "Filter " + (root.settings-tab == "Skills" ? "skills" : "plugins"); accessible-label: "Filter list"; }
                 if root.settings-tab == "Plugins" && root.browse-plugins: CheckBox { text: "Official marketplaces"; checked <=> root.official-only;
                     toggled => {root.search-settings(root.settings-query);} }
             }
@@ -882,18 +893,21 @@ export component Desk inherits Window {
                     reload=>{root.reload-models();} back=>{root.settings-open=false;} }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
-                for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: 60px;
+                for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: root.recommendations ? max(76px, row-copy.preferred-height + 20px) : 60px;
                     HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
-                        VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
+                        row-copy := VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
                             Text { text: row.label; color: Theme.text; font-size: 15px; font-weight: 600; min-width: 0px; overflow: elide; }
-                            Text { text: row.detail; color: Theme.muted; font-size: 12px; min-width: 0px; overflow: elide; }
+                            Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 12px; min-width: 0px;
+                                wrap: root.recommendations ? word-wrap : no-wrap; overflow: elide; }
                         }
                         if root.confirm-id == row.id: VerticalLayout { alignment: center; width: 74px;
                             Action { label: "Cancel"; width: 72px; height: 32px; activate => {root.confirm-id = "";} }
                         }
-                        VerticalLayout { alignment: center; width: 100px;
+                        VerticalLayout { alignment: center; width: root.recommendations ? 115px : 100px;
+                            if root.recommendations && row.action == "": Text { text: row.button; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
                             if row.action != "": Action { label: root.confirm-id == row.id ? "Confirm" : row.button;
-                                accessible-description: row.button + " " + row.label; width: 98px; height: 32px; selected: true;
+                                accessible-label: root.recommendations ? row.button + " " + row.label : self.label;
+                                accessible-description: row.button + " " + row.label; width: root.recommendations ? 112px : 98px; height: root.recommendations ? 36px : 32px; selected: true;
                                 enabled: !root.settings-working; activate => {
                                     if (row.action == "remove" || row.action == "logout") && root.confirm-id != row.id {root.confirm-id = row.id;}
                                     else {root.confirm-id = ""; root.settings-action(row.action,row.id);}

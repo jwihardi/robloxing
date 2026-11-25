@@ -62,6 +62,8 @@ Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Past
 
 **Settings → Providers** checks the installed Codex and Claude Code CLIs and opens the provider's own sign-in flow. Accounts and extensions are shared with the corresponding CLI. Chat and worker execution currently use Codex. Use `WORKSHOP_CLAUDE` to select a specific Claude Code executable.
 
+**Settings → Plugins → Recommended** offers three optional installs. **Image to Sculpt** turns reference art into a Blender sculpt, **Frontend Design** helps with interface layout and styling, and **Caveman** gives you terse replies on request. Select Codex or Claude Code before installing. Manage installed skills under **Skills** and marketplace plugins under **Installed**. Image to Sculpt requires Python with its scientific packages and Blender 5.2+. Its generated views use a paid fal API key. [Image to Sculpt setup](https://github.com/gokayfem/image-to-sculpt#install)
+
 In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
 **Plugins** lists the selected provider's installed plugins. Browse its marketplaces, choose **Install from source** to install by `plugin@marketplace`, or enter a marketplace repository and choose **Add marketplace**. **Skills** installs a local folder containing `SKILL.md` or a GitHub URL pointing to that folder. Removing a user skill moves it to a sibling `removed-skills` directory for recovery. Fresh provider sessions pick up changes.

@@ -28,7 +28,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
@@ -623,8 +623,9 @@ impl App {
         let query = query.to_lowercase();
         let terms: Vec<_> = query.split_whitespace().collect();
         let ui = self.ui.unwrap();
-        let official =
-            ui.get_settings_tab() == "Plugins" && ui.get_browse_plugins() && ui.get_official_only();
+        let official = ui.get_settings_tab() == "Plugins"
+            && ui.get_plugin_section() == PluginSection::Marketplace
+            && ui.get_official_only();
         let provider = ui.get_settings_provider();
         let rows: Vec<_> = self
             .settings_rows
@@ -669,7 +670,7 @@ impl App {
             return;
         }
         let p = preferences::Provider::from_label(&ui.get_settings_provider());
-        let browse = ui.get_browse_plugins();
+        let section = ui.get_plugin_section();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         self.settings_read.replace(Some(cancel));
         ui.set_settings_status(if message.is_empty() {
@@ -686,7 +687,7 @@ impl App {
                 .and_then(|rt| {
                     rt.block_on(async {
                         tokio::select! {
-                            rows = preferences::list(&tab, p, browse) => rows,
+                            rows = preferences::list(&tab, p, section) => rows,
                             _ = cancelled => Ok(Vec::new()),
                         }
                     })
@@ -718,6 +719,7 @@ impl App {
             match action.as_str() {
                 "login" => "Finish signing in with your provider…",
                 "remove" => "Uninstalling…",
+                "recommend" => "Installing recommendation…",
                 "install" | "folder" => "Installing…",
                 _ => "Updating…",
             }
@@ -966,7 +968,10 @@ impl App {
                             self.filter_preferences(&ui.get_settings_query());
                             let empty_label = if empty && ui.get_settings_tab() == "Skills" {
                                 "No user skills installed."
-                            } else if empty && ui.get_browse_plugins() {
+                            } else if empty
+                                && ui.get_settings_tab() == "Plugins"
+                                && ui.get_plugin_section() == PluginSection::Marketplace
+                            {
                                 "No plugins available."
                             } else if empty {
                                 "No plugins installed."
