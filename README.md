@@ -4,7 +4,11 @@ Workshop is a Windows desktop chat for working on a Git project with Codex, Clau
 
 ## Run on Windows
 
-Install Git, stable Rust with its C/C++ build tools, and the CLI for each provider you want to use. Open **Settings → Providers** to sign in. Workshop starts the selected CLI from PATH and streams replies over its native protocol. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation. Start Workshop from Explorer or a normal terminal.
+**[Download Workshop for Windows x64](https://github.com/jwihardi/robloxing/releases/latest/download/workshop-windows-x64.zip)**. Extract the ZIP to a folder and open `workshop.exe`. Keep `workshop-cli.exe` beside it for terminal commands and automation. [All releases and checksums](https://github.com/jwihardi/robloxing/releases)
+
+Install Git and the CLI for each provider you want to use. Open **Settings → Providers** to sign in. Workshop starts the selected CLI from PATH and streams replies over its native protocol. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation.
+
+To build from source, install stable Rust with its C/C++ build tools and run the following command in the repository folder.
 
 ```powershell
 cargo run --locked --bin workshop
@@ -15,7 +19,7 @@ Use **Choose folder** for an existing repository root or a folder for a new proj
 For automation, pass `--headless` first to run a command in the desktop executable without opening a window. It accepts the same commands, arguments and exit codes as `workshop-cli`. Set `WORKSHOP_HEADLESS=1` in a test process to make every invocation of `workshop.exe` there use the command-line interface. This example lists the project’s chats.
 
 ```powershell
-.\target\release\workshop.exe --headless --project . list | Out-Host
+.\workshop.exe --headless --project . list | Out-Host
 ```
 
 ## Working with agents
