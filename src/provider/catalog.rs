@@ -214,7 +214,7 @@ pub fn discover_models(project: &Path, mut publish: impl FnMut(Catalog)) -> Resu
         .enable_all()
         .build()?
         .block_on(async {
-            let sources = ["codex", "claude", "antigravity", "gemini"];
+            let sources = crate::provider_permissions::PROVIDERS;
             let mut pending: FuturesUnordered<_> = sources
                 .iter()
                 .enumerate()

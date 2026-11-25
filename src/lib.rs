@@ -5,6 +5,7 @@ mod image_comparison;
 mod message_queue;
 pub use image_comparison::ImageComparison;
 pub mod provider;
+pub mod provider_permissions;
 pub mod screenshots;
 pub mod studio;
 pub mod team;
@@ -56,6 +57,7 @@ pub struct Store {
     pub project: PathBuf,
     pub dir: PathBuf,
     archive_dir: PathBuf,
+    preferences_home: PathBuf,
     db: Mutex<Connection>,
     _lock: File,
     worker: bool,
@@ -242,6 +244,7 @@ impl Store {
         let store = Self {
             project,
             archive_dir: dir.clone(),
+            preferences_home: home,
             dir,
             db: Mutex::new(db),
             _lock: lock,

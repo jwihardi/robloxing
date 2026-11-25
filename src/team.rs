@@ -235,6 +235,7 @@ impl Store {
             true,
         )?;
         child.archive_dir.clone_from(&self.archive_dir);
+        child.preferences_home.clone_from(&self.preferences_home);
         Ok(child)
     }
     fn queue(&self, lead: i64, assignments: &[Assignment]) -> Result<()> {
@@ -526,17 +527,10 @@ impl Store {
         mut controls: provider::Controls,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<()> {
-        let mut assignment = w.assignment.clone();
-        if assignment.model.is_empty()
-            && policy.models.is_empty()
-            && let source = self.attempt(lead)?.provider
-            && source != "codex"
-        {
-            assignment.model = format!("{source}:default");
-        }
+        let lead_provider = self.attempt(lead)?.provider;
         let mut directions = String::new();
         let mut files = std::collections::BTreeSet::new();
-        let inference = self.worker_inference(policy, &assignment);
+        let inference = self.worker_inference(policy, &w.assignment, &lead_provider);
         tokio::pin!(inference);
         let (model, effort) = loop {
             tokio::select! {

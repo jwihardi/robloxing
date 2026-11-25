@@ -1,8 +1,13 @@
-use super::{App, Desk, Studio, TaskControls, policy_choices};
+use super::{App, Desk, PolicyModel, Studio, TaskControls, policy_choices};
 use anyhow::{Result, bail, ensure};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
-use workshop::{data_dir, studio::settings::TaskSettings};
+use workshop::{
+    data_dir,
+    provider_permissions::{ProviderPermissions, TaskRole},
+    studio::settings::TaskSettings,
+    worker_policy::WorkerPolicy,
+};
 
 impl App {
     pub(super) fn task_settings(&self, field: &str, value: &str) -> Result<()> {
@@ -11,7 +16,25 @@ impl App {
         let area = controls.get_area().to_string();
         let run = controls.get_for_run();
         let home = data_dir()?;
-        let defaults = TaskSettings::defaults(&home, &area)?;
+        let role = match area.as_str() {
+            "Workers" if !run => TaskRole::Workers,
+            "Images" => TaskRole::Images,
+            "Models" => TaskRole::Models,
+            "Ghidra" => TaskRole::Summaries,
+            _ => bail!("Unknown task settings."),
+        };
+        let defaults = if role == TaskRole::Workers {
+            let agent = match self.store.borrow().as_ref() {
+                Some(store) => store.worker_defaults()?,
+                None => WorkerPolicy::global(&home)?.unwrap_or_default(),
+            };
+            TaskSettings {
+                agent,
+                ..Default::default()
+            }
+        } else {
+            TaskSettings::defaults(&home, &area)?
+        };
         let mut drafts = self.task_overrides.borrow_mut();
         let mut setting = if run {
             drafts
@@ -28,16 +51,7 @@ impl App {
                     setting = defaults;
                 }
                 "customize" if run => {}
-                "model" => {
-                    if value.is_empty() {
-                        setting.agent.models.clear();
-                    } else if setting.agent.models.iter().any(|id| id == value) {
-                        setting.agent.models.retain(|id| id != value);
-                    } else {
-                        setting.agent.models.push(value.to_string());
-                    }
-                }
-                "effort" => setting.agent.max_effort = value.into(),
+                "model" | "effort" => setting.agent.edit(field, value)?,
                 "summary" if area == "Ghidra" => setting.summarize = value == "true",
                 "functions" if area == "Ghidra" => setting.function_limit = value.parse()?,
                 "seconds" if area == "Ghidra" => setting.seconds_per_function = value.parse()?,
@@ -50,21 +64,23 @@ impl App {
                     "Turn off Use task defaults to edit this run."
                 );
                 drafts.insert(area.clone(), setting.clone());
+            } else if role == TaskRole::Workers {
+                setting.agent.save_global(&home)?;
+                self.clear_sessions();
+                if let Some(store) = self.store.borrow().as_ref() {
+                    self.render_worker_policy(store, &self.catalog.borrow())?;
+                }
             } else if !run {
                 setting.save(&home, &area)?;
             }
         }
         controls.set_inherited(run && !drafts.contains_key(&area));
-        let mut catalog = self.catalog.borrow().clone();
-        if area == "Images" {
-            catalog.models.retain(|m| {
-                matches!(
-                    workshop::provider::provider_for(&m.model),
-                    "codex" | "antigravity"
-                )
-            });
-        }
-        controls.set_choices(policy_choices(&setting.agent, &catalog));
+        controls.set_choices(policy_choices(
+            &setting.agent,
+            &self.catalog.borrow(),
+            &self.permissions.borrow(),
+            role,
+        ));
         controls.set_function_limit(i32::from(setting.function_limit));
         controls.set_seconds(i32::from(setting.seconds_per_function));
         controls.set_summary(setting.summarize);
@@ -81,7 +97,70 @@ impl App {
         Ok(())
     }
 }
+fn provider_id(label: &str) -> Result<&'static str> {
+    match label {
+        "Codex" => Ok("codex"),
+        "Claude Code" => Ok("claude"),
+        "Antigravity" => Ok("antigravity"),
+        "Gemini CLI" => Ok("gemini"),
+        _ => bail!("Unknown provider"),
+    }
+}
+
 pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
+    let a = app.clone();
+    ui.on_show_provider_roles(move |label| {
+        let ui = a.ui.unwrap();
+        let result = (|| -> Result<()> {
+            let provider = provider_id(&label)?;
+            let permissions = ProviderPermissions::load(&data_dir()?)?;
+            let roles = TaskRole::ALL
+                .into_iter()
+                .filter(|role| role.supports(provider))
+                .map(|role| PolicyModel {
+                    value: role.id().into(),
+                    label: role.label().into(),
+                    selected: permissions.allows(provider, role),
+                })
+                .collect::<Vec<_>>();
+            a.permissions.replace(permissions);
+            ui.set_permission_error("".into());
+            ui.set_provider_roles(ModelRc::new(VecModel::from(roles)));
+            Ok(())
+        })();
+        if let Err(e) = result {
+            ui.set_provider_roles(Default::default());
+            ui.set_permission_error(format!("{e:#}").into());
+        }
+    });
+    let a = app.clone();
+    ui.on_set_provider_role(move |label, index, enabled| {
+        let ui = a.ui.unwrap();
+        let rows = ui.get_provider_roles();
+        let Some(mut row) = rows.row_data(index as usize) else {
+            return;
+        };
+        let result = (|| -> Result<()> {
+            let home = data_dir()?;
+            ProviderPermissions::set(
+                &home,
+                provider_id(&label)?,
+                TaskRole::from_id(&row.value)?,
+                enabled,
+            )?;
+            a.permissions.replace(ProviderPermissions::load(&home)?);
+            row.selected = enabled;
+            Ok(())
+        })();
+        rows.set_row_data(index as usize, row);
+        ui.set_permission_error(
+            result
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default()
+                .into(),
+        );
+    });
     let a = app.clone();
     ui.global::<TaskControls>().on_change(move |field, value| {
         if let Err(e) = a.task_settings(&field, &value) {

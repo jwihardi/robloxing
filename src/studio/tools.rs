@@ -141,7 +141,15 @@ pub(super) async fn model(store: &Store, cwd: &Path, job: &super::Job) -> Result
     let recipe = &job.recipe;
     let blender = store.studio_tool("Blender")?;
     if let Recipe::ModelBrief { brief } = recipe {
-        let inference = store.policy_inference(&job.settings.agent, "", "").await?;
+        let inference = store
+            .policy_inference(
+                crate::provider_permissions::TaskRole::Models,
+                &job.settings.agent,
+                "",
+                "",
+                "codex",
+            )
+            .await?;
         provider::design_model(cwd, brief, &inference).await?;
     }
     fs::write(cwd.join("model.py"), include_str!("model.py"))?;

@@ -430,18 +430,31 @@ pub enum ReplyUpdate<'a> {
     Activity(&'a str),
 }
 
-fn team_preference(store: &Store) -> Result<Option<&'static str>> {
-    Ok(if store.worker {
-        None
-    } else if store.team_settings()?.auto_delegate {
-        Some(
-            "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence.",
-        )
+fn team_preference(store: &Store) -> Result<Option<String>> {
+    use crate::provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole};
+    if store.worker {
+        return Ok(None);
+    }
+    let permissions = ProviderPermissions::load(&store.preferences_home)?;
+    let enabled: Vec<_> = PROVIDERS
+        .into_iter()
+        .filter(|p| permissions.allows(p, TaskRole::Workers))
+        .collect();
+    if enabled.is_empty() {
+        return Ok(Some("[Workshop provider settings] The creator has disabled all worker providers. Work directly. If the creator asks for delegation, explain that a worker provider must first be enabled in Settings → Providers.".into()));
+    }
+    let mut message = if store.team_settings()?.auto_delegate {
+        "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence."
     } else {
-        Some(
-            "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request.",
-        )
-    })
+        "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request."
+    }.to_owned();
+    if enabled.len() < PROVIDERS.len() {
+        message.push_str(&format!(
+            " Enabled worker providers: {}. Omit the model to use an allowed default.",
+            enabled.join(", ")
+        ));
+    }
+    Ok(Some(message))
 }
 
 fn retries_stopped(
@@ -904,7 +917,8 @@ async fn exchange(
                             Finish::Cancelled => return Ok(false),
                             Finish::Continue(direction) => direction,
                         };
-                        start_turn(stdin, session, &direction, a, team_preference).await?;
+                        start_turn(stdin, session, &direction, a, team_preference.as_deref())
+                            .await?;
                         turn.clear();
                         deadline = Some(Instant::now() + Duration::from_secs(90));
                         continue;
@@ -926,7 +940,8 @@ async fn exchange(
                                 v["result"]["model"].as_str().unwrap_or_default(),
                                 v["result"]["reasoningEffort"].as_str().unwrap_or_default(),
                             )?;
-                            start_turn(stdin, session, prompt, a, team_preference).await?;
+                            start_turn(stdin, session, prompt, a, team_preference.as_deref())
+                                .await?;
                             prompt.record_followup(store, a, notify)?;
                         }
                         Some(3) => {
@@ -941,7 +956,8 @@ async fn exchange(
                                 .as_array()
                                 .context("Codex did not return the loaded thread IDs")?;
                             if loaded.iter().any(|id| id == session.as_str()) {
-                                start_turn(stdin, session, prompt, a, team_preference).await?;
+                                start_turn(stdin, session, prompt, a, team_preference.as_deref())
+                                    .await?;
                                 prompt.record_followup(store, a, notify)?;
                             } else {
                                 open_thread(stdin, store, a).await?;

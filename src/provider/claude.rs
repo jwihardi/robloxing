@@ -312,7 +312,8 @@ pub(super) async fn exchange(
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
     store.artifact(a.id, "events", "events.jsonl")?;
     store.artifact(a.id, "stderr", "provider.stderr.log")?;
-    let preference = team_preference(store)?;
+    let worker_preference = team_preference(store)?;
+    let preference = worker_preference.as_deref();
     let mut first = Some(user_message(prompt, preference)?);
     if io.session.is_empty() {
         send(&mut io.stdin, init(&["workshop"])).await?;

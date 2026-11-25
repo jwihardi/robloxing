@@ -1,7 +1,12 @@
-use crate::{Store, provider, team::Assignment};
+use crate::{
+    Store, provider,
+    provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole},
+    team::Assignment,
+};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const EFFORTS: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -26,19 +31,55 @@ impl WorkerPolicy {
         Ok(())
     }
 
+    pub fn edit(&mut self, field: &str, value: &str) -> Result<()> {
+        match field {
+            "model" if value.is_empty() => self.models.clear(),
+            "model" if self.models.iter().any(|id| id == value) => {
+                self.models.retain(|id| id != value)
+            }
+            "model" => self.models.push(value.to_owned()),
+            "effort" => self.max_effort = value.to_owned(),
+            _ => anyhow::bail!("Unknown model setting"),
+        }
+        self.validate()
+    }
+
+    fn preferences(home: &Path) -> Result<Connection> {
+        std::fs::create_dir_all(home)?;
+        let db = Connection::open(home.join("preferences.sqlite"))?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS worker_defaults(id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL)")?;
+        Ok(db)
+    }
+
+    pub fn global(home: &Path) -> Result<Option<Self>> {
+        let row: Option<String> = Self::preferences(home)?
+            .query_row("SELECT policy FROM worker_defaults WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(row.map(|s| serde_json::from_str(&s)).transpose()?)
+    }
+
+    pub fn save_global(&self, home: &Path) -> Result<()> {
+        self.validate()?;
+        Self::preferences(home)?.execute(
+            "INSERT INTO worker_defaults VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET policy=excluded.policy",
+            [serde_json::to_string(self)?],
+        )?;
+        Ok(())
+    }
+
     fn resolve(
         &self,
         model_id: &str,
         effort: &str,
         catalog: &provider::Catalog,
+        source: &str,
     ) -> Result<(String, String)> {
         self.validate()?;
         let allowed = |id: &str| {
-            if self.models.is_empty() {
-                !model_id.is_empty() || provider::provider_for(id) == "codex"
-            } else {
-                self.models.iter().any(|m| m == id)
-            }
+            provider::provider_for(id) == source
+                && (self.models.is_empty() || self.models.iter().any(|m| m == id))
         };
         let rank = |value: &str| EFFORTS.iter().position(|&e| e == value);
         let cap = rank(&self.max_effort).unwrap_or(usize::MAX);
@@ -59,6 +100,12 @@ impl WorkerPolicy {
                 .models
                 .iter()
                 .find(|m| m.model == catalog.default_model && eligible(m))
+                .or_else(|| {
+                    catalog
+                        .models
+                        .iter()
+                        .find(|m| m.model.ends_with(":default") && eligible(m))
+                })
                 .or_else(|| catalog.models.iter().find(|m| eligible(m)))
                 .context("No available model matches the allowed models and effort limit")?
         } else {
@@ -118,13 +165,7 @@ impl Store {
     }
 
     pub fn save_worker_defaults(&self, policy: &WorkerPolicy) -> Result<()> {
-        policy.validate()?;
-        self.db.lock().unwrap().execute(
-            "INSERT INTO preferences.worker_defaults VALUES(1,?1)
-            ON CONFLICT(id) DO UPDATE SET policy=excluded.policy",
-            [serde_json::to_string(policy)?],
-        )?;
-        Ok(())
+        policy.save_global(&self.preferences_home)
     }
 
     pub fn chat_worker_policy(&self, id: i64) -> Result<Option<WorkerPolicy>> {
@@ -179,60 +220,93 @@ impl Store {
         &self,
         policy: &WorkerPolicy,
         task: &Assignment,
+        lead_provider: &str,
     ) -> Result<(String, String)> {
-        self.policy_inference(policy, &task.model, &task.effort)
-            .await
+        self.policy_inference(
+            TaskRole::Workers,
+            policy,
+            &task.model,
+            &task.effort,
+            lead_provider,
+        )
+        .await
     }
+
     pub(crate) async fn policy_inference(
         &self,
+        role: TaskRole,
         policy: &WorkerPolicy,
         model: &str,
         effort: &str,
+        preferred: &str,
     ) -> Result<(String, String)> {
-        if policy.max_effort.is_empty()
-            && effort.is_empty()
-            && model.is_empty()
-            && policy.models.is_empty()
-        {
-            return Ok((String::new(), String::new()));
+        let permissions = ProviderPermissions::load(&self.preferences_home)?;
+        let allows = |p: &str| permissions.allows(p, role);
+        let task = role.label();
+        let enabled: Vec<_> = PROVIDERS.into_iter().filter(|p| allows(p)).collect();
+        ensure!(
+            !enabled.is_empty(),
+            "Enable a provider for {task} in Settings → Providers."
+        );
+        if !model.is_empty() {
+            ensure!(
+                allows(provider::provider_for(model)),
+                "The provider for {model} is disabled for {task} in Settings → Providers."
+            );
+        }
+        let mut sources = enabled;
+        sources.retain(|source| {
+            (model.is_empty() || provider::provider_for(model) == *source)
+                && (policy.models.is_empty()
+                    || policy
+                        .models
+                        .iter()
+                        .any(|id| provider::provider_for(id) == *source))
+        });
+        ensure!(
+            !sources.is_empty(),
+            "The allowed models for {task} do not match an enabled provider. Check the model choices and Settings → Providers."
+        );
+        if policy.models.is_empty() {
+            if model.is_empty() && sources.contains(&preferred) {
+                sources.retain(|p| *p == preferred);
+            }
+            if model.is_empty()
+                && effort.is_empty()
+                && policy.max_effort.is_empty()
+                && sources[0] == "codex"
+            {
+                return Ok((String::new(), String::new()));
+            }
         }
         let mut cache = self.worker_catalog.lock().await;
-        let mut sources = std::collections::BTreeSet::new();
-        if !model.is_empty() || policy.models.is_empty() {
-            sources.insert(provider::provider_for(model));
-        } else {
-            sources.extend(policy.models.iter().map(|id| provider::provider_for(id)));
-        }
         let available = cache.get_or_insert_with(Default::default);
         let mut errors = Vec::new();
         for source in sources {
-            if available
+            if !available
                 .models
                 .iter()
                 .any(|m| provider::provider_for(&m.model) == source)
             {
-                continue;
-            }
-            match provider::worker_catalog(&self.project, Some(source)).await {
-                Ok(found) => {
-                    available.models.extend(found.models);
-                    if source == "codex" || available.default_model.is_empty() {
-                        available.default_model = found.default_model;
-                        available.default_effort = found.default_effort;
+                match provider::worker_catalog(&self.project, Some(source)).await {
+                    Ok(found) => {
+                        available.models.extend(found.models);
+                        if source == "codex" || available.default_model.is_empty() {
+                            available.default_model = found.default_model;
+                            available.default_effort = found.default_effort;
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{source}: {e:#}"));
+                        continue;
                     }
                 }
-                Err(error) => errors.push(format!("{source}: {error:#}")),
+            }
+            match policy.resolve(model, effort, available, source) {
+                Ok(choice) => return Ok(choice),
+                Err(e) => errors.push(format!("{source}: {e:#}")),
             }
         }
-        if !errors.is_empty()
-            && (!model.is_empty()
-                || policy
-                    .models
-                    .iter()
-                    .all(|id| !available.models.iter().any(|m| m.model == *id)))
-        {
-            anyhow::bail!("Model discovery failed. {}", errors.join(". "));
-        }
-        policy.resolve(model, effort, available)
+        anyhow::bail!("No eligible model for {task}. {}", errors.join(". "))
     }
 }

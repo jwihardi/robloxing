@@ -26,6 +26,7 @@ use std::{
 use workshop::{
     Attempt, Store, data_dir,
     provider::{self, Control},
+    provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole},
     usage::{ContextUsage, UsageWindow},
     worker_policy::{EFFORTS, WorkerPolicy},
 };
@@ -87,6 +88,7 @@ struct App {
     settings_page: RefCell<Option<(String, preferences::Provider, PluginSection)>>,
     settings_rows: RefCell<Rc<Vec<preferences::Row>>>,
     settings_view: Rc<VecModel<SettingRow>>,
+    permissions: RefCell<ProviderPermissions>,
     plugin_catalogs: RefCell<std::collections::HashMap<preferences::Provider, CachedPlugins>>,
     plugin_limit: Cell<usize>,
     usage: RefCell<desktop_usage::AccountUsage>,
@@ -303,18 +305,30 @@ fn picker(
         effort_index,
     }
 }
-fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyChoices {
+fn policy_choices(
+    policy: &WorkerPolicy,
+    catalog: &provider::Catalog,
+    permissions: &ProviderPermissions,
+    role: TaskRole,
+) -> PolicyChoices {
+    let permitted = |id: &str| permissions.allows(provider::provider_for(id), role);
+    let has_provider = PROVIDERS.iter().any(|p| permissions.allows(p, role));
     let mut models: Vec<_> = catalog.models.iter().map(|m| m.model.clone()).collect();
     for id in &policy.models {
         if !models.contains(id) {
             models.push(id.clone());
         }
     }
-    let allowed = if policy.models.is_empty() {
+    models.retain(|id| permitted(id));
+    let selected: Vec<_> = policy.models.iter().filter(|id| permitted(id)).collect();
+    let allowed = if !has_provider {
+        "Enable a provider in Settings → Providers".into()
+    } else if policy.models.is_empty() {
         "Any available model".into()
+    } else if selected.is_empty() {
+        "Saved models are disabled in Settings → Providers".into()
     } else {
-        policy
-            .models
+        selected
             .iter()
             .map(|id| model_label(catalog, id))
             .collect::<Vec<_>>()
@@ -338,7 +352,10 @@ fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyC
                 || catalog
                     .models
                     .iter()
-                    .filter(|m| policy.models.is_empty() || policy.models.contains(&m.model))
+                    .filter(|m| {
+                        permitted(&m.model)
+                            && (policy.models.is_empty() || policy.models.contains(&m.model))
+                    })
                     .any(|m| {
                         m.supported_reasoning_efforts
                             .iter()
@@ -365,7 +382,9 @@ fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyC
         .position(|e| e.value == policy.max_effort.as_str())
         .unwrap_or(efforts.len() - 1) as i32;
     PolicyChoices {
-        all_models: policy.models.is_empty(),
+        has_provider,
+        blocked_models: !policy.models.is_empty() && selected.is_empty(),
+        all_models: has_provider && policy.models.is_empty(),
         allowed_names: allowed.into(),
         models: rows,
         levels: ModelRc::new(VecModel::from(efforts)),
@@ -615,17 +634,19 @@ impl App {
         let ui = self.ui.unwrap();
         let selected = self.selected_policy(store)?;
         ui.set_custom_subagents(selected.is_some());
-        let local = if ui.get_editing_chat_policy() {
-            selected
-        } else {
-            None
-        };
-        ui.set_inherit_policy(local.is_none());
-        let policy = match local {
+        ui.set_inherit_policy(selected.is_none());
+        let policy = match selected {
             Some(p) => p,
             None => store.worker_defaults()?,
         };
-        let choices = policy_choices(&policy, catalog);
+        let choices = policy_choices(
+            &policy,
+            catalog,
+            &self.permissions.borrow(),
+            TaskRole::Workers,
+        );
+        ui.set_worker_provider_available(choices.has_provider);
+        ui.set_worker_models_blocked(choices.blocked_models);
         ui.set_all_models(choices.all_models);
         ui.set_allowed_model_names(choices.allowed_names);
         ui.set_policy_models(choices.models);
@@ -636,41 +657,23 @@ impl App {
     fn change_policy(&self, field: &str, value: &str) -> Result<()> {
         let slot = self.store.borrow();
         let store = slot.as_ref().context("Open a project")?;
-        let ui = self.ui.unwrap();
-        let chat = ui.get_editing_chat_policy();
         if field == "open" {
             return self.render_worker_policy(store, &self.catalog.borrow());
         }
-        let defaults = store.worker_defaults()?;
-        let mut policy = if chat {
-            self.selected_policy(store)?.unwrap_or(defaults)
-        } else {
-            defaults
+        let mut policy = match self.selected_policy(store)? {
+            Some(p) => p,
+            None => store.worker_defaults()?,
         };
         match field {
-            "model" if value.is_empty() => policy.models.clear(),
-            "model" => {
-                if policy.models.iter().any(|m| m == value) {
-                    if policy.models.len() > 1 {
-                        policy.models.retain(|m| m != value);
-                    }
-                } else {
-                    policy.models.push(value.to_owned());
-                }
-            }
-            "effort" => policy.max_effort = value.into(),
+            "model" | "effort" => policy.edit(field, value)?,
             "inherit" | "customize" => {}
             _ => anyhow::bail!("Unknown subagent setting"),
         }
-        if chat {
-            let setting = (field != "inherit").then_some(policy);
-            if let Some(id) = self.id.get() {
-                store.set_chat_worker_policy(id, setting.as_ref())?;
-            } else {
-                self.draft_policy.replace(setting);
-            }
+        let setting = (field != "inherit").then_some(policy);
+        if let Some(id) = self.id.get() {
+            store.set_chat_worker_policy(id, setting.as_ref())?;
         } else {
-            store.save_worker_defaults(&policy)?;
+            self.draft_policy.replace(setting);
         }
         self.clear_sessions();
         self.render_worker_policy(store, &self.catalog.borrow())
@@ -1690,6 +1693,7 @@ fn main() -> Result<()> {
         settings_rows: Default::default(),
         settings_page: Default::default(),
         settings_view: Default::default(),
+        permissions: RefCell::new(ProviderPermissions::load(&data_dir()?)?),
         plugin_catalogs: Default::default(),
         plugin_limit: Cell::new(PLUGINS_PER_PAGE),
         usage: Default::default(),

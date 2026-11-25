@@ -26,7 +26,7 @@ For automation, pass `--headless` first to run a command in the desktop executab
 
 Give Workshop the outcome and any constraints. The lead handles quick questions directly. Automatic delegation is on by default. For a divisible project task the lead can assign independent work in parallel and add dependent work as results arrive. Each dependent worker receives the integrated files and its prerequisites’ findings, including read-only reviews. Overlapping edit scopes run in order.
 
-Open **Subagents → Edit global defaults** to set scheduling for the current project. Turn off **Auto-delegate project tasks** to use workers only when you ask. **Allow two workers in this project** controls whether independent assignments can run together. The CLI equivalents are `workshop-cli team --auto-delegate false` and `workshop-cli team --parallelism 1`.
+Open **Settings → Tasks → Workers** to set scheduling for the current project. Turn off **Auto-delegate project tasks** to use workers only when you ask. **Allow two workers in this project** controls whether independent assignments can run together. The CLI equivalents are `workshop-cli team --auto-delegate false` and `workshop-cli team --parallelism 1`.
 
 Workers can report unmet acceptance criteria and return a concrete finding to the lead. An unresolved owner holds dependent work in the queue. When the owner is repaired, its waiting tasks become eligible automatically. Workshop checks intermediate patches before releasing dependencies and runs the configured project command on the joined revision. With no configured command the automatic check is `git diff --check`. The lead and workers can also run the project’s own behavioral checks in their provider sessions.
 
@@ -36,7 +36,9 @@ Use **+** on the left of the composer to attach files, reference a folder, or pa
 
 Open the model and effort pill beside Send. Select the header showing the effort and model to open the model list. Drag the slider or use the arrow keys to choose an effort level. New-chat choices set the project defaults. Changes within an existing chat apply to its next message. Workshop gets the available models and effort levels from each installed CLI. Choose a Claude model for a Claude lead. Start a new chat to switch providers, or change models from the same provider between turns.
 
-Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
+In **Settings → Providers**, expand a provider and check the tasks it may handle across projects. Each provider has independent choices for workers, model design and decompilation summaries. Codex and Antigravity can also generate Studio images. Clear a task for every provider to turn off its AI routing.
+
+Use **Settings → Tasks → Workers** to set allowed models and maximum effort. To customize one chat, open **Subagents** beside **+** and turn off **Use global defaults**. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
 While the lead is working, Enter or **Steer now** sends a correction to the current run. For a separate follow-up, open **Send options** beside the send arrow and choose **Send after this run**. Messages wait above the composer in the order you added them. You can remove one before it starts. Each follow-up starts after the preceding run finishes its checks. Stopping a run or encountering a failure pauses delivery. The queue stays with the chat after restart. Choose **Send next** to continue.
 

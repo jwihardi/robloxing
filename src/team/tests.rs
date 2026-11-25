@@ -466,19 +466,113 @@ fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()
     let mut task = assignment("one", &[], &[]);
     task.effort = "xhigh".into();
     assert_eq!(
-        rt.block_on(store.worker_inference(&policy, &task))?,
+        rt.block_on(store.worker_inference(&policy, &task, "codex"))?,
         ("large".into(), "medium".into())
     );
     task.model = "small".into();
-    assert!(rt.block_on(store.worker_inference(&policy, &task)).is_err());
+    assert!(
+        rt.block_on(store.worker_inference(&policy, &task, "codex"))
+            .is_err()
+    );
     policy.models.push("small".into());
     task.effort = "low".into();
     assert_eq!(
-        rt.block_on(store.worker_inference(&policy, &task))?,
+        rt.block_on(store.worker_inference(&policy, &task, "codex"))?,
         ("small".into(), "low".into())
     );
     task.model = "large".into();
     policy.max_effort = "low".into();
-    assert!(rt.block_on(store.worker_inference(&policy, &task)).is_err());
+    assert!(
+        rt.block_on(store.worker_inference(&policy, &task, "codex"))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() -> Result<()> {
+    use crate::provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole};
+    use crate::worker_policy::WorkerPolicy;
+
+    let tmp = tempdir()?;
+    let home = tmp.path().join("home");
+    let policy = WorkerPolicy::default();
+    let task = assignment("one", &[], &[]);
+    // Permissions can be set before the first project is opened.
+    ProviderPermissions::set(&home, "claude", TaskRole::Workers, false)?;
+    let store = Store::open(&tmp.path().join("project"), &home)?;
+    let cached = ["fixture", "claude:default", "antigravity:default"].map(|id| {
+        serde_json::json!({"model": id, "isDefault": false, "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": [{"reasoningEffort":"low"}]})
+    });
+    store.cache_worker_catalog(&provider::Catalog {
+        models: serde_json::from_value(serde_json::json!(cached))?,
+        default_model: "fixture".into(),
+        default_effort: "low".into(),
+    });
+    assert_eq!(
+        store.worker_inference(&policy, &task, "claude").await?,
+        ("".into(), "".into())
+    );
+    let pinned = WorkerPolicy {
+        models: vec!["claude:default".into()],
+        max_effort: "low".into(),
+    };
+    assert!(
+        store
+            .worker_inference(&pinned, &task, "claude")
+            .await
+            .is_err()
+    );
+    let mut explicit = task.clone();
+    explicit.model = "claude:default".into();
+    assert!(
+        store
+            .worker_inference(&policy, &explicit, "codex")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .policy_inference(TaskRole::Models, &pinned, "", "", "codex")
+            .await?
+            .0,
+        "claude:default"
+    );
+
+    ProviderPermissions::set(&home, "codex", TaskRole::Images, false)?;
+    assert!(ProviderPermissions::set(&home, "claude", TaskRole::Images, true).is_err());
+    assert_eq!(
+        store
+            .policy_inference(TaskRole::Images, &policy, "", "", "codex")
+            .await?
+            .0,
+        "antigravity:default"
+    );
+    ProviderPermissions::set(&home, "antigravity", TaskRole::Images, false)?;
+    assert!(
+        store
+            .policy_inference(TaskRole::Images, &policy, "", "", "codex")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Settings → Providers")
+    );
+
+    let second = Store::open(&tmp.path().join("second"), &home)?;
+    for p in PROVIDERS {
+        ProviderPermissions::set(&home, p, TaskRole::Workers, false)?;
+    }
+    assert!(
+        second
+            .worker_inference(&policy, &task, "codex")
+            .await
+            .is_err()
+    );
+    ProviderPermissions::set(&home, "claude", TaskRole::Workers, true)?;
+    assert_eq!(
+        store.worker_inference(&pinned, &task, "codex").await?,
+        ("claude:default".into(), "low".into())
+    );
     Ok(())
 }

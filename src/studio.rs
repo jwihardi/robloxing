@@ -379,7 +379,15 @@ impl Store {
                 folder,
                 "Requesting AI summary of the saved report.",
             )?;
-            let inference = self.policy_inference(&job.settings.agent, "", "").await?;
+            let inference = self
+                .policy_inference(
+                    crate::provider_permissions::TaskRole::Summaries,
+                    &job.settings.agent,
+                    "",
+                    "",
+                    "codex",
+                )
+                .await?;
             provider::summarize_report(folder, detail, &inference).await
         };
         let result = tokio::select! {
@@ -398,7 +406,15 @@ impl Store {
         let recipe = &job.recipe;
         match recipe {
             Recipe::Image { brief, style } => {
-                let inference = self.policy_inference(&job.settings.agent, "", "").await?;
+                let inference = self
+                    .policy_inference(
+                        crate::provider_permissions::TaskRole::Images,
+                        &job.settings.agent,
+                        "",
+                        "",
+                        "codex",
+                    )
+                    .await?;
                 provider::generate_image(folder, brief, style, &inference).await?
             }
             Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,

@@ -189,7 +189,7 @@ component EffortTrack inherits Rectangle {
     }
 }
 
-export struct PolicyChoices { all-models:bool, allowed-names:string, models:[PolicyModel], levels:[PickerOption], cap-index:int }
+export struct PolicyChoices { has-provider:bool, blocked-models:bool, all-models:bool, allowed-names:string, models:[PolicyModel], levels:[PickerOption], cap-index:int }
 export global TaskControls {
     in-out property <string> area:"Images";
     in-out property <bool> for-run;
@@ -204,6 +204,8 @@ export global TaskControls {
 }
 
 component AgentPolicyFields inherits VerticalLayout {
+    in property <bool> has-provider;
+    in property <bool> blocked-models;
     in property <bool> inherited-policy;
     in property <string> allowed-model-names;
     in property <bool> all-models;
@@ -216,11 +218,11 @@ component AgentPolicyFields inherits VerticalLayout {
     callback dismiss();
     spacing:5px;
     Text { text: "Allowed models"; color: Theme.text; font-size: 14px; font-weight: 600; }
-    if root.inherited-policy: Text {
+    if root.inherited-policy || !root.has-provider || root.blocked-models: Text {
         text: root.allowed-model-names; color: Theme.muted; font-size: 13px;
         wrap: word-wrap; overflow: elide; max-height: 38px;
     }
-    if !root.inherited-policy: models := ScrollView {
+    if !root.inherited-policy && root.has-provider: models := ScrollView {
         height: min(model-list.preferred-height, root.list-height); content-width: self.visible-width; content-height: model-list.preferred-height;
         model-list := VerticalLayout { width: models.visible-width - 5px; spacing: 0px; alignment: start;
             Action { label: "Any available model"; height: 30px;
@@ -239,7 +241,7 @@ component AgentPolicyFields inherits VerticalLayout {
         Text { text: root.cap-index >= 0 && root.cap-index < root.cap-levels.length ? root.cap-levels[root.cap-index].label : "";
             color: Theme.muted; font-size: 14px; }
     }
-    if !root.inherited-policy: EffortTrack { height: 34px; name: root.effort-name;
+    if !root.inherited-policy && root.has-provider: EffortTrack { height: 34px; name: root.effort-name;
         enabled: root.cap-levels.length > 1;
         opacity: self.enabled ? 1 : 0.45; levels: root.cap-levels; selected: root.cap-index;
         commit(i) => { if self.enabled {root.change-policy("effort",root.cap-levels[i].value);} }
@@ -251,18 +253,23 @@ component TaskEditor inherits VerticalLayout {
     in property <string> catalog-status;
     callback reload();
     callback back();
+    in property <bool> has-project;
+    in property <bool> auto-delegate;
+    in property <bool> parallel-workers;
+    callback schedule(bool,bool);
+    private property <bool> workers:TaskControls.area=="Workers";
     private property <bool> local:TaskControls.area=="Ghidra";
     private property <bool> inherited:TaskControls.for-run && TaskControls.inherited;
     private property <string> title:local ? "Decompilation" : TaskControls.area=="Models" ? "Model design" : "Image generation";
     spacing:12px; alignment:start;
     if !TaskControls.for-run: HorizontalLayout { height:34px; alignment:start; spacing:3px;
-        for tab[i] in ["Images","Models","Ghidra"]: Action {
-            label:["Image generation","Model design","Decompilation"][i]; width:[130px,110px,120px][i]; height:34px;
+        for tab[i] in ["Workers","Images","Models","Ghidra"]: Action {
+            label:["Workers","Image generation","Model design","Decompilation"][i]; width:[78px,130px,110px,120px][i]; height:34px;
             selected:TaskControls.area==tab; activate=>{TaskControls.open(false,tab);}
         }
     }
-    Text { text:TaskControls.for-run ? root.title + " settings" : "Task defaults"; font-size:21px; font-weight:600; color:Theme.text; }
-    Text { text:TaskControls.for-run ? "Changes apply to the next run." : "Used across projects when you start a new run.";
+    Text { text:TaskControls.for-run ? root.title + " settings" : root.workers ? "Worker defaults" : "Task defaults"; font-size:21px; font-weight:600; color:Theme.text; }
+    Text { text:TaskControls.for-run ? "Changes apply to the next run." : root.workers ? "Used across projects unless a chat has its own worker settings." : "Used across projects when you start a new run.";
         font-size:14px; color:Theme.muted; wrap:word-wrap; }
     if TaskControls.for-run: CheckBox { text:"Use task defaults"; checked:TaskControls.inherited; toggled=>{TaskControls.change(self.checked ? "inherit" : "customize","");} }
     Rectangle { height:1px; background:Theme.line; }
@@ -280,14 +287,21 @@ component TaskEditor inherits VerticalLayout {
         toggled=>{TaskControls.change("summary",self.checked ? "true" : "false");} }
     if root.local: Text { text:"Summaries send up to 48 KiB of saved pseudocode to the selected model."; wrap:word-wrap; color:Theme.muted; font-size:13px; }
     if !root.local || TaskControls.summary: AgentPolicyFields {
-        inherited-policy:root.inherited; allowed-model-names:TaskControls.choices.allowed-names;
+        blocked-models:TaskControls.choices.blocked-models; has-provider:TaskControls.choices.has-provider; inherited-policy:root.inherited; allowed-model-names:TaskControls.choices.allowed-names;
         all-models:TaskControls.choices.all-models; policy-models:TaskControls.choices.models;
         cap-levels:TaskControls.choices.levels; cap-index:TaskControls.choices.cap-index;
-        list-height:116px; effort-name:root.local ? "Maximum summary effort" : "Maximum task effort";
+        list-height:116px; effort-name:root.local ? "Maximum summary effort" : root.workers ? "Maximum worker effort" : "Maximum task effort";
         change-policy(f,v)=>{TaskControls.change(f,v);} dismiss=>{root.back();}
     }
     if (!root.local || TaskControls.summary) && !root.catalog-ready: Text { text:root.catalog-status; color:Theme.muted; font-size:13px; wrap:word-wrap; }
     if (!root.local || TaskControls.summary) && !root.catalog-ready: Action { label:"Refresh models"; width:124px; enabled:root.catalog-status!="Loading models…"; activate=>{root.reload();} }
+    if root.workers && root.has-project: VerticalLayout {
+        spacing:4px;
+        Rectangle { height:1px; background:Theme.line; }
+        Text { text:"This project"; height:30px; vertical-alignment:center; color:Theme.text; font-size:14px; font-weight:600; }
+        CheckBox { checked:root.auto-delegate; text:"Auto-delegate project tasks"; toggled=>{root.schedule(self.checked,root.parallel-workers);} }
+        CheckBox { checked:root.parallel-workers; text:"Allow two workers in this project"; toggled=>{root.schedule(root.auto-delegate,self.checked);} }
+    }
     if TaskControls.error!="": Text { text:TaskControls.error; color:Theme.scarce; wrap:word-wrap; font-size:13px; }
 }
 
@@ -454,6 +468,16 @@ export component Desk inherits Window {
     }
     in-out property <string> settings-tab: "Providers";
     in-out property <string> settings-provider: "Codex";
+    private property <string> expanded-provider;
+    in property <[PolicyModel]> provider-roles;
+    in-out property <string> permission-error;
+    callback show-provider-roles(string);
+    callback set-provider-role(string,int,bool);
+    function expand-provider(label: string) {
+        root.permission-error = "";
+        root.expanded-provider = root.expanded-provider == label ? "" : label;
+        if root.expanded-provider != "" { root.show-provider-roles(label); }
+    }
     in-out property <PluginSection> plugin-section: PluginSection.recommended;
     private property <bool> recommendations: root.settings-tab == "Plugins" && root.plugin-section == PluginSection.recommended;
     private property <bool> browse-plugins: root.settings-tab == "Plugins" && root.plugin-section == PluginSection.marketplace;
@@ -480,6 +504,7 @@ export component Desk inherits Window {
             if tab != root.settings-tab { root.plugin-section = PluginSection.recommended; }
         }
         root.settings-tab = tab; root.settings-provider = provider;
+        if tab == "Providers" && root.expanded-provider != "" { root.show-provider-roles(root.expanded-provider); }
         root.load-settings(false);
         if tab=="Tasks" { TaskControls.open(false,TaskControls.area); }
     }
@@ -495,18 +520,17 @@ export component Desk inherits Window {
     callback refresh-usage();
     in property <[WorkerRow]> workers;
     in property <PickerData> chat-choices;
-    in-out property <bool> editing-chat-policy;
+    in property <bool> worker-provider-available;
+    in property <bool> worker-models-blocked;
     in property <bool> inherit-policy;
     in property <bool> all-models;
     in property <string> allowed-model-names;
-    private property <bool> inherited-policy: editing-chat-policy && inherit-policy;
     in property <bool> custom-subagents;
     in property <[PolicyModel]> policy-models;
     in property <[PickerOption]> cap-levels;
     in property <int> cap-index;
     callback change-policy(string,string);
-    function open-policy(chat: bool) {
-        root.editing-chat-policy = chat;
+    function open-policy() {
         root.change-policy("open", "");
         root.show-panel(OpenPanel.policy, composer.subagent-x, composer.subagent-y, composer.subagent-width, composer.subagent-height);
     }
@@ -825,7 +849,7 @@ export component Desk inherits Window {
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
             open-picker(x,y,w,h) => { root.show-panel(OpenPanel.effort, x, y, w, h); }
-            custom-subagents: root.custom-subagents; policy-enabled: !root.busy; subagents => {root.open-policy(true);}
+            custom-subagents: root.custom-subagents; policy-enabled: !root.busy; subagents => {root.open-policy();}
             send => { root.send-message(); } stop => { root.operate("cancel"); }
             recipient: root.direction-title; clear-recipient => {root.clear-recipient();composer.focus-input();}
             delivery(x,y,w,h) => {root.show-panel(OpenPanel.delivery,x,y,w,h);}
@@ -930,7 +954,8 @@ export component Desk inherits Window {
                     } }
                 }
             }
-            if root.settings-tab == "Providers": Text { text: "Sign in through your provider, then choose its model in the chat composer."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
+            if root.settings-tab == "Providers": Text { text: "Expand a provider to choose which tasks it can handle across projects."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
+            if root.settings-tab == "Providers" && root.permission-error != "": Text { text:root.permission-error; wrap:word-wrap; color:Theme.scarce; }
             if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
                 LineEdit { horizontal-stretch: 1; text <=> root.source-input; accessible-label: root.settings-tab == "Skills" ? "Skill source" : "Plugin source";
                     placeholder-text: root.settings-tab == "Skills" ? "GitHub skill folder URL" : root.settings-provider == "Antigravity" ? "Plugin name, GitHub URL or local path" : "Plugin ID or marketplace source"; }
@@ -959,15 +984,26 @@ export component Desk inherits Window {
             if root.settings-tab=="Tasks": defaults-scroll:=ScrollView {
                 vertical-stretch:1; content-width:self.visible-width; content-height:defaults-editor.preferred-height;
                 defaults-editor:=TaskEditor { width:defaults-scroll.visible-width - 8px;
+                    has-project:root.project != ""; auto-delegate:root.auto-delegate; parallel-workers:root.parallel-workers;
+                    schedule(auto,parallel)=>{root.save-scheduling(auto,parallel);}
                     catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
                     reload=>{root.reload-models();} back=>{root.settings-open=false;} }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
-                for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: max(root.recommendations ? 76px : 60px, row-copy.preferred-height + 18px);
-                    HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
-                        row-copy := VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
-                            Text { text: row.label; color: Theme.text; font-size: 15px; font-weight: 600; min-width: 0px; overflow: elide; }
-                            Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 13px; min-width: 0px; wrap: word-wrap; }
+                for row in root.settings-rows: item := VerticalLayout {
+                    property <bool> account: root.settings-tab == "Providers" && row.id != "gemini-project";
+                    property <bool> expanded: item.account && row.id == root.expanded-provider;
+                    width: preference-list.visible-width;
+                    height: account-header.height + (item.expanded ? root.provider-roles.length * 32px + 10px : 0px) + 1px;
+                    account-header := HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
+                        height: item.account ? 60px : max(root.recommendations ? 76px : 60px, row-copy.preferred-height + 18px);
+                        row-copy := VerticalLayout { horizontal-stretch:1; alignment:center; spacing:3px;
+                            if item.account: Action { label:row.label; detail:row.detail; height:50px;
+                                glyph:item.expanded ? "\u{e70d}" : "\u{e76c}"; glyph-color:item.expanded ? Theme.accent : Theme.muted;
+                                accessible-expanded:item.expanded; accessible-description:row.detail;
+                                activate=>{root.expand-provider(row.id);} }
+                            if !item.account: Text { text: row.label; color: Theme.text; font-size: 15px; font-weight: 600; min-width: 0px; overflow: elide; }
+                            if !item.account: Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 13px; min-width: 0px; wrap: word-wrap; }
                         }
                         if root.confirm-id == row.id: VerticalLayout { alignment: center; width: 74px;
                             Action { label: "Cancel"; width: 72px; height: 32px; activate => {root.confirm-id = "";} }
@@ -976,12 +1012,19 @@ export component Desk inherits Window {
                             if root.recommendations && row.action == "": Text { text: row.button; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
                             if row.action != "": Action { label: root.settings-working && root.settings-working-id == row.id && (row.action == "recommend" || row.action == "install") ? "Installing…" : root.confirm-id == row.id ? "Confirm" : row.button;
                                 accessible-label: root.recommendations ? self.label + " " + row.label
-                                    : row.id == "Gemini CLI" ? row.button + " to Gemini" : self.label;
+                                    : item.account && root.confirm-id != row.id ? self.label + (row.action == "logout" ? " of " : " to ") + (row.id == "Gemini CLI" ? "Gemini" : row.label) : self.label;
                                 accessible-description: row.button + " " + row.label; width: root.recommendations ? 112px : 98px; height: root.recommendations ? 36px : 32px; selected: true;
                                 enabled: !root.settings-working; activate => {
                                     if (row.action == "remove" || row.action == "logout") && root.confirm-id != row.id {root.confirm-id = row.id;}
                                     else {root.confirm-id = ""; root.settings-action(row.action,row.id);}
                                 } }
+                        }
+                    }
+                    if item.expanded: VerticalLayout {
+                        padding-left:32px; padding-bottom:10px;
+                        for role[i] in root.provider-roles: CheckBox {
+                            text:role.label; checked:role.selected; height:32px;
+                            toggled=>{root.set-provider-role(row.id, i, self.checked);}
                         }
                     }
                     Rectangle { height: 1px; background: Theme.line; }
@@ -1247,19 +1290,18 @@ export component Desk inherits Window {
         Rectangle { background: Theme.popup; border-radius: 15px; border-width: 1px; border-color: Theme.line; }
         content := VerticalLayout { padding: 12px; spacing: 5px;
             HorizontalLayout { height: 30px;
-                Text { text: root.editing-chat-policy ? "Chat subagents" : "Subagent defaults";
+                Text { text: "Chat subagents";
                     font-size: 16px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
                 done := Action { label: "Done"; width: 58px; height: 30px; activate => {root.dismiss-panel();} }
             }
-            if root.editing-chat-policy: CheckBox { text: "Use global defaults"; checked: root.inherit-policy;
+            CheckBox { text: "Use global defaults"; checked: root.inherit-policy;
                 toggled => { root.change-policy(self.checked ? "inherit" : "customize",""); } }
-            AgentPolicyFields { inherited-policy:root.inherited-policy; allowed-model-names:root.allowed-model-names;
+            AgentPolicyFields { blocked-models:root.worker-models-blocked; has-provider:root.worker-provider-available; inherited-policy:root.inherit-policy; allowed-model-names:root.allowed-model-names;
                 all-models:root.all-models; policy-models:root.policy-models; cap-levels:root.cap-levels; cap-index:root.cap-index;
                 effort-name:"Maximum subagent effort"; change-policy(f,v)=>{root.change-policy(f,v);} dismiss=>{root.dismiss-panel();} }
-            if !root.editing-chat-policy: CheckBox { checked: root.auto-delegate; text: "Auto-delegate project tasks"; toggled => {root.save-scheduling(self.checked,root.parallel-workers);} }
-            if !root.editing-chat-policy: CheckBox { checked: root.parallel-workers; text: "Allow two workers in this project"; toggled => {root.save-scheduling(root.auto-delegate,self.checked);} }
-            if !root.editing-chat-policy || !root.catalog-ready: Action { label: "Refresh models"; enabled: root.catalog-status != "Loading models…"; activate => {root.reload-models();} }
-            Action { label: root.editing-chat-policy ? "Edit global defaults" : "Back to chat settings"; activate => {root.open-policy(!root.editing-chat-policy);} }
+            if !root.catalog-ready: Action { label: "Refresh models"; enabled: root.catalog-status != "Loading models…"; activate => {root.reload-models();} }
+            Action { label:"Provider settings"; glyph:"\u{e713}";
+                activate=>{root.settings-tab="Providers"; root.visit("settings");} }
         }
     }
 

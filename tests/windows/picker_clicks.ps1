@@ -1,8 +1,9 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
+    if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
     if ($SketchOnly) { $parameters.SketchOnly = $true }
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
@@ -162,6 +163,61 @@ function Open-SketchPad {
     Wait-For { Named 'Draw a sketch' } 'sketch menu item'
     Click 'Draw a sketch'
     Wait-For { Named 'Sketch canvas' } 'drawing surface'
+}
+function Test-ProviderTasks {
+    $toggle = [System.Windows.Automation.TogglePattern]::Pattern
+    Click 'Subagents'
+    Click 'Provider settings'
+    Wait-For { Named 'Codex' } 'providers from the chat shortcut'
+    Click 'Codex'
+    Wait-For { (Named 'Workers') -and (Named 'Image generation') } 'Codex task choices'
+    Click 'Workers'
+    Wait-For { (Named 'Workers').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'Codex workers disabled'
+    if ((Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -ne 'On') { throw 'Changing workers changed image generation' }
+    Save-PrivateWindow (Join-Path $root 'provider-tasks.png')
+    Click 'Claude Code'
+    Wait-For { (Named 'Workers') -and !(Named 'Image generation') } 'Claude supported tasks'
+    if ((Named 'Workers').GetCurrentPattern($toggle).Current.ToggleState -ne 'On') { throw 'Changing Codex workers changed Claude workers' }
+    Click 'Close settings'
+    Click 'Subagents'
+    if ((Named 'Use global defaults').GetCurrentPattern($toggle).Current.ToggleState -eq 'On') { Click 'Use global defaults' }
+    Wait-For { (Named 'Claude Sonnet 5.5') -and !(Named 'fixture-fast') } 'worker choices honor provider permissions'
+    Click 'Provider settings'
+    Click 'Codex'
+    Wait-For { (Named 'Workers').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Codex worker permission'
+    Click 'Workers'
+    Click 'Image generation'
+    Click 'Antigravity'
+    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'independent Antigravity image permission'
+    Click 'Image generation'
+    Click 'Tasks'
+    Wait-For { (Named 'Task defaults') -or (Named 'Worker defaults') } 'task settings opened'
+    Click 'Image generation'
+    Wait-For { (Named 'Allowed models') -and !(Named 'Any available model') } 'all image providers disabled'
+    Click 'Providers'
+    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Antigravity image permission'
+    Click 'Image generation'
+    Click 'Codex'
+    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Codex image permission'
+    Click 'Image generation'
+    Click 'Tasks'
+    Wait-For { (Named 'Task defaults') -and (Named 'Workers') } 'worker defaults in task settings'
+    Click 'Workers'
+    Wait-For { (Named 'Worker defaults') -and (Named 'Maximum worker effort') -and (Named 'fixture-fast') } 'worker model and effort defaults'
+    $auto = 'Auto-delegate project tasks'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
+    Click $auto
+    Click 'Image generation'
+    Wait-For { !(Named $auto) } 'independent Studio image defaults'
+    Click 'Workers'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
+    Click $auto
+    Click 'Image generation'
+    Click 'Providers'
+    Wait-For { Named 'Workers' } 'provider details preserved'
+    Click 'Codex'
+    Wait-For { !(Named 'Workers') } 'collapsed provider'
+    Click 'Close settings'
 }
 function Save-PrivateWindow($path) {
     $rect = [WorkshopPointer+Rect]::new()
@@ -609,6 +665,11 @@ try {
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($ProviderTasksOnly) {
+        Test-ProviderTasks
+        Write-Output "Provider task settings passed. Screenshot in $root"
+        return
+    }
     if ($UsageOnly) {
         $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
         foreach ($width in @(1060,800)) {
@@ -770,25 +831,9 @@ try {
     if ((Named 'Add to message').Current.BoundingRectangle.Right -gt (Named 'Subagents').Current.BoundingRectangle.X -or (Named 'Subagents').Current.BoundingRectangle.Right -gt (Named 'Chat model and effort').Current.BoundingRectangle.X) { throw 'Expected Add and Subagents on the left, model on the right' }
     Click 'Add to message'
     Wait-For { Named 'Paste text' } 'add menu'
-    Click 'Subagents'
-    Wait-For { Named 'Edit global defaults' } 'defaults entry in Subagents'
-    Click 'Edit global defaults'
-    Wait-For { Named 'Subagent defaults' } 'global settings'
-    $toggle = [System.Windows.Automation.TogglePattern]::Pattern
-    $auto = 'Auto-delegate project tasks'
-    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
-    Click $auto
-    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'delegation by request'
-    Click 'Back to chat settings'
-    Wait-For { Named 'Edit global defaults' } 'chat settings restored'
-    Click 'Edit global defaults'
-    Wait-For { $control = Named $auto; $control -and $control.GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
-    Click $auto
-    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'restore automatic delegation'
-    Click 'Subagents'
-    Wait-For { !(Named 'Subagent defaults') } 'toggle closed'
+    Test-ProviderTasks
     Click 'Settings'
-    Wait-For { Named 'Sign in' } 'provider accounts'
+    Wait-For { Named 'Sign in to Codex' } 'provider accounts'
     Click 'Appearance'
     Wait-For { (Named 'Workshop Dark') -and (Named 'Catppuccin Mocha') } 'appearance presets'
     Click 'Solarized Light'
@@ -816,15 +861,15 @@ try {
     Click 'Confirm removal'
     Wait-For { (Named 'Workshop Dark') -and !(Named 'Sea glass') -and !(Named 'Edit theme') } 'removed theme and restored default'
     Click 'Providers'
-    Wait-For { Named 'Sign in' } 'back to provider accounts'
+    Wait-For { Named 'Sign in to Codex' } 'back to provider accounts'
     Wait-For { Named 'Gemini CLI' } 'Gemini provider row'
     Click 'Trust project'
     Wait-For { Named 'Reset trust' } 'Gemini project tools enabled'
     Click 'Reset trust'
     Wait-For { Named 'Trust project' } 'Gemini project trust reset'
-    Click 'Sign in'
-    Wait-For { (Named 'Sign-in finished.') -and (Named 'Signed in') -and (Named 'Sign out') } 'Codex provider login result'
-    Click 'Sign out'
+    Click 'Sign in to Codex'
+    Wait-For { (Named 'Sign-in finished.') -and (Test-Path (Join-Path $root 'codex.session')) -and (Named 'Sign out of Codex') } 'Codex provider login result'
+    Click 'Sign out of Codex'
     Wait-For { Named 'Confirm' } 'sign-out confirmation'
     Click 'Confirm'
     Wait-For { (Named 'Signed out.') -and !(Test-Path (Join-Path $root 'codex.session')) } 'provider logout result'
