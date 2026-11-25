@@ -17,6 +17,7 @@ function Invoke-WorkshopUiTest([string]$Script, [hashtable]$Parameters = @{}) {
         $encodedPath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($request))
         $code = @'
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + $env:PSModulePath
 $request = Import-Clixml -LiteralPath ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('REQUEST_PATH')))
 try {
     . $request.Helper
