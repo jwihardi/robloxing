@@ -341,7 +341,7 @@ impl App {
                     .arg(selected()?.folder(&store))
                     .spawn()?;
             }
-            "export" | "attach" | "edit" => {
+            "export" | "attach" | "annotate" | "edit" => {
                 let job = selected()?;
                 ensure!(job.state == "Ready", "Select a finished asset.");
                 let folder = job.folder(&store);
@@ -369,6 +369,9 @@ impl App {
                             temp.persist(&path)?;
                             studio.set_message(format!("Saved {}", path.display()).into());
                         }
+                    }
+                    "annotate" => {
+                        self.annotate(&file)?;
                     }
                     "attach" => {
                         ensure!(!ui.get_busy(), "Wait for the current chat operation.");

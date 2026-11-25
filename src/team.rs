@@ -440,6 +440,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         return Value::Array(available);
     }
     let lead_tools = json!([
+        {"type":"function","name":"workshop_send_image","description":"Show a finished or revised project image in this chat so the creator can view and draw on it. Use a path inside the current project copy and a short descriptive caption. Built-in image generation results already appear automatically.","inputSchema":{"type":"object","properties":{"path":string,"caption":string},"required":["path","caption"],"additionalProperties":false}},
         {"type":"function","name":"workshop_find_assets","description":"Find ready game art in this project's Game studio when the creator asks to use an existing image or model. Use the returned ID with workshop_import_asset to copy it into the review.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
         {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
         {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
@@ -771,6 +772,35 @@ pub(crate) async fn dispatch(
 ) -> Result<String> {
     let args = &request["arguments"];
     match request["tool"].as_str() {
+        Some("workshop_send_image") if !store.worker => {
+            let work = dunce::canonicalize(store.work(lead.id))?;
+            let path = args["path"].as_str().context("Choose a project image.")?;
+            let path = std::path::Path::new(path);
+            let path = path.strip_prefix(&work).unwrap_or(path);
+            ensure!(
+                path.components().all(|part| matches!(
+                    part,
+                    std::path::Component::CurDir | std::path::Component::Normal(_)
+                )),
+                "Choose an image in the current project copy."
+            );
+            let path =
+                dunce::canonicalize(work.join(path)).context("Cannot find the project image.")?;
+            ensure!(
+                path.starts_with(&work) && path.is_file(),
+                "Choose an image in the current project copy."
+            );
+            let caption = args["caption"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("Describe the image.")?;
+            let image = image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .decode()?;
+            store.post_chat_image(lead.id, &image, &clipped(caption, 500))?;
+            notify(provider::ReplyUpdate::TranscriptChanged);
+            return Ok("Image added to the chat.".into());
+        }
         Some("workshop_report_result") if store.worker => {
             let kind = match args["status"].as_str() {
                 Some("complete") => "worker/complete",

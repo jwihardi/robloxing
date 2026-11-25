@@ -182,6 +182,9 @@ async fn open_thread(stdin: &mut ChildStdin, store: &Store, a: &Attempt) -> Resu
         );
     }
     let mut instructions = params["developerInstructions"].as_str().unwrap().to_owned();
+    if !store.worker {
+        instructions.push_str(" Return locally rendered or revised project images with workshop_send_image so the creator can mark them up in chat. Built-in image generation results already appear automatically.");
+    }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
     if a.session.is_empty() {
         params["dynamicTools"] = team::tools(store.worker);
@@ -376,7 +379,7 @@ async fn exchange(
     notify: &dyn Fn(ReplyUpdate<'_>),
 ) -> Result<bool> {
     if !a.session.is_empty() {
-        store.event(a.id, "user/followup", Some(&prompt.text))?;
+        store.message_event(a.id, "user/followup", prompt)?;
         notify(ReplyUpdate::TranscriptChanged);
     }
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
@@ -503,7 +506,7 @@ async fn exchange(
                     };
                     send(stdin,json!({"id":next_id,"method":"turn/steer","params":{"threadId":session,"expectedTurnId":turn,"input":input}})).await?;
                     next_id += 1;
-                    store.event(a.id, "steer/sent", Some(&text.text))?;
+                    store.message_event(a.id, "steer/sent", &text)?;
                     notify(ReplyUpdate::TranscriptChanged);
                 }
             },
@@ -630,6 +633,26 @@ async fn exchange(
                         notify(ReplyUpdate::Context(context));
                     }
                     if !method.ends_with("delta") && !method.ends_with("Delta") {
+                        if !store.worker
+                            && method == "item/completed"
+                            && v["params"]["threadId"] == session.as_str()
+                            && v["params"]["turnId"] == turn
+                            && v["params"]["item"]["type"] == "imageGeneration"
+                        {
+                            let saved =
+                                art::generated_image(&v["params"]["item"], &store.work(a.id))
+                                    .and_then(|image| {
+                                        store.post_chat_image(a.id, &image, "Generated image")
+                                    });
+                            if let Err(error) = saved {
+                                store.event(
+                                    a.id,
+                                    "workshop/image_error",
+                                    Some(&format!("Could not load the generated image. {error:#}")),
+                                )?;
+                            }
+                            notify(ReplyUpdate::TranscriptChanged);
+                        }
                         let kind = if method == "item/completed"
                             && v["params"]["item"]["type"] == "agentMessage"
                         {

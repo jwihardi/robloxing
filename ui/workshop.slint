@@ -1,6 +1,8 @@
 import { Theme, ThemeColors, Action } from "common.slint";
 export { ThemeColors } from "common.slint";
 import { AppearancePage } from "appearance.slint";
+import { SketchPad, Sketch } from "sketch.slint";
+export { Sketch } from "sketch.slint";
 export { Appearance, ThemeChoice } from "appearance.slint";
 import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
 import { Studio, StudioPage } from "studio.slint";
@@ -8,7 +10,7 @@ export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string }
@@ -547,7 +549,7 @@ export component Desk inherits Window {
     }
     function new-chat() {root.chat-query=""; root.compact-context=false; root.open-panel=OpenPanel.closed; root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
     public function open-asset-draft() {
-        root.studio-open = false;
+        root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
         if !root.writable { root.new-chat(); }
         composer.focus-input();
     }
@@ -633,9 +635,9 @@ export component Desk inherits Window {
             }
         }
 
-        if root.home && root.turns.length == 0: VerticalLayout {
+        if root.home && root.turns.length == 0 && !Sketch.expanded: VerticalLayout {
             x: (parent.width - self.width) / 2; width: min(pane.measure, 590px);
-            height: self.preferred-height; y: max(58px, ((root.project == "" ? pane.height : composer.y) - self.height) / 2);
+            height: self.preferred-height; y: max(58px, ((root.project == "" ? pane.height : pad.y) - self.height) / 2);
             alignment: start; spacing: 13px;
             HorizontalLayout { alignment: start; height: 41px; WorkshopMark { width: 38px; height:38px; } }
             Text { text: root.project == "" ? "Open a project" : "What are we building?"; font-size: pane.width < 580px ? 29px : 36px;
@@ -652,13 +654,18 @@ export component Desk inherits Window {
         }
         transcript := ScrollView {
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: 61px; width: pane.measure;
-            height: max(50px, (root.writable ? composer.y : closed.y) - self.y - 18px);
+            height: max(0px, (root.writable ? pad.y : closed.y) - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 8px; padding-bottom: 10px; spacing: 25px; alignment: start;
                 if !root.home && root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
-                for turn in root.turns: Rectangle {
-                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px);
+                for turn in root.turns: message := Rectangle {
+                    private property <bool> has-sketch: turn.sketch.width > 0;
+                    private property <bool> enlarged;
+                    private property <length> sketch-width: self.enlarged ? self.width - 32px : min(304px, self.width * 0.84 - 32px);
+                    private property <length> image-height: min(self.enlarged ? 540px : 212px, self.sketch-width * turn.sketch.height / max(1,turn.sketch.width));
+                    private property <length> preview-height: self.has-sketch ? self.image-height + 42px : 0px;
+                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
                     if turn.shot != "": Action { width: min(248px,parent.width); x: parent.width - self.width; height: parent.height;
                         label: "Sent screenshot"; icon-only: true; selected: true;
                         Image { x: 6px; y: 6px; width: parent.width - 12px; height: 130px; source: root.shot-image(turn.shot,false); image-fit: contain; }
@@ -674,11 +681,22 @@ export component Desk inherits Window {
                     }
                     bubble := Rectangle {
                         visible: turn.dispatch-id == 0 && turn.shot == "";
-                        width: turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
+                        width: message.has-sketch ? min(parent.width, max(message.sketch-width + 32px, min(parent.width * 0.84,body.preferred-width + 32px))) : turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
                         x: turn.from-user ? parent.width - self.width : 0px; height: parent.height;
                         background: turn.from-user ? Theme.surface : transparent; border-radius: 14px;
+                        if message.has-sketch: Action {
+                            x: 16px; y: 11px; width: message.sketch-width; height: message.image-height;
+                            label: turn.from-user ? (message.enlarged ? "Reduce sketch" : "Enlarge sketch") : (message.enlarged ? "Reduce image" : "Enlarge image"); icon-only: true;
+                            Image { width: parent.width; height: parent.height; source: turn.sketch; image-fit: contain; }
+                            activate => {message.enlarged = !message.enlarged;}
+                        }
+                        if message.has-sketch: Action {
+                            x: 12px; y: message.image-height + 15px; width: 106px; height: 29px;
+                            label: "Annotate"; glyph: "\u{e104}"; enabled: !root.busy || root.running;
+                            activate => {Sketch.annotate(turn.image-path,false);}
+                        }
                         body := TextInput {
-                            x: turn.from-user ? 16px : 0px; y: turn.from-user ? 11px : 0px;
+                            x: turn.from-user ? 16px : 0px; y: (turn.from-user ? 11px : 0px) + message.preview-height;
                             width: parent.width - 2 * self.x; height: self.preferred-height;
                             text: turn.body; color: turn.delivery-notice ? Theme.muted : Theme.text; font-size: turn.delivery-notice ? 14px : 16px;
                             read-only: true; single-line: false; wrap: word-wrap;
@@ -702,11 +720,17 @@ export component Desk inherits Window {
                 }
             }
         }
+        pad := SketchPad {
+            visible: composer.visible && composer.enabled && (Sketch.expanded || Sketch.has-content);
+            x: composer.x; width: composer.width;
+            height: !self.visible ? 0px : Sketch.expanded ? min(55px + (self.width - 20px) / max(0.001,Sketch.ratio), max(110px, composer.y - 74px), pane.height * 0.47) : 44px;
+            y: composer.y - self.height - (self.visible ? 6px : 0px);
+        }
         composer := Composer {
             visible: root.project != "" && root.writable;
             x: (parent.width - self.width) / 2; width: pane.measure;
             y: parent.height - self.height - feedback.height - 24px;
-            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: !root.capturing && (root.has-content(root.draft) || root.attachments.length > 0);
+            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || root.attachments.length > 0 || Sketch.has-content);
             attachments: root.attachments; remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
@@ -779,6 +803,7 @@ export component Desk inherits Window {
         x: rail.width; width: root.width - self.x; height: root.height;
         escape => {root.close-shot();} init => {back.focus();}
         back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.close-shot();} }
+        Action { x: parent.width - 140px; y: 18px; width: 120px; label: "Annotate"; glyph: "\u{e104}"; selected: true; enabled: root.project != "" && (!root.busy || root.running); activate => {Sketch.annotate(root.viewing-shot,true);} }
         Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
             source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
     }
@@ -931,6 +956,7 @@ export component Desk inherits Window {
             Action { label: "Attach folder…"; glyph: "\u{e8b7}"; activate => {root.dismiss-panel(); root.attach(true);} }
             Rectangle { height: 1px; background: Theme.line; }
             Action { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
+            Action { label: "Draw a sketch"; glyph: "\u{e104}"; activate => {root.dismiss-panel(); Sketch.edit(); composer.focus-input();} }
             Action { label: "Take screenshot"; glyph: "\u{e722}"; enabled: !root.capturing; activate => {root.dismiss-panel(); root.take-screenshot();} }
         }
     }

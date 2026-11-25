@@ -146,6 +146,12 @@ pub(crate) async fn generate_image(
 ) -> Result<()> {
     let item=art_turn(dir,"Use the built-in image generation tool to produce one game image for the user's art brief. Use no other tools.",
         &format!("Art direction: {style}.\n{prompt}"), Value::Null,"imageGeneration",inference).await?;
+    let decoded = generated_image(&item, dir)?;
+    decoded.save(dir.join("image.png"))?;
+    Ok(())
+}
+
+pub(super) fn generated_image(item: &Value, cwd: &Path) -> Result<image::DynamicImage> {
     ensure!(
         item["failure"].is_null(),
         "Image generation failed: {}",
@@ -153,7 +159,8 @@ pub(crate) async fn generate_image(
     );
     let decoded = if let Some(path) = item["savedPath"]
         .as_str()
-        .filter(|p| Path::new(p).is_file())
+        .map(|p| cwd.join(p))
+        .filter(|p| p.is_file())
     {
         ImageReader::open(path)?.with_guessed_format()?.decode()?
     } else {
@@ -165,8 +172,7 @@ pub(crate) async fn generate_image(
             .with_guessed_format()?
             .decode()?
     };
-    decoded.save(dir.join("image.png"))?;
-    Ok(())
+    Ok(decoded)
 }
 
 pub(crate) async fn design_model(

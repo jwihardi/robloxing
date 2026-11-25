@@ -98,6 +98,7 @@ class FixtureProvider {
             if(!msg.ContainsKey("method")){
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
+                if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
                 if(Convert.ToString(msg["id"])=="block") Done("Waiting for the release input.");
                 continue;
             }
@@ -151,6 +152,17 @@ class FixtureProvider {
                 }
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
+                if (message == "Show the reference drawing" && Mode("chat-image.png")) {
+                    Send(new {method="item/completed", @params=new {threadId=session,turnId=turn,
+                        item=new {type="imageGeneration",status="completed",savedPath=Path.Combine(Dir,"chat-image.png")}}});
+                    Done("Here is the reference."); continue;
+                }
+                if (message == "Move the highlighted area to the right" && Mode("chat-image.png")) {
+                    File.Copy(Path.Combine(Dir,"capture-fixture.png"),"revised.png",true);
+                    Send(new {id="posted-image",method="item/tool/call",@params=new {threadId=session,turnId=turn,
+                        callId="posted-image",tool="workshop_send_image",arguments=new {path="revised.png",caption="Revised layout"}}});
+                    continue;
+                }
                 if (Mode("small-talk")) { Done("Hello!"); continue; }
                 if (Mode("blocker")) {
                     File.WriteAllText("answer.txt","partial");

@@ -1,0 +1,84 @@
+import { Action, Theme } from "common.slint";
+
+export global Sketch {
+    in property <bool> expanded;
+    in property <bool> has-ink;
+    in property <bool> on-image;
+    in property <bool> replacing;
+    out property <bool> has-content: has-ink || on-image;
+    out property <float> ratio: preview.width / max(1, preview.height);
+    in property <image> preview;
+    in-out property <color> pen: #28303b;
+    callback edit();
+    callback annotate(string, bool);
+    callback close(bool);
+    callback replace(bool);
+    callback begin(float, float, color);
+    callback extend(float, float);
+    callback finish();
+    callback undo();
+}
+
+component InkChoice inherits Action {
+    in property <color> ink;
+    icon-only: true; width: 36px; height: 36px;
+    selected: Sketch.pen == ink;
+    accessible-description: self.selected ? "Selected pen" : "Pen color";
+    Rectangle {
+        width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+        border-radius: 10px; background: root.ink; border-width: 1px; border-color: #ffffff88;
+        if root.selected: Text { text: "✓"; color: root.ink == #ffffff ? #28303b : white; horizontal-alignment: center; vertical-alignment: center; font-size: 13px; }
+    }
+    activate => {Sketch.pen = root.ink;}
+}
+
+export component SketchPad inherits Rectangle {
+    background: Theme.surface; border-radius: 14px;
+    border-color: Theme.line; border-width: 1px;
+    if Sketch.replacing: HorizontalLayout {
+        x: 10px; y: 5px; width: parent.width - 20px; height: 36px; spacing: 6px;
+        Text { text: "Replace this draft drawing?"; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; }
+        Action { label: "Keep drawing"; width: 109px; activate => {Sketch.replace(false);} }
+        Action { label: "Replace"; width: 78px; selected: true; activate => {Sketch.replace(true);} }
+    }
+    if Sketch.expanded && !Sketch.replacing: HorizontalLayout {
+        x: 10px; y: 5px; width: parent.width - 20px; height: 36px; spacing: 4px;
+        Text { text: Sketch.on-image ? "Annotate image" : "Sketch"; color: Theme.text; font-size: 15px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+        InkChoice { label: "Graphite pen"; ink: #28303b; }
+        InkChoice { label: "Blue pen"; ink: #326ac4; }
+        InkChoice { label: "Red pen"; ink: #bc4546; }
+        if Sketch.on-image: InkChoice { label: "White pen"; ink: #ffffff; }
+        Action { label: "Undo stroke"; glyph: "\u{e7a7}"; icon-only: true; width: 38px;
+            enabled: Sketch.has-ink; activate => {Sketch.undo();} }
+        Action { label: "Done"; width: 62px; selected: true; activate => {Sketch.close(false);} }
+    }
+    if Sketch.expanded: paper := Rectangle {
+        height: min(parent.height - 55px, (parent.width - 20px) / max(0.001, Sketch.ratio));
+        width: self.height * Sketch.ratio; x: (parent.width - self.width) / 2; y: 45px;
+        background: #faf9f6; border-radius: 6px; clip: true;
+        accessible-role: groupbox; accessible-label: "Sketch canvas";
+        Image { width: parent.width; height: parent.height; source: Sketch.preview; image-fit: fill; }
+        touch := TouchArea {
+            enabled: !Sketch.replacing;
+            mouse-cursor: crosshair;
+            // Normalize against the paper so resized drafts and exports use identical coordinates.
+            private property <float> nx: self.mouse-x / self.width;
+            private property <float> ny: self.mouse-y / self.height;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    Sketch.begin(self.nx, self.ny, Sketch.pen);
+                } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                    Sketch.extend(self.nx, self.ny); Sketch.finish();
+                } else if e.kind == PointerEventKind.cancel { Sketch.finish(); }
+            }
+            moved => {if self.pressed {Sketch.extend(self.nx, self.ny);}}
+        }
+    }
+    if !Sketch.expanded: HorizontalLayout {
+        x: 10px; y: 5px; width: parent.width - 20px; height: 34px; spacing: 8px;
+        Image { width: 58px; source: Sketch.preview; image-fit: contain; }
+        Text { text: Sketch.on-image ? "Image markup" : "Sketch"; color: Theme.text; font-size: 14px; vertical-alignment: center; horizontal-stretch: 1; }
+        Action { label: "Edit sketch"; width: 88px; activate => {Sketch.edit();} }
+        Action { label: "Remove sketch"; glyph: "\u{e711}"; icon-only: true; width: 34px; activate => {Sketch.close(true);} }
+    }
+}

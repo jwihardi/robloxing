@@ -5,6 +5,7 @@ mod desktop_studio;
 mod desktop_tasks;
 mod inspector;
 mod preferences;
+mod sketch;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
 use std::{
@@ -26,7 +27,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
     StudioFinished(PathBuf, i64, Result<()>),
@@ -81,6 +82,7 @@ struct App {
     chat_offset: Cell<usize>,
     drafts: RefCell<std::collections::HashMap<Option<i64>, String>>,
     attachments: RefCell<std::collections::HashMap<Option<i64>, Vec<PathBuf>>>,
+    sketches: RefCell<std::collections::HashMap<Option<i64>, sketch::Draft>>,
     draft_policy: RefCell<Option<WorkerPolicy>>,
     id: Cell<Option<i64>>,
     control: RefCell<Option<tokio::sync::mpsc::UnboundedSender<Control>>>,
@@ -452,11 +454,13 @@ impl App {
         let mut rows = Vec::new();
         if !more {
             rows.extend(self.preceding_shots(store, Some(attempt.id))?);
-            rows.push(ChatTurn {
+            let mut first = ChatTurn {
                 from_user: true,
                 body: attempt.prompt.as_str().into(),
                 ..Default::default()
-            });
+            };
+            sketch::set_turn_image(&mut first, store.task_chat_image(attempt.task)?);
+            rows.push(first);
         }
         for message in messages {
             if message.screenshot {
@@ -472,6 +476,7 @@ impl App {
                 body: message.text.into(),
                 ..Default::default()
             };
+            sketch::set_turn_image(&mut turn, message.image);
             if !message.dispatched_workers.is_empty() {
                 let mut batch = Vec::new();
                 for id in message.dispatched_workers {
@@ -986,6 +991,7 @@ impl App {
                     self.displayed.set(None);
                     self.drafts.borrow_mut().clear();
                     self.attachments.borrow_mut().clear();
+                    self.sketches.borrow_mut().clear();
                     self.render_attachments();
                     self.draft_policy.take();
                     self.catalog.replace(Default::default());
@@ -1046,6 +1052,7 @@ impl App {
                         self.chat_offset.set(0);
                     }
                     self.attachments.borrow_mut().remove(&self.id.get());
+                    self.sketches.borrow_mut().remove(&self.id.get());
                     self.id.set(Some(id));
                     self.render_attachments();
                     ui.set_draft("".into());
@@ -1143,16 +1150,31 @@ impl App {
         self.ui
             .unwrap()
             .set_attachments(ModelRc::new(VecModel::from(rows)));
+        self.render_sketch();
     }
-    fn draft_message(&self) -> provider::Message {
-        provider::Message::compose(
+    fn draft_message(&self) -> Result<provider::Message> {
+        let mut message = provider::Message::compose(
             &self.ui.unwrap().get_draft(),
             self.attachments
                 .borrow()
                 .get(&self.id.get())
                 .cloned()
                 .unwrap_or_default(),
-        )
+        );
+        if let Some(sketch) = self
+            .sketches
+            .borrow()
+            .get(&self.id.get())
+            .filter(|d| d.has_content())
+        {
+            let slot = self.store.borrow();
+            let store = slot.as_ref().context("Open a project to send a sketch.")?;
+            message.files.push(store.save_chat_image(&sketch.png()?)?);
+            if message.text.trim().is_empty() {
+                message.text = "Sketch".into();
+            }
+        }
+        Ok(message)
     }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
         let ui = self.ui.unwrap();
@@ -1161,7 +1183,7 @@ impl App {
                 return Ok(());
             }
             let draft = ui.get_draft().to_string();
-            if capture::requested(&draft) {
+            if capture::requested(&draft) && !ui.global::<Sketch>().get_has_content() {
                 self.capture(Some(draft));
                 return Ok(());
             }
@@ -1170,7 +1192,7 @@ impl App {
             let c = if op == "cancel" {
                 Control::Cancel
             } else {
-                Control::Steer(self.draft_message())
+                Control::Steer(self.draft_message()?)
             };
             self.control
                 .borrow()
@@ -1180,6 +1202,7 @@ impl App {
                 .map_err(|_| anyhow::anyhow!("Run has ended."))?;
             if op == "steer" {
                 self.attachments.borrow_mut().remove(&self.id.get());
+                self.sketches.borrow_mut().remove(&self.id.get());
                 self.render_attachments();
                 ui.set_draft("".into());
             }
@@ -1190,7 +1213,11 @@ impl App {
         }
         let store = self.store.borrow().clone().context("Open a project.")?;
         let id = self.id.get();
-        let draft = self.draft_message();
+        let draft = if matches!(op, "submit" | "resume") {
+            self.draft_message()?
+        } else {
+            "".into()
+        };
         let draft_policy = self.draft_policy.borrow().clone();
         let op = op.to_owned();
         let (tx, rx) = provider::channel();
@@ -1295,6 +1322,7 @@ fn main() -> Result<()> {
         chat_offset: Default::default(),
         drafts: Default::default(),
         attachments: Default::default(),
+        sketches: Default::default(),
         draft_policy: Default::default(),
         id: Cell::new(None),
         control: Default::default(),
@@ -1308,6 +1336,7 @@ fn main() -> Result<()> {
     });
     desktop_studio::connect(&ui, &app);
     desktop_tasks::connect(&ui, &app);
+    sketch::connect(&ui, &app);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();

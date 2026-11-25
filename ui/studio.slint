@@ -260,6 +260,7 @@ export component StudioPage inherits Rectangle {
         if Studio.jobs.length > 0: HorizontalLayout { height: 36px; spacing: 3px; alignment: start;
             if root.ready: Action { label: "Save as…"; width: 78px; selected: true; activate => {Studio.command("export");} }
             if root.ready: Action { label: "Attach to chat"; width: 110px; enabled: root.can-attach; activate => {Studio.command("attach");} }
+            if root.ready && root.images: Action { label: "Annotate"; width: 88px; enabled: root.can-attach; activate => {Studio.command("annotate");} }
             if root.ready && root.models: Action { label: "Open in Blender"; width: 120px; activate => {Studio.command("edit");} }
             if root.ready && root.models: Action { label: "Re-export"; width: 81px; enabled: !Studio.working; activate => {Studio.command("rebuild");} }
             if Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted": Action {

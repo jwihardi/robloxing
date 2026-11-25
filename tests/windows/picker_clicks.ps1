@@ -1,9 +1,10 @@
-param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly)
+param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
+    if ($SketchOnly) { $parameters.SketchOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
     return
 }
@@ -117,6 +118,153 @@ function Choose-Attachment($title,$path) {
     }
     Wait-For { [WorkshopPointer]::Dialog($proc.Id,$title) -eq [IntPtr]::Zero } "$title closing"
 }
+function Draw-SketchLine {
+    $rect = (Named 'Sketch canvas').Current.BoundingRectangle
+    foreach ($i in 0..8) {
+        $p = [WorkshopPointer+Point]::new()
+        $p.X = [int]($rect.X + $rect.Width * (0.20 + $i * 0.075))
+        $p.Y = [int]($rect.Y + $rect.Height * (0.65 - $i * 0.0375))
+        [void][WorkshopPointer]::ScreenToClient($appWindow,[ref]$p)
+        $pos = [IntPtr](($p.Y -shl 16) -bor ($p.X -band 65535))
+        [void][WorkshopPointer]::PostMessage($appWindow,0x200,[int]($i -gt 0),$pos)
+        if ($i -eq 0) { [void][WorkshopPointer]::PostMessage($appWindow,0x201,1,$pos) }
+        Start-Sleep -Milliseconds 15
+    }
+    [void][WorkshopPointer]::PostMessage($appWindow,0x202,0,$pos)
+}
+function Open-SketchPad {
+    Click 'Add to message'
+    Wait-For { Named 'Draw a sketch' } 'sketch menu item'
+    Click 'Draw a sketch'
+    Wait-For { Named 'Sketch canvas' } 'drawing surface'
+}
+function Test-Sketch {
+    Wait-For { (Named 'New chat').Current.IsEnabled } 'available project'
+    Click 'New chat'
+    Wait-For { (Named 'Message Codex') -and !(Named 'Send message').Current.IsEnabled } 'empty sketch draft'
+    Open-SketchPad
+    Draw-SketchLine
+    Wait-For { (Named 'Send message').Current.IsEnabled } 'sketch-only send'
+    Click 'Undo stroke'
+    Wait-For { !(Named 'Send message').Current.IsEnabled } 'undo last stroke'
+    Click 'Done'
+    Wait-For { !(Named 'Sketch canvas') -and !(Named 'Edit sketch') } 'close empty sketch'
+    $caption = 'Move this control along the blue line'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($caption)
+    Open-SketchPad
+    Click 'Blue pen'
+    Draw-SketchLine
+    Click 'Done'
+    Wait-For { Named 'Edit sketch' } 'collapsed sketch'
+    Click 'Edit sketch'
+    Wait-For { (Named 'Undo stroke').Current.IsEnabled } 'editable saved ink'
+    Click 'Done'
+    [void](New-Item -ItemType File -Force (Join-Path $root 'record-inference'))
+    [void](New-Item -ItemType File -Force (Join-Path $root 'small-talk'))
+    Click 'Send message'
+    Wait-For { (Named 'Enlarge sketch') -and (Named 'New chat').Current.IsEnabled } 'sent drawing in transcript'
+    $wire = Get-ChildItem $root -Filter 'lead-*.json' | ForEach-Object {
+        Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+    } | Where-Object { $_.input[0].text -eq $caption } | Select-Object -First 1
+    $images = @($wire.input | Where-Object type -eq 'localImage')
+    if ($images.Count -ne 1) { throw 'Expected the caption and sketch in the same provider turn' }
+    $bitmap = [Drawing.Bitmap]::new($images[0].path)
+    try {
+        if ($bitmap.Width -ne 960 -or $bitmap.Height -ne 480) { throw 'Unexpected sketch dimensions' }
+        foreach ($fraction in @(0.27,0.5,0.73)) {
+            $x = [int]($bitmap.Width * $fraction)
+            $y = [int]($bitmap.Height * (0.75 - 0.5 * $fraction))
+            $blueInk = $false
+            foreach ($dy in -5..5) {
+                $pixel = $bitmap.GetPixel($x, $y + $dy)
+                if ($pixel.B -gt $pixel.R + 50) { $blueInk = $true }
+            }
+            if (!$blueInk) { throw "Missing blue ink near ($x,$y) in provider image" }
+        }
+    } finally { $bitmap.Dispose() }
+    Click 'Enlarge sketch'
+    Wait-For { Named 'Reduce sketch' } 'expanded sent drawing'
+    Click 'Reduce sketch'
+    Open-SketchPad
+    Draw-SketchLine
+    Click 'Done'
+    Wait-For { Named 'Remove sketch' } 'removable sketch'
+    Click 'Remove sketch'
+    Wait-For { !(Named 'Send message').Current.IsEnabled } 'removed sketch'
+    Open-SketchPad
+    Draw-SketchLine
+    Click 'Send message'
+    Wait-For { (Get-ChildItem $root -Filter 'lead-*.json' | ForEach-Object {
+        $request = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+        if ($request.input[0].text -eq 'Sketch' -and ($request.input | Where-Object type -eq 'localImage')) { $request }
+    }) } 'sketch-only follow-up delivered'
+    Wait-For { (Named 'New chat').Current.IsEnabled -and !(Named 'Stop response') } 'finished sketch follow-up'
+    Click 'New chat'
+    Click $caption
+    Wait-For {
+        $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
+        $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'Enlarge sketch')
+        $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition).Count -eq 2
+    } 'both drawings restored with their messages'
+    Wait-For { (Named 'New chat').Current.IsEnabled } 'start image feedback test'
+    Click 'New chat'
+    $reference = Join-Path $root 'chat-image.png'
+    $portrait = [Drawing.Bitmap]::FromFile($env:WORKSHOP_TEST_CAPTURE_IMAGE)
+    try {
+        $portrait.RotateFlip([Drawing.RotateFlipType]::Rotate90FlipNone)
+        $portrait.Save($reference,[Drawing.Imaging.ImageFormat]::Png)
+    } finally { $portrait.Dispose() }
+    $originalHash = (Get-FileHash -LiteralPath $reference).Hash
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Show the reference drawing')
+    Click 'Send message'
+    Wait-For { (Named 'Enlarge image') -and (Named 'New chat').Current.IsEnabled } 'agent image reply'
+    $refinement = 'Move the highlighted area to the right'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($refinement)
+    Click 'Annotate'
+    Wait-For { Named 'White pen' } 'image markup toolbar'
+    $paper = (Named 'Sketch canvas').Current.BoundingRectangle
+    if ([Math]::Abs(($paper.Width / $paper.Height) - 140/200) -gt 0.03) { throw 'Portrait image stretched on the canvas' }
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
+    $priorSize = $window.Current.BoundingRectangle
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,800,650,0x16)
+    Wait-For { $p=(Named 'Sketch canvas').Current.BoundingRectangle; $p.Height -gt 0 -and $p.Bottom -le (Named 'Message Codex').Current.BoundingRectangle.Top } 'narrow image pad and caption'
+    Click 'Red pen'
+    Draw-SketchLine
+    Click 'Undo stroke'
+    Wait-For { !(Named 'Undo stroke').Current.IsEnabled -and (Named 'Send message').Current.IsEnabled } 'undo keeps the source image'
+    Draw-SketchLine
+    Click 'Send message'
+    $received = {
+        Get-ChildItem $root -Filter 'lead-*.json' | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json } |
+            Where-Object { $_.input[0].text -eq $refinement } | Select-Object -First 1
+    }
+    Wait-For { & $received } 'refinement request sent with annotations'
+    $marked = @((& $received).input | Where-Object type -eq 'localImage')
+    if ($marked.Count -ne 1 -or $marked[0].path -eq $reference -or (Get-FileHash -LiteralPath $reference).Hash -ne $originalHash) { throw 'Expected one independent marked-up copy' }
+    $before = [Drawing.Bitmap]::new($reference)
+    $after = [Drawing.Bitmap]::new($marked[0].path)
+    try {
+        if ($after.Size -ne $before.Size) { throw 'Annotation changed the source dimensions' }
+        foreach ($pt in @([Drawing.Point]::new(1,1),[Drawing.Point]::new(100,45))) {
+            if ($before.GetPixel($pt.X,$pt.Y).ToArgb() -ne $after.GetPixel($pt.X,$pt.Y).ToArgb()) { throw 'An unmarked source pixel changed' }
+        }
+        $red = $false
+        foreach ($y in 95..105) {
+            $pixel = $after.GetPixel(70,$y)
+            if ($pixel.R -gt $pixel.B + 50) { $red = $true }
+        }
+        if (!$red) { throw 'Missing red mark on the image delivered for refinement' }
+    } finally { $before.Dispose(); $after.Dispose() }
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$priorSize.Width,[int]$priorSize.Height,0x16)
+    Wait-For {
+        $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
+        $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'Codex reply')
+        $captions = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition) |
+            ForEach-Object { $_.GetCurrentPattern($valuePattern).Current.Value }
+        (Named 'Enlarge image') -and $captions -contains 'Revised layout'
+    } 'revised project image returned to the chat'
+    'Sketch drawing, delivery, history and annotated image refinement passed'
+}
 # A GUI-subsystem executable must accept automation arguments and finish with redirected output.
 $command = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--headless --project `"$project`" open")
 $command.UseShellExecute = $false
@@ -156,8 +304,9 @@ try {
     $rail = (Named 'Game studio').Current.BoundingRectangle
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
-    Click 'Explore project'
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($SketchOnly) { Test-Sketch; return }
+    Click 'Explore project'
     Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -like 'Give me a tour*' } 'editable starter prompt'
     Click 'Hide sidebar'
     Wait-For { (Named 'Show sidebar') -and !(Named 'Search chats') } 'hidden chat sidebar'
@@ -352,6 +501,14 @@ try {
     Wait-For { Test-Path -LiteralPath $exported } 'saved studio asset'
     $exportedImage=[Drawing.Bitmap]::FromFile($exported)
     try {if($exportedImage.Width -ne 40 -or $exportedImage.Height -ne 24){throw 'Incorrect exported asset'}} finally {$exportedImage.Dispose()}
+    Click 'Annotate'
+    Wait-For { (Named 'Sketch canvas') -and (Named 'White pen') } 'Studio image open for feedback'
+    Click 'Done'
+    Wait-For { Named 'Remove sketch' } 'Studio image in draft'
+    Click 'Remove sketch'
+    Wait-For { !(Named 'Remove sketch') } 'unattach Studio image'
+    Click 'Game studio'
+    Wait-For { Named 'Attach to chat' } 'Studio image result'
     Click 'Attach to chat'
     Wait-For { Named 'Remove image.png' } 'asset attached to chat draft'
     Click 'Remove image.png'
@@ -392,9 +549,16 @@ try {
     $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     Wait-For { $albumWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.Name -like 'View screenshot *'} } 'saved album image'
     Click 'Screenshots'
+    Wait-For { Named 'Sent screenshot' } 'return from album to chat'
     Click 'Sent screenshot'
     Wait-For { Named 'Back' } 'full-size screenshot'
-    Click 'Back'
+    Click 'Annotate'
+    Wait-For { (Named 'Sketch canvas') -and (Named 'White pen') } 'screenshot open for feedback'
+    Click 'Done'
+    Wait-For { Named 'Remove sketch' } 'screenshot markup draft'
+    Click 'Remove sketch'
+    Wait-For { !(Named 'Remove sketch') } 'discard screenshot markup'
+    Wait-For { Named 'Outputs' } 'return from screenshot to chat'
     Click 'Outputs'
     Wait-For { Named 'Open screenshot 1' } 'reopened chat outputs'
     Click 'Outputs'
@@ -446,6 +610,7 @@ try {
     Wait-For { Named 'Acceptance · File contains its name' } 'worker acceptance criteria'
     Click 'Close activity'
     Wait-For { !(Named 'Session activity') } 'return to transcript'
+    Test-Sketch
     'Headless mode, navigation, composer, Studio, provider settings and agent activity passed'
 } finally {
     [TestDesktop]::CloseApp($proc, $appWindow)

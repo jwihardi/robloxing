@@ -63,6 +63,7 @@ pub struct Store {
 
 pub struct ChatMessage {
     pub screenshot: bool,
+    pub image: Option<PathBuf>,
     pub id: i64,
     pub from_user: bool,
     pub delivery_notice: bool,
@@ -100,10 +101,11 @@ impl Store {
         let db = self.db.lock().unwrap();
         let order = if descending { "DESC" } else { "ASC" };
         let mut stmt = db.prepare(&format!(
-            "SELECT id,kind,summary FROM events
-            WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
+            "SELECT events.id,kind,summary,event_images.path FROM events
+            LEFT JOIN event_images ON event_images.event=events.id
+            WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair')
+                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -121,12 +123,16 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                image: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
                 from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
                 delivery_notice: matches!(
                     kind.as_str(),
-                    "steer/error" | "steer/unavailable" | "workshop/repair"
+                    "steer/error"
+                        | "steer/unavailable"
+                        | "workshop/repair"
+                        | "workshop/image_error"
                 ),
                 dispatched_workers,
                 text,
@@ -377,6 +383,44 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?,
         )
     }
+    fn attached_chat_image<'a>(&self, files: &'a [PathBuf]) -> Option<&'a PathBuf> {
+        let folder = self.dir.join("chat-images");
+        files.iter().find(|path| {
+            path.parent() == Some(&folder)
+                && path.extension().is_some_and(|ext| ext == "png")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        })
+    }
+    pub fn task_chat_image(&self, task: i64) -> Result<Option<PathBuf>> {
+        Ok(self
+            .attached_chat_image(&self.task_attachments(task)?)
+            .cloned())
+    }
+    pub fn save_chat_image(&self, png: &[u8]) -> Result<PathBuf> {
+        let folder = self.dir.join("chat-images");
+        let path = folder.join(format!("{}.png", digest(png)));
+        if !path.is_file() {
+            fs::create_dir_all(&folder)?;
+            let mut temp = tempfile::NamedTempFile::new_in(folder)?;
+            temp.write_all(png)?;
+            temp.persist(&path)?;
+        }
+        Ok(path)
+    }
+    pub(crate) fn post_chat_image(
+        &self,
+        id: i64,
+        image: &image::DynamicImage,
+        caption: &str,
+    ) -> Result<()> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png)?;
+        let path = self.save_chat_image(png.get_ref())?;
+        self.event_with_image(id, "workshop/image", Some(caption), Some(&path))
+    }
     pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
         let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3 WHERE id=?1 AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort])?;
         ensure!(
@@ -466,12 +510,38 @@ impl Store {
         Ok(())
     }
     pub fn event(&self, id: i64, kind: &str, action: Option<&str>) -> Result<()> {
+        self.event_with_image(id, kind, action, None)
+    }
+    fn message_event(&self, id: i64, kind: &str, message: &provider::Message) -> Result<()> {
+        self.event_with_image(
+            id,
+            kind,
+            Some(&message.text),
+            self.attached_chat_image(&message.files),
+        )
+    }
+    fn event_with_image(
+        &self,
+        id: i64,
+        kind: &str,
+        action: Option<&str>,
+        image: Option<&PathBuf>,
+    ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         tx.execute(
             "INSERT INTO events(attempt,kind,summary) VALUES(?1,?2,?3)",
             params![id, kind, action],
         )?;
+        if let Some(path) = image {
+            tx.execute(
+                "INSERT INTO event_images(event,path) VALUES(?1,?2)",
+                params![
+                    tx.last_insert_rowid(),
+                    path.to_str().context("Unreadable sketch path")?
+                ],
+            )?;
+        }
         if let Some(action) = action {
             tx.execute(
                 "UPDATE attempts SET action=?2 WHERE id=?1",
