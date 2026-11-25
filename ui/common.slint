@@ -1,0 +1,78 @@
+export struct ThemeColors {
+    rail: color,
+    brand-fill: color,
+    popup: color,
+    track: color,
+    canvas: color,
+    sidebar: color,
+    surface: color,
+    selected: color,
+    line: color,
+    text: color,
+    muted: color,
+    accent: color,
+    accent-hover: color,
+    disabled: color,
+    ample: color,
+    halfway: color,
+    scarce: color,
+}
+
+export global Theme {
+    in-out property <ThemeColors> colors;
+    out property <color> rail: colors.rail;
+    out property <color> brand-fill: colors.brand-fill;
+    out property <color> popup: colors.popup;
+    out property <color> track: colors.track;
+    out property <color> canvas: colors.canvas;
+    out property <color> sidebar: colors.sidebar;
+    out property <color> surface: colors.surface;
+    out property <color> selected: colors.selected;
+    out property <color> line: colors.line;
+    out property <color> text: colors.text;
+    out property <color> muted: colors.muted;
+    out property <color> accent: colors.accent;
+    out property <color> accent-hover: colors.accent-hover;
+    out property <color> disabled: colors.disabled;
+    out property <color> ample: colors.ample;
+    out property <color> halfway: colors.halfway;
+    out property <color> scarce: colors.scarce;
+}
+
+export component Action inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <string> glyph;
+    in property <bool> icon-only: false;
+    in property <bool> primary: false;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback activate();
+    height: 36px;
+    border-radius: primary ? 18px : 9px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    background: primary ? (enabled ? (area.pressed ? Theme.muted : area.has-hover ? Theme.accent-hover : Theme.accent) : Theme.disabled)
+        : enabled && area.pressed ? Theme.track : selected ? Theme.selected : enabled && area.has-hover ? Theme.surface : transparent;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.activate(); } }
+    forward-focus: focus;
+    HorizontalLayout {
+        padding-left: root.icon-only ? 0px : 10px; padding-right: root.icon-only ? 0px : 10px;
+        spacing: 10px; alignment: root.icon-only ? center : start;
+        if root.glyph != "": Text { text: root.glyph; vertical-alignment: center; font-size: 15px;
+            font-family: "Segoe MDL2 Assets"; color: root.primary && root.enabled ? Theme.canvas : Theme.muted; accessible-role: none; }
+        if !root.icon-only && root.detail == "": Text { text: root.label; vertical-alignment: center; font-size: 14px;
+            color: root.primary && root.enabled ? Theme.canvas : root.enabled ? Theme.text : Theme.muted; overflow: elide; accessible-role: none; }
+        if root.detail != "": VerticalLayout { alignment: center; spacing: 2px;
+            Text { text: root.label; color: Theme.text; font-size: 14px; overflow: elide; min-width: 0px; accessible-role: none; }
+            Text { text: root.detail; color: Theme.muted; font-size: 12px; overflow: elide; min-width: 0px; accessible-role: none; }
+        }
+    }
+    area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.activate(); } }
+    focus := FocusScope { focus-on-click: false; width: 0px; enabled: root.enabled;
+        key-pressed(e) => { if e.text == Key.Return || e.text == Key.Space { root.activate(); return accept; } return reject; }
+    }
+}

@@ -1,15 +1,20 @@
-param([string]$Binary = ".\target\release\workshop.exe")
+param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'TestDesktop.ps1')
+if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
+    $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
+    if ($StudioOnly) { $parameters.StudioOnly = $true }
+    Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
+    return
+}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
-    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref Point p);
-    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point p);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -30,13 +35,13 @@ public class WorkshopPointer {
         },IntPtr.Zero);
         return found;
     }
-    public static IntPtr FilenameEdit(IntPtr dialog) {
+    public static IntPtr FilenameEdit(IntPtr dialog, bool save) {
         IntPtr found=IntPtr.Zero;
         EnumChildWindows(dialog, delegate(IntPtr child, IntPtr param) {
             var name=new System.Text.StringBuilder(128);
             GetClassName(child,name,name.Capacity);
             int id=GetDlgCtrlID(child);
-            if(name.ToString()=="Edit" && (id==1148 || id==1152)){found=child;return false;}
+            if(name.ToString()=="Edit" && (id==1148 || id==1152 || (save && id==1001))){found=child;return false;}
             return true;
         },IntPtr.Zero);
         return found;
@@ -62,8 +67,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 
 function Named($name) {
     $proc.Refresh()
-    if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { return }
-    $window = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    if ($appWindow -eq [IntPtr]::Zero) { return }
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $name))
 }
@@ -73,7 +78,7 @@ function Wait-For([scriptblock]$condition, $description) {
         if (& $condition) { return }
         Start-Sleep -Milliseconds 50
     } while ([datetime]::UtcNow -lt $deadline)
-    $window = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     $names = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name } | Where-Object { $_ }
     throw "Timed out waiting for $description. Visible controls: $($names -join ', ')"
 }
@@ -84,7 +89,7 @@ function Click($name, [double]$fraction = 0.5) {
     $point = [WorkshopPointer+Point]::new()
     $point.X = [int]($rect.X + $rect.Width * $fraction)
     $point.Y = [int]($rect.Y + $rect.Height / 2)
-    $handle = $proc.MainWindowHandle
+    $handle = $appWindow
     [void][WorkshopPointer]::ScreenToClient($handle, [ref]$point)
     $pos = [IntPtr](($point.Y -shl 16) -bor ($point.X -band 65535))
     # InvokePattern skips hit testing and would pass even if focus swallowed the press.
@@ -97,9 +102,10 @@ function Choose-Attachment($title,$path) {
     $dialog = [System.Windows.Automation.AutomationElement]::FromHandle([WorkshopPointer]::Dialog($proc.Id,$title))
     if ($dialog.Current.ProcessId -ne $proc.Id) { throw 'Unexpected picker process' }
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
-    Wait-For { [WorkshopPointer]::IsWindowVisible($handle) -and [WorkshopPointer]::IsWindowVisible([WorkshopPointer]::FilenameEdit($handle)) } 'visible native filename editor'
+    $save = $title -eq 'Save studio asset'
+    Wait-For { [WorkshopPointer]::IsWindowVisible($handle) -and [WorkshopPointer]::IsWindowVisible([WorkshopPointer]::FilenameEdit($handle,$save)) } 'visible native filename editor'
+    $edit = [WorkshopPointer]::FilenameEdit($handle,$save)
     [void]$proc.WaitForInputIdle(1000)
-    $edit = [WorkshopPointer]::FilenameEdit($handle)
     [void][WorkshopPointer]::SendMessage($edit,0x000c,0,$path)
     [void][WorkshopPointer]::PostMessage($handle,0x0111,1,[WorkshopPointer]::GetDlgItem($handle,1))
     if ($title -eq 'Attach a folder') {
@@ -111,10 +117,66 @@ function Choose-Attachment($title,$path) {
     }
     Wait-For { [WorkshopPointer]::Dialog($proc.Id,$title) -eq [IntPtr]::Zero } "$title closing"
 }
-$proc = Start-Process -FilePath $fixtureApp -ArgumentList $project -WindowStyle Normal -PassThru
+# A GUI-subsystem executable must accept automation arguments and finish with redirected output.
+$command = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--headless --project `"$project`" open")
+$command.UseShellExecute = $false
+$command.CreateNoWindow = $true
+$command.RedirectStandardOutput = $true
+$command.RedirectStandardError = $true
+$smoke = [Diagnostics.Process]::Start($command)
 try {
-    [void]$proc.WaitForInputIdle(10000)
+    if (!$smoke.WaitForExit(10000)) { $smoke.Kill(); throw 'Headless command did not exit' }
+    if ($smoke.ExitCode -ne 0 -or $smoke.StandardOutput.ReadToEnd() -notlike "*Opened $project*") {
+        throw "Headless project open failed. $($smoke.StandardError.ReadToEnd())"
+    }
+} finally { $smoke.Dispose() }
+# Exercise the real region picker against a known image without sampling the workstation.
+Add-Type -AssemblyName System.Drawing
+$env:WORKSHOP_TEST_CAPTURE_IMAGE = Join-Path $root 'capture-fixture.png'
+$surface = [Drawing.Bitmap]::new(200, 140)
+try {
+    $graphics = [Drawing.Graphics]::FromImage($surface)
+    try { $graphics.FillRectangle([Drawing.Brushes]::SteelBlue, 30, 25, 60, 40) } finally { $graphics.Dispose() }
+    $surface.Save($env:WORKSHOP_TEST_CAPTURE_IMAGE, [Drawing.Imaging.ImageFormat]::Png)
+} finally { $surface.Dispose() }
+$automation = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--project `"$project`" list")
+$automation.UseShellExecute = $false
+$automation.CreateNoWindow = $true
+$automation.RedirectStandardError = $true
+$automation.EnvironmentVariables['WORKSHOP_HEADLESS'] = '1'
+$headless = [Diagnostics.Process]::Start($automation)
+try {
+    if (!$headless.WaitForExit(10000)) { $headless.Kill(); throw 'Automation mode opened the desktop app' }
+    if ($headless.ExitCode -ne 0) { throw $headless.StandardError.ReadToEnd() }
+} finally { $headless.Dispose() }
+$proc = [TestDesktop]::StartApp($fixtureApp, $project)
+try {
+    $appWindow = [TestDesktop]::WaitForWindow($proc)
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
+    $rail = (Named 'Game studio').Current.BoundingRectangle
+    $search = (Named 'Search chats').Current.BoundingRectangle
+    if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
+    Click 'Explore project'
+    $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -like 'Give me a tour*' } 'editable starter prompt'
+    Click 'Hide sidebar'
+    Wait-For { (Named 'Show sidebar') -and !(Named 'Search chats') } 'hidden chat sidebar'
+    Click 'Show sidebar'
+    Wait-For { Named 'Search chats' } 'restored chat sidebar'
+    $normal = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,800,650,0x16)
+    Wait-For { Named 'Show sidebar' } 'compact layout'
+    Click 'Show sidebar'
+    Wait-For { Named 'Search chats' } 'chat drawer'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+    Wait-For { (Named 'Show sidebar') -and !(Named 'Search chats') } 'Escape closes chat drawer'
+    [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$normal.Width,[int]$normal.Height,0x16)
+    Wait-For { Named 'Search chats' } 'full-width chat sidebar'
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('missing chat')
+    Wait-For { Named 'No matching chats' } 'empty chat search'
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('')
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('')
     Click 'Message Codex'
     Click 'Chat model and effort'
     Wait-For { Named 'Chat reasoning effort' } 'first-click effort picker'
@@ -141,10 +203,49 @@ try {
     Wait-For { Named 'Edit global defaults' } 'defaults entry in Subagents'
     Click 'Edit global defaults'
     Wait-For { Named 'Subagent defaults' } 'global settings'
+    $toggle = [System.Windows.Automation.TogglePattern]::Pattern
+    $auto = 'Auto-delegate project tasks'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
+    Click $auto
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'delegation by request'
+    Click 'Back to chat settings'
+    Wait-For { Named 'Edit global defaults' } 'chat settings restored'
+    Click 'Edit global defaults'
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
+    Click $auto
+    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'restore automatic delegation'
     Click 'Subagents'
     Wait-For { !(Named 'Subagent defaults') } 'toggle closed'
     Click 'Settings'
     Wait-For { Named 'Sign in' } 'provider accounts'
+    Click 'Appearance'
+    Wait-For { (Named 'Workshop Dark') -and (Named 'Catppuccin Mocha') } 'appearance presets'
+    Click 'Solarized Light'
+    Click 'New theme'
+    Wait-For { Named 'Theme CSS editor' } 'theme editor'
+    $source = (Named 'Theme CSS editor').GetCurrentPattern($valuePattern)
+    if ($source.Current.Value -notlike '*--canvas: #fdf6e3*') { throw 'New theme did not start from selected preset' }
+    $file = Join-Path $root 'Sea glass.css'
+    Set-Content -LiteralPath $file -Encoding ascii -Value ':root { --accent: #9ddfc7; }'
+    Click 'Load file…'
+    Choose-Attachment 'Load theme CSS' $file
+    Wait-For { (Named 'Theme name').GetCurrentPattern($valuePattern).Current.Value -eq 'Sea glass' } 'loaded theme name'
+    $source.SetValue('--unknown: #123')
+    Wait-For { !(Named 'Save theme').Current.IsEnabled } 'invalid theme blocked'
+    $source.SetValue(':root { --accent: #9ddfc7; --canvas: #19232a; }')
+    Wait-For { (Named 'Save theme').Current.IsEnabled } 'valid theme preview'
+    Click 'Save theme'
+    Wait-For { (Named 'Sea glass') -and (Named 'Edit theme') } 'saved custom theme'
+    Click 'Edit theme'
+    (Named 'Theme name').GetCurrentPattern($valuePattern).SetValue('Sea foam')
+    Click 'Cancel'
+    Wait-For { (Named 'Sea glass') -and !(Named 'Sea foam') } 'cancel leaves theme intact'
+    Click 'Edit theme'
+    Click 'Remove theme'
+    Click 'Confirm removal'
+    Wait-For { (Named 'Workshop Dark') -and !(Named 'Sea glass') -and !(Named 'Edit theme') } 'removed theme and restored default'
+    Click 'Providers'
+    Wait-For { Named 'Sign in' } 'back to provider accounts'
     Click 'Sign in'
     Wait-For { Named 'Sign out' } 'provider login result'
     Click 'Sign out'
@@ -162,6 +263,9 @@ try {
     (Named 'Filter list').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
     Click 'Official marketplaces'
     Wait-For { Named 'Sample plugin' } 'marketplace catalog'
+    if (Named 'Plugin source') { throw 'Manual install form should start collapsed' }
+    Click 'Install from source'
+    Wait-For { Named 'Plugin source' } 'manual plugin install'
     (Named 'Plugin source').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('sample@fixture')
     Click 'Install'
     Wait-For { Named 'Uninstall' } 'installed plugin'
@@ -173,6 +277,7 @@ try {
     $skill = Join-Path $root 'sample-skill'
     [void](New-Item -ItemType Directory -Path $skill)
     Set-Content (Join-Path $skill 'SKILL.md') "---`nname: sample-skill`ndescription: Test skill`n---"
+    Click 'Install from source'
     Wait-For { Named 'Skill source' } 'skill installer'
     (Named 'Skill source').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($skill)
     Click 'Install'
@@ -184,40 +289,96 @@ try {
     Click 'Confirm'
     Wait-For { !(Test-Path (Join-Path $env:CODEX_HOME 'skills/sample-skill')) } 'skill removal'
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
+    Click 'Tasks'
+    Wait-For { Named 'Task defaults' } 'per-task defaults'
+    Click 'fixture-fast'
+    Click 'Decompilation'
+    Wait-For { (Named 'Functions per run') -and (Named 'Generate an AI summary') } 'local analysis controls'
+    Click 'Generate an AI summary'
+    Wait-For { Named 'Maximum summary effort' } 'independent summary policy'
+    Click 'Model design'
+    Wait-For { (Named 'Maximum task effort') -and !(Named 'Generate an AI summary') } 'model design policy'
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
+    Add-Type -AssemblyName System.Drawing
+    $studioImage=[Drawing.Bitmap]::new(40,24)
+    try {$studioImage.Save((Join-Path $root 'studio-image.png'),[Drawing.Imaging.ImageFormat]::Png)} finally {$studioImage.Dispose()}
+    Click 'Game studio'
+    Wait-For { Named 'Art brief' } 'image workspace'
+    Click 'Run settings'
+    Wait-For { (Named 'Use task defaults') -and (Named 'fixture-fast') } 'inherited image policy'
+    Click 'Use task defaults'
+    Wait-For { Named 'Maximum task effort' } 'editable one-run policy'
+    Click 'Any available model'
+    Click 'fixture-deep'
+    Click 'Maximum task effort' 0.5
+    Wait-For { (Named 'Maximum task effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Value -eq 1 } 'per-run high effort'
+    Click 'Back to studio'
+    Wait-For { Named 'Custom run settings' } 'override ready'
+    [void](New-Item -ItemType File (Join-Path $root 'record-inference'))
+    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Forest icon')
+    [void](New-Item -ItemType File (Join-Path $root 'studio.hold'))
+    Click 'Generate image'
+    Wait-For { Named 'Cancel run' } 'cancellable studio job'
+    Click 'Cancel run'
+    Wait-For { $retry=Named 'Retry run'; $retry -and $retry.Current.IsEnabled } 'cancelled job saved in library'
+    Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
+    Click 'Retry run'
+    Wait-For { Named 'Attach to chat' } 'image job ready after retry'
+    Click 'Details'
+    Wait-For { Named 'Run details' } 'selected run metadata'
+    Click 'Preview'
+    Wait-For { !(Named 'Run details') } 'selected image preview'
+    $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
+    if ($request.model -ne 'fixture-deep' -or $request.effort -ne 'high') { throw 'Retry lost the image model or effort override' }
+    Remove-Item -LiteralPath (Join-Path $root 'record-inference')
+    if (!(Named 'Run settings')) { throw 'One-run override was not consumed' }
+    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('no matching title')
+    Wait-For { Named 'No matching assets.' } 'filtered project library'
+    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    Wait-For { Named 'Attach to chat' } 'restored asset selection'
+    Click 'Models'
+    Wait-For { Named 'Model brief' } 'model workspace'
+    Click 'Ghidra'
+    Wait-For { Named 'Choose binary…' } 'Ghidra workspace'
+    Click 'Images'
+    Wait-For { Named 'Attach to chat' } 'return to generated image'
+    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Different brief')
+    Click 'Reuse settings'
+    Wait-For { (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq 'Forest icon' } 'reuse the saved art brief'
+    $exported=Join-Path $project 'forest.png'
+    Click 'Save as…'
+    Choose-Attachment 'Save studio asset' $exported
+    Wait-For { Test-Path -LiteralPath $exported } 'saved studio asset'
+    $exportedImage=[Drawing.Bitmap]::FromFile($exported)
+    try {if($exportedImage.Width -ne 40 -or $exportedImage.Height -ne 24){throw 'Incorrect exported asset'}} finally {$exportedImage.Dispose()}
+    Click 'Attach to chat'
+    Wait-For { Named 'Remove image.png' } 'asset attached to chat draft'
+    Click 'Remove image.png'
+    Wait-For { !(Named 'Remove image.png') } 'remove studio attachment'
+    if ($StudioOnly) { 'Game studio capture-independent UI checks passed'; return }
     Click 'Outputs'
     Wait-For { Named 'Screenshots you send in this chat appear here.' } 'empty chat outputs'
     Click 'Outputs'
     Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
-    Add-Type -AssemblyName System.Drawing
-    $fixtureWindow = $proc.MainWindowHandle
-    try {
-        [void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-1),10,10,0,0,0x0041)
-        $start = [WorkshopPointer+Point]::new(); $start.X = 380; $start.Y = 160
-        [void][WorkshopPointer]::ClientToScreen($fixtureWindow,[ref]$start)
-        Wait-For { [WorkshopPointer]::WindowFromPoint($start) -eq $fixtureWindow } 'fixture canvas on screen'
-        (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
-        Click 'Send message'
-        function CaptureWindow {
-            $helper = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='powershell.exe'" | Select-Object -First 1
-            if ($helper) {return [WorkshopPointer]::Dialog($helper.ProcessId,'Select a screenshot area')}
-            return [IntPtr]::Zero
-        }
-        Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'screen region picker'
-        $overlay = CaptureWindow
-        # Select only pixels inside the solid-color fixture.
-        [void][WorkshopPointer]::ScreenToClient($overlay,[ref]$start)
-        $down = ($start.Y -shl 16) -bor $start.X
-        $up = (($start.Y+40) -shl 16) -bor ($start.X+60)
-        [void][WorkshopPointer]::PostMessage($overlay,0x201,1,$down)
-        [void][WorkshopPointer]::PostMessage($overlay,0x200,1,$up)
-        [void][WorkshopPointer]::PostMessage($overlay,0x202,0,$up)
-        Wait-For { Named 'Sent screenshot' } 'local chat receipt'
-        $saved = Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png
-        $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
-        try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(30,20).ToArgb() -ne [Drawing.Color]::FromArgb(32,32,32).ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
-    } finally {[void][WorkshopPointer]::SetWindowPos($fixtureWindow,[IntPtr](-2),0,0,0,0,3)}
+    (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
+    Click 'Send message'
+    function CaptureWindow {
+        $helper = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='powershell.exe'" | Select-Object -First 1
+        if ($helper) {return [WorkshopPointer]::Dialog($helper.ProcessId,'Select a screenshot area')}
+        return [IntPtr]::Zero
+    }
+    Wait-For { [WorkshopPointer]::IsWindowVisible((CaptureWindow)) } 'screen region picker'
+    $overlay = CaptureWindow
+    $down = (25 -shl 16) -bor 30
+    $up = (65 -shl 16) -bor 90
+    [void][WorkshopPointer]::PostMessage($overlay,0x201,1,$down)
+    [void][WorkshopPointer]::PostMessage($overlay,0x200,1,$up)
+    [void][WorkshopPointer]::PostMessage($overlay,0x202,0,$up)
+    Wait-For { Named 'Sent screenshot' } 'local chat receipt'
+    $saved = Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png
+    $bitmap = [Drawing.Bitmap]::FromFile($saved.FullName)
+    try { if ($bitmap.Width -ne 60 -or $bitmap.Height -ne 40 -or $bitmap.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::SteelBlue.ToArgb() -or $bitmap.GetPixel(59,39).ToArgb() -ne [Drawing.Color]::SteelBlue.ToArgb()) {throw 'Incorrect captured region'} } finally {$bitmap.Dispose()}
     Wait-For { Named 'Open screenshot 1' } 'new screenshot in the top-right panel'
     $header = (Named 'Outputs').Current.BoundingRectangle
     $thumbnail = (Named 'Open screenshot 1').Current.BoundingRectangle
@@ -228,7 +389,7 @@ try {
     Wait-For { Named 'Open screenshot 1' } 'return to Outputs'
     Click 'View all screenshots'
     Wait-For { Named 'project' } 'album opened'
-    $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+    $albumWindow = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
     Wait-For { $albumWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.Name -like 'View screenshot *'} } 'saved album image'
     Click 'Screenshots'
     Click 'Sent screenshot'
@@ -278,10 +439,14 @@ try {
     if (($wire.input | Where-Object type -eq 'localImage').path -ne $image) { throw 'Provider did not receive the image' }
     if (($wire | ConvertTo-Json -Depth 12) -match 'capture\.png|/screenshot|shot-[A-Za-z0-9]+[/\\]') {throw 'Local screenshot entered model input'}
     if ($wire.input[0].text -notlike "*$project*") { throw 'Provider did not receive the selected folder' }
-    'Composer, attachments and provider settings passed'
+    Wait-For { Named 'Dispatched 2 subagents' } 'inline dispatch receipt'
+    Click 'Activity'
+    Wait-For { (Named 'Session activity') -and (Named 'Write left') } 'team activity panel'
+    Click 'Write left'
+    Wait-For { Named 'Acceptance · File contains its name' } 'worker acceptance criteria'
+    Click 'Close activity'
+    Wait-For { !(Named 'Session activity') } 'return to transcript'
+    'Headless mode, navigation, composer, Studio, provider settings and agent activity passed'
 } finally {
-    if (!$proc.HasExited) {
-        [void]$proc.CloseMainWindow()
-        if (!$proc.WaitForExit(5000)) { $proc.Kill(); $proc.WaitForExit() }
-    }
+    [TestDesktop]::CloseApp($proc, $appWindow)
 }

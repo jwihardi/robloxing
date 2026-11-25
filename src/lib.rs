@@ -1,7 +1,9 @@
 mod check;
+pub mod cli;
 mod git;
 pub mod provider;
 pub mod screenshots;
+pub mod studio;
 pub mod team;
 pub mod usage;
 pub mod worker_policy;
@@ -49,6 +51,7 @@ pub struct Attempt {
 pub struct Store {
     pub project: PathBuf,
     pub dir: PathBuf,
+    archive_dir: PathBuf,
     db: Mutex<Connection>,
     _lock: File,
     worker: bool,
@@ -100,7 +103,7 @@ impl Store {
             "SELECT id,kind,summary FROM events
             WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot')
+                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -121,7 +124,10 @@ impl Store {
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
                 from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
-                delivery_notice: matches!(kind.as_str(), "steer/error" | "steer/unavailable"),
+                delivery_notice: matches!(
+                    kind.as_str(),
+                    "steer/error" | "steer/unavailable" | "workshop/repair"
+                ),
                 dispatched_workers,
                 text,
             });
@@ -130,6 +136,13 @@ impl Store {
     }
     pub fn open(folder: &Path, home: &Path) -> Result<Self> {
         Self::open_role(folder, home, false)
+    }
+    pub fn project_data_dir(folder: &Path, home: &Path) -> Result<PathBuf> {
+        let path = dunce::canonicalize(folder)?;
+        let key = path.to_string_lossy();
+        #[cfg(windows)]
+        let key = key.to_lowercase();
+        Ok(home.join(digest(key.as_bytes())))
     }
     fn open_role(folder: &Path, home: &Path, worker: bool) -> Result<Self> {
         fs::create_dir_all(folder)?;
@@ -140,13 +153,10 @@ impl Store {
             !home.starts_with(&folder) && !folder.starts_with(&home),
             "Choose a project folder outside Workshop's data directory."
         );
-        let key = folder.to_string_lossy().to_string();
-        #[cfg(windows)]
-        let key = key.to_lowercase();
         let dir = if worker {
             home.clone()
         } else {
-            home.join(digest(key.as_bytes()))
+            Self::project_data_dir(&folder, &home)?
         };
         fs::create_dir_all(&dir)?;
         let lock = OpenOptions::new()
@@ -167,12 +177,18 @@ impl Store {
             )?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.worker_defaults(id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL)")?;
             Self::init_screenshots(&db)?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS preferences.studio_tools(name TEXT PRIMARY KEY, path TEXT NOT NULL)")?;
         }
         let tx = db.transaction()?;
-        for (table, column) in [
-            ("team_settings", "lead_effort"),
-            ("team_settings", "worker_effort"),
-            ("attempts", "effort"),
+        for (table, column, definition) in [
+            ("team_settings", "lead_effort", "TEXT NOT NULL DEFAULT ''"),
+            ("team_settings", "worker_effort", "TEXT NOT NULL DEFAULT ''"),
+            (
+                "team_settings",
+                "auto_delegate",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+            ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
         ] {
             let missing: bool = tx.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
@@ -181,11 +197,13 @@ impl Store {
             )?;
             if missing {
                 tx.execute_batch(&format!(
-                    "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 ))?;
             }
         }
         tx.commit()?;
+        studio::reports::recover(&dir, &mut db)?;
+        db.execute("UPDATE studio_jobs SET state='Interrupted', detail='Workshop closed during this run.' WHERE state IN ('Running','Queued')", [])?;
         db.execute(
             "INSERT OR IGNORE INTO projects(id,path) VALUES(1,?1)",
             [project.to_string_lossy()],
@@ -193,6 +211,7 @@ impl Store {
         db.execute("INSERT OR IGNORE INTO milestones(id,project,name) VALUES(1,1,'One recoverable change')", [])?;
         let store = Self {
             project,
+            archive_dir: dir.clone(),
             dir,
             db: Mutex::new(db),
             _lock: lock,
@@ -256,6 +275,23 @@ impl Store {
     }
     pub fn attempts_page(&self, offset: usize, limit: usize) -> Result<Vec<Attempt>> {
         self.attempt_range(None, limit.clamp(1, 101) as i64, offset as i64)
+    }
+    pub fn search_chats(&self, query: &str) -> Result<Vec<(i64, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT a.id, t.prompt FROM attempts a JOIN tasks t ON t.id=a.task
+            WHERE instr(lower(t.prompt),lower(?1)) > 0 ORDER BY a.id DESC LIMIT 40",
+        )?;
+        Ok(stmt
+            .query_map([query.trim()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn chat_position(&self, id: i64) -> Result<usize> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT count(*) FROM attempts WHERE id > ?1",
+            [id],
+            |row| row.get(0),
+        )?)
     }
     fn attempt_range(&self, id: Option<i64>, limit: i64, offset: i64) -> Result<Vec<Attempt>> {
         let db = self.db.lock().unwrap();
@@ -520,15 +556,9 @@ impl Store {
         }
         if !self.worker {
             ensure!(
-                self.workers(id)?.iter().all(|w| w.state == "finished"),
-                "Resolve the unfinished workers before accepting this change."
+                self.candidate_ready(&a, &self.workers(id)?)?,
+                "Resolve unfinished work and verify the final revision before accepting."
             );
-            if !self.workers(id)?.is_empty() {
-                ensure!(
-                    self.verified(id, &a.candidate, &self.team_settings()?)?,
-                    "The combined revision needs verification. Resume the lead before accepting."
-                );
-            }
             if a.state == "review" && a.patch.is_empty() && self.has_checkpoint(id)? {
                 return self.decide(id, "accepted", "Decisions saved for the next chat");
             }

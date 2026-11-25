@@ -1,5 +1,9 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod appearance;
 mod capture;
+mod desktop_studio;
+mod desktop_tasks;
+mod inspector;
 mod preferences;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
@@ -22,9 +26,10 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Desk, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
+    StudioFinished(PathBuf, i64, Result<()>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged(Result<String>, bool),
@@ -58,6 +63,10 @@ impl Updates {
     }
 }
 struct App {
+    inspector: RefCell<Option<inspector::Inspector>>,
+    task_overrides:
+        RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
+    studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_rows: RefCell<Vec<preferences::Row>>,
@@ -238,6 +247,75 @@ fn picker(
         effort_index,
     }
 }
+fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyChoices {
+    let mut models: Vec<_> = catalog.models.iter().map(|m| m.model.clone()).collect();
+    for id in &policy.models {
+        if !models.contains(id) {
+            models.push(id.clone());
+        }
+    }
+    let allowed = if policy.models.is_empty() {
+        "Any available model".into()
+    } else {
+        policy
+            .models
+            .iter()
+            .map(|id| model_label(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rows = ModelRc::new(VecModel::from(
+        models
+            .into_iter()
+            .map(|id| PolicyModel {
+                selected: policy.models.contains(&id),
+                label: model_label(&id).into(),
+                value: id.into(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let mut efforts: Vec<_> = EFFORTS
+        .iter()
+        .copied()
+        .filter(|level| {
+            *level == policy.max_effort
+                || catalog
+                    .models
+                    .iter()
+                    .filter(|m| policy.models.is_empty() || policy.models.contains(&m.model))
+                    .any(|m| {
+                        m.supported_reasoning_efforts
+                            .iter()
+                            .any(|e| e.reasoning_effort == *level)
+                    })
+        })
+        .map(|e| PickerOption {
+            value: e.into(),
+            label: if e == "none" {
+                "No reasoning".into()
+            } else if e == "xhigh" {
+                "Extra high".into()
+            } else {
+                capitalized(e).into()
+            },
+        })
+        .collect();
+    efforts.push(PickerOption {
+        value: "".into(),
+        label: "None".into(),
+    });
+    let cap_index = efforts
+        .iter()
+        .position(|e| e.value == policy.max_effort.as_str())
+        .unwrap_or(efforts.len() - 1) as i32;
+    PolicyChoices {
+        all_models: policy.models.is_empty(),
+        allowed_names: allowed.into(),
+        models: rows,
+        levels: ModelRc::new(VecModel::from(efforts)),
+        cap_index,
+    }
+}
 fn title(state: &str) -> &str {
     match state {
         "running" => "In progress",
@@ -258,6 +336,18 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
     } else {
         w.assignment.files.join(", ")
     };
+    let mut stats = vec![scope];
+    if w.tries > 1 {
+        let retries = w.tries - 1;
+        stats.push(if retries == 1 {
+            "1 retry".into()
+        } else {
+            format!("{retries} retries")
+        });
+    }
+    if let Some(tokens) = w.tokens {
+        stats.push(format!("{tokens} tokens"));
+    }
     WorkerRow {
         id: w.id as i32,
         title: w.assignment.title.into(),
@@ -273,16 +363,11 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
         }
         .into(),
         running: w.state == "running",
-        detail: format!("{}\n{}", w.assignment.deliverable, w.detail).into(),
-        stats: format!(
-            "{} · {} retries{}",
-            scope,
-            w.tries.saturating_sub(1),
-            w.tokens
-                .map(|t| format!(" · {t} tokens"))
-                .unwrap_or_default()
-        )
-        .into(),
+        assignment: w.assignment.deliverable.into(),
+        detail: w.detail.into(),
+        criteria: w.assignment.acceptance.into(),
+        dependencies: w.assignment.depends_on.join(", ").into(),
+        stats: stats.join(" · ").into(),
     }
 }
 impl App {
@@ -364,7 +449,6 @@ impl App {
             .into_iter()
             .map(worker_row)
             .collect();
-        let mut visible_workers = std::collections::HashSet::new();
         let mut rows = Vec::new();
         if !more {
             rows.extend(self.preceding_shots(store, Some(attempt.id))?);
@@ -393,7 +477,6 @@ impl App {
                 for id in message.dispatched_workers {
                     if let Some(worker) = workers.iter().find(|w| i64::from(w.id) == id) {
                         batch.push(worker.clone());
-                        visible_workers.insert(worker.id);
                     }
                 }
                 turn.dispatch_id = message.id as i32;
@@ -401,12 +484,7 @@ impl App {
             }
             rows.push(turn);
         }
-        // Keep workers from older pages and pre-dispatch-history chats accessible.
-        let other_workers: Vec<_> = workers
-            .into_iter()
-            .filter(|w| !visible_workers.contains(&w.id))
-            .collect();
-        ui.set_workers(ModelRc::new(VecModel::from(other_workers)));
+        ui.set_workers(ModelRc::new(VecModel::from(workers)));
         self.turns.set_vec(rows);
         if follow && before == i64::MAX {
             Self::scroll_after_layout(&ui);
@@ -433,6 +511,7 @@ impl App {
             picker(&catalog, &s.lead_model, &s.lead_effort, true)
         });
         ui.set_parallel_workers(s.parallelism == 2);
+        ui.set_auto_delegate(s.auto_delegate);
         Ok(())
     }
     fn selected_policy(&self, store: &Store) -> Result<Option<WorkerPolicy>> {
@@ -455,69 +534,12 @@ impl App {
             Some(p) => p,
             None => store.worker_defaults()?,
         };
-        let mut models: Vec<_> = catalog.models.iter().map(|m| m.model.clone()).collect();
-        for id in &policy.models {
-            if !models.contains(id) {
-                models.push(id.clone());
-            }
-        }
-        ui.set_all_models(policy.models.is_empty());
-        let allowed = if policy.models.is_empty() {
-            "Any available model".into()
-        } else {
-            policy
-                .models
-                .iter()
-                .map(|id| model_label(id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        ui.set_allowed_model_names(allowed.into());
-        ui.set_policy_models(ModelRc::new(VecModel::from(
-            models
-                .into_iter()
-                .map(|id| PolicyModel {
-                    selected: policy.models.contains(&id),
-                    label: model_label(&id).into(),
-                    value: id.into(),
-                })
-                .collect::<Vec<_>>(),
-        )));
-        let mut efforts: Vec<_> = EFFORTS
-            .iter()
-            .copied()
-            .filter(|level| {
-                *level == policy.max_effort
-                    || catalog
-                        .models
-                        .iter()
-                        .filter(|m| policy.models.is_empty() || policy.models.contains(&m.model))
-                        .any(|m| {
-                            m.supported_reasoning_efforts
-                                .iter()
-                                .any(|e| e.reasoning_effort == *level)
-                        })
-            })
-            .map(|e| PickerOption {
-                value: e.into(),
-                label: if e == "xhigh" {
-                    "Extra high".into()
-                } else {
-                    capitalized(e).into()
-                },
-            })
-            .collect();
-        efforts.push(PickerOption {
-            value: "".into(),
-            label: "None".into(),
-        });
-        ui.set_cap_index(
-            efforts
-                .iter()
-                .position(|e| e.value == policy.max_effort.as_str())
-                .unwrap_or(efforts.len() - 1) as i32,
-        );
-        ui.set_cap_levels(ModelRc::new(VecModel::from(efforts)));
+        let choices = policy_choices(&policy, catalog);
+        ui.set_all_models(choices.all_models);
+        ui.set_allowed_model_names(choices.allowed_names);
+        ui.set_policy_models(choices.models);
+        ui.set_cap_index(choices.cap_index);
+        ui.set_cap_levels(choices.levels);
         Ok(())
     }
     fn change_policy(&self, field: &str, value: &str) -> Result<()> {
@@ -621,6 +643,14 @@ impl App {
         self.settings_rows.borrow_mut().clear();
         self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
+        if matches!(tab.as_str(), "Tasks" | "Appearance") {
+            self.settings_read.take();
+            if tab == "Appearance" {
+                appearance::reload(&ui);
+            }
+            ui.set_settings_status("".into());
+            return;
+        }
         let p = preferences::Provider::from_label(&ui.get_settings_provider());
         let browse = ui.get_browse_plugins();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
@@ -737,6 +767,23 @@ impl App {
         ui.set_chat_choices(choices);
         Ok(())
     }
+    fn select_chat(&self, selected: Option<i64>) {
+        if selected == self.id.get() {
+            return;
+        }
+        let ui = self.ui.unwrap();
+        let mut drafts = self.drafts.borrow_mut();
+        drafts.insert(self.id.get(), ui.get_draft().to_string());
+        self.session.take();
+        self.id.set(selected);
+        self.render_attachments();
+        self.displayed.set(None);
+        ui.set_draft(drafts.remove(&selected).unwrap_or_default().into());
+        ui.set_notice("".into());
+        if let Err(e) = self.render() {
+            ui.set_notice(format!("{e:#}").into());
+        }
+    }
     fn render(&self) -> Result<()> {
         let ui = self.ui.unwrap();
         let slot = self.store.borrow();
@@ -758,7 +805,10 @@ impl App {
         ui.set_outputs(Self::screenshot_items(
             store.chat_screenshots(selected.map(|i| rows[i].id))?,
         ));
-        ui.set_running(false);
+        // Keep the live Stop control mounted when an activity update refreshes this chat.
+        ui.set_running(
+            selected.is_some_and(|i| rows[i].state == "running") && self.control.borrow().is_some(),
+        );
         if selected.is_none() {
             self.turns.set_vec(self.preceding_shots(store, None)?);
             ui.set_context_meter(context_meter(ContextUsage::default(), true));
@@ -769,7 +819,6 @@ impl App {
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
             ui.set_model_name(a.model.as_str().into());
-            ui.set_running(a.state == "running" && self.control.borrow().is_some());
             let done = matches!(
                 a.state.as_str(),
                 "review" | "failed" | "interrupted" | "cancelled"
@@ -784,11 +833,10 @@ impl App {
             );
             ui.set_checkpoint_only(checkpoint_only);
             let workers = store.workers(a.id)?;
-            let verified = workers.is_empty() || store.verified_candidate(a)?;
+            let verified = store.candidate_ready(a, &workers)?;
             ui.set_can_review(
                 ((done || a.state == "applying") && !a.patch.is_empty() || checkpoint_only)
-                    && verified
-                    && workers.iter().all(|w| w.state == "finished"),
+                    && verified,
             );
             ui.set_can_discard(done);
             ui.set_can_resume(done && !a.session.is_empty());
@@ -818,6 +866,30 @@ impl App {
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             match update {
+                Update::StudioFinished(project, id, result) => {
+                    let slot = self.store.borrow();
+                    if let Some(store) = slot.as_ref().filter(|s| s.project == project) {
+                        self.studio_cancel.take();
+                        let studio = ui.global::<Studio>();
+                        studio.set_working(false);
+                        studio.set_message(
+                            result
+                                .err()
+                                .map(|e| e.to_string())
+                                .unwrap_or_default()
+                                .into(),
+                        );
+                        let selected = i64::from(studio.get_selected().id);
+                        if ui.get_studio_open()
+                            && let Err(e) = self.refresh_studio(
+                                store,
+                                Some(if selected > 0 { selected } else { id }),
+                            )
+                        {
+                            studio.set_message(format!("{e:#}").into());
+                        }
+                    }
+                }
                 Update::Captured(project, attempt, command, result) => {
                     ui.set_capturing(false);
                     if matches!(result, Ok(true)) {
@@ -886,6 +958,19 @@ impl App {
                     }
                 }
                 Update::Opened(store) => {
+                    ui.invoke_reset_chat_navigation();
+                    self.task_overrides.borrow_mut().clear();
+                    self.close_inspector();
+                    self.studio_cancel.take();
+                    let studio = ui.global::<Studio>();
+                    ui.set_studio_open(false);
+                    studio.invoke_clear_project();
+                    studio.set_working(false);
+                    studio.set_message("".into());
+                    studio.set_jobs(Default::default());
+                    studio.set_selected(Default::default());
+                    studio.set_preview(Default::default());
+                    studio.set_code("".into());
                     ui.set_project(
                         store
                             .project
@@ -910,23 +995,31 @@ impl App {
                     ui.set_draft("".into());
                 }
                 Update::Models(project, result) => {
-                    if let Some(store) = self
-                        .store
-                        .borrow()
-                        .as_ref()
-                        .filter(|s| s.project == project)
-                    {
+                    let slot = self.store.borrow();
+                    let store = slot.as_ref();
+                    if store.map_or_else(
+                        || data_dir().is_ok_and(|home| home == project),
+                        |s| s.project == project,
+                    ) {
                         match result {
                             Ok(catalog) => {
-                                store.cache_worker_catalog(&catalog);
+                                if let Some(store) = store {
+                                    store.cache_worker_catalog(&catalog);
+                                }
                                 self.catalog.replace(catalog);
                                 ui.set_catalog_ready(true);
                                 ui.set_catalog_status("".into());
-                                self.render_settings(store)?;
+                                if let Some(store) = store {
+                                    self.render_settings(store)?;
+                                }
+                                if ui.global::<Studio>().get_editing_run()
+                                    || (ui.get_settings_open() && ui.get_settings_tab() == "Tasks")
+                                {
+                                    self.task_settings("open", "")?;
+                                }
                             }
                             Err(e) => ui.set_catalog_status(
-                                format!("Couldn’t load Codex models. Refresh in Subagents. {e}")
-                                    .into(),
+                                format!("Couldn’t load Codex models. {e}").into(),
                             ),
                         }
                     }
@@ -1168,10 +1261,26 @@ impl App {
     }
 }
 fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    let project = args.next();
+    if project.as_deref() == Some(std::ffi::OsStr::new("--headless")) {
+        return workshop::cli::execute(std::iter::once("workshop --headless".into()).chain(args));
+    }
+    if std::env::var_os("WORKSHOP_HEADLESS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return workshop::cli::execute(
+            std::iter::once("workshop".into())
+                .chain(project)
+                .chain(args),
+        );
+    }
     let ui = Desk::new()?;
+    appearance::connect(&ui);
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
+        inspector: Default::default(),
+        task_overrides: Default::default(),
+        studio_cancel: Default::default(),
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
@@ -1197,6 +1306,8 @@ fn main() -> Result<()> {
         receiver: rx,
         session: Default::default(),
     });
+    desktop_studio::connect(&ui, &app);
+    desktop_tasks::connect(&ui, &app);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();
@@ -1243,15 +1354,16 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
-    ui.on_save_parallel(move |parallel| {
+    ui.on_save_scheduling(move |auto, parallel| {
         let result = (|| -> Result<()> {
             let slot = a.store.borrow();
             let store = slot.as_ref().context("Open a project")?;
             let mut s = store.team_settings()?;
-            let previous_limit = s.parallelism;
+            let changed = s.auto_delegate != auto || (s.parallelism == 2) != parallel;
+            s.auto_delegate = auto;
             s.parallelism = if parallel { 2 } else { 1 };
             store.configure_team(&s)?;
-            if s.parallelism != previous_limit {
+            if changed {
                 // The lead receives its worker limit when opening or resuming its thread.
                 a.session.take();
             }
@@ -1277,6 +1389,8 @@ fn main() -> Result<()> {
     ui.on_reload_models(move || {
         if let Some(store) = a.store.borrow().as_ref() {
             a.load_models(store.project.clone());
+        } else if let Ok(home) = data_dir() {
+            a.load_models(home);
         }
     });
     ui.set_turns(app.turns.clone().into());
@@ -1331,6 +1445,52 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
+    ui.on_find_chats(move |query| {
+        if query.trim().is_empty() {
+            return Default::default();
+        }
+        let slot = a.store.borrow();
+        let Some(store) = slot.as_ref() else {
+            return Default::default();
+        };
+        match store.search_chats(&query) {
+            Ok(rows) => ModelRc::new(VecModel::from(
+                rows.into_iter()
+                    .map(|(id, prompt)| PickerOption {
+                        value: id.to_string().into(),
+                        label: prompt.lines().next().unwrap_or("Untitled chat").into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Err(error) => {
+                a.ui.unwrap().set_notice(error.to_string().into());
+                Default::default()
+            }
+        }
+    });
+    let a = app.clone();
+    ui.on_select_hit(move |value| {
+        let ui = a.ui.unwrap();
+        if ui.get_busy() {
+            return;
+        }
+        let result = (|| -> Result<()> {
+            let id = value.parse::<i64>()?;
+            let position = a
+                .store
+                .borrow()
+                .as_ref()
+                .context("Open a project first")?
+                .chat_position(id)?;
+            a.chat_offset.set(position / 40 * 40);
+            a.select_chat(Some(id));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            ui.set_notice(error.to_string().into());
+        }
+    });
+    let a = app.clone();
     ui.on_select_row(move |i| {
         if a.ui.unwrap().get_busy() {
             return;
@@ -1338,21 +1498,7 @@ fn main() -> Result<()> {
         let selected = usize::try_from(i)
             .ok()
             .and_then(|i| a.attempts.borrow().get(i).map(|r| r.id));
-        if selected == a.id.get() {
-            return;
-        }
-        let ui = a.ui.unwrap();
-        let mut drafts = a.drafts.borrow_mut();
-        drafts.insert(a.id.get(), ui.get_draft().to_string());
-        a.session.take();
-        a.id.set(selected);
-        a.render_attachments();
-        a.displayed.set(None);
-        ui.set_draft(drafts.remove(&selected).unwrap_or_default().into());
-        ui.set_notice("".into());
-        if let Err(e) = a.render() {
-            ui.set_notice(format!("{e:#}").into());
-        }
+        a.select_chat(selected);
     });
     let a = app.clone();
     ui.on_operate(move |op| {
@@ -1360,7 +1506,7 @@ fn main() -> Result<()> {
             a.ui.unwrap().set_notice(format!("{e:#}").into());
         }
     });
-    let path = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| {
+    let path = project.map(PathBuf::from).or_else(|| {
         fs::read_to_string(data_dir().ok()?.join("last-project.txt"))
             .ok()
             .map(PathBuf::from)

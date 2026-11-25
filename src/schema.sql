@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, attempt INTEGER NOT
 
 CREATE TABLE IF NOT EXISTS team_settings(id INTEGER PRIMARY KEY CHECK(id=1), lead_model TEXT NOT NULL,
     worker_model TEXT NOT NULL, parallelism INTEGER NOT NULL CHECK(parallelism IN (1,2)), check_args TEXT NOT NULL,
+    auto_delegate INTEGER NOT NULL DEFAULT 1,
     lead_effort TEXT NOT NULL DEFAULT '', worker_effort TEXT NOT NULL DEFAULT '');
 INSERT OR IGNORE INTO team_settings(id,lead_model,worker_model,parallelism,check_args) VALUES(1,'','',2,'[]');
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL REFERENCES attempts,
@@ -31,3 +32,16 @@ CREATE TABLE IF NOT EXISTS context_usage(attempt INTEGER PRIMARY KEY REFERENCES 
 CREATE TABLE IF NOT EXISTS verified_team(lead INTEGER PRIMARY KEY REFERENCES attempts, tree TEXT NOT NULL, check_args TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS chat_worker_policy(attempt INTEGER PRIMARY KEY REFERENCES attempts, policy TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS studio_jobs(
+    id INTEGER PRIMARY KEY, area TEXT NOT NULL, title TEXT NOT NULL, request TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'Running', detail TEXT NOT NULL DEFAULT '',
+    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS studio_jobs_area ON studio_jobs(area,id);
+CREATE TABLE IF NOT EXISTS decompile_records(
+    job INTEGER PRIMARY KEY REFERENCES studio_jobs(id), input_sha TEXT NOT NULL DEFAULT '',
+    filter_key TEXT NOT NULL DEFAULT '', format INTEGER NOT NULL DEFAULT 0,
+    report_sha TEXT NOT NULL DEFAULT '', symbols TEXT NOT NULL DEFAULT '',
+    reused_from INTEGER REFERENCES studio_jobs(id));
+CREATE INDEX IF NOT EXISTS decompile_cache ON decompile_records(input_sha, filter_key, format);

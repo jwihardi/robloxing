@@ -1,0 +1,271 @@
+import { ComboBox, LineEdit, ListView, TextEdit } from "std-widgets.slint";
+import { Action, Theme } from "common.slint";
+
+export struct StudioItem { id: int, title: string, state: string, detail: string, date: string }
+
+export global Studio {
+    in-out property <string> area: "Images";
+    in-out property <int> image-mode;
+    in-out property <int> model-mode;
+    in-out property <int> material;
+    in-out property <string> seed: "1";
+    in-out property <string> brief;
+    in-out property <string> custom-style;
+    in-out property <string> model-name;
+    in-out property <string> model-brief;
+    in-out property <string> scene-path;
+    in-out property <string> binary-path;
+    in-out property <string> filter;
+    in-out property <string> query;
+    changed query => {command("search");}
+    in property <[StudioItem]> jobs;
+    in property <StudioItem> selected;
+    in property <image> preview;
+    in property <string> code;
+    in property <string> ai-summary;
+    in-out property <bool> show-summary;
+    in-out property <bool> editing-run;
+    in property <bool> custom-task;
+    in property <string> run-log;
+    in-out property <bool> show-log;
+    in property <string> message;
+    in property <bool> working;
+    in property <bool> inspecting;
+    in property <image> inspect-image;
+    in property <bool> inspect-ready;
+    in property <string> inspect-result;
+    in property <string> inspect-faces;
+    in property <string> inspect-error;
+    callback inspect-view(float,float,float,int,int,int);
+    callback command(string);
+    callback select(int);
+    public function clear-project() {
+        area = "Images"; brief = ""; custom-style = ""; model-name = ""; model-brief = ""; scene-path = ""; binary-path = ""; filter = ""; query = ""; seed = "1";
+    }
+}
+
+component CameraButton inherits Action {
+    width: 32px;
+    height: 32px;
+    icon-only: true;
+}
+
+component ModelInspector inherits FocusScope {
+    private property <float> yaw: -32;
+    private property <float> pitch: 18;
+    private property <float> zoom: 1;
+    private property <int> mode;
+    private property <length> last-x;
+    private property <length> last-y;
+    private property <bool> dragging;
+    init => { root.focus(); root.draw(); }
+    function draw() {
+        Studio.inspect-view(yaw, pitch, zoom, mode, round(stage.width / 1px), round(stage.height / 1px));
+    }
+    function orbit(dx: float, dy: float) {
+        yaw = mod(yaw + dx, 360); pitch = clamp(pitch + dy, -90, 90); draw();
+    }
+    function magnify(factor: float) { zoom = clamp(zoom * factor, 0.25, 8); draw(); }
+    function reset() { yaw = -32; pitch = 18; zoom = 1; draw(); }
+    capture-key-pressed(e) => {
+        if e.text == Key.Escape { Studio.command("close-inspector"); return accept; }
+        if e.text == Key.LeftArrow { orbit(-12, 0); return accept; }
+        if e.text == Key.RightArrow { orbit(12, 0); return accept; }
+        if e.text == Key.UpArrow { orbit(0, 12); return accept; }
+        if e.text == Key.DownArrow { orbit(0, -12); return accept; }
+        if e.text == "+" || e.text == "=" { magnify(1.2); return accept; }
+        if e.text == "-" { magnify(1 / 1.2); return accept; }
+        if e.text == Key.Home { reset(); return accept; }
+        return reject;
+    }
+    VerticalLayout {
+        padding: root.width < 640px ? 16px : 24px; spacing: 12px;
+        HorizontalLayout {
+            height: 48px; spacing: 8px;
+            Action { width: 36px; label: "Back to models"; icon-only: true; glyph: "\u{e72b}";
+                activate => { Studio.command("close-inspector"); } }
+            VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                Text { text: "Model inspector"; font-size: 12px; color: Theme.muted; }
+                Text { text: Studio.selected.title; font-size: 20px; font-weight: 600; color: Theme.text; overflow: elide; min-width: 0px; }
+            }
+            Action { label: "Open in Blender"; glyph: "\u{e8a7}"; selected: true; width: 148px;
+                activate => { Studio.command("edit"); } }
+        }
+        HorizontalLayout { height: 36px; spacing: 4px;
+            for name[i] in ["Surface", "Wireframe", "Overlaps"]: Action {
+                label: name; width: i == 1 ? 87px : 78px;
+                selected: root.mode == i; enabled: Studio.inspect-ready;
+                activate => { root.mode = i; root.draw(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: Studio.inspect-faces; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+        }
+        stage := Rectangle {
+            vertical-stretch: 1; border-radius: 12px; background: Theme.sidebar; clip: true;
+            changed width => { root.draw(); }
+            changed height => { root.draw(); }
+            if Studio.inspect-ready: Image {
+                width: parent.width; height: parent.height; source: Studio.inspect-image; image-fit: contain;
+                accessible-label: "Model viewport";
+            }
+            if !Studio.inspect-ready: Text {
+                x: 20px; width: parent.width - 40px; height: parent.height;
+                text: Studio.inspect-error != "" ? Studio.inspect-error : "Reading mesh…"; wrap: word-wrap;
+                color: Theme.muted; horizontal-alignment: center; vertical-alignment: center;
+            }
+            touch := TouchArea {
+                enabled: Studio.inspect-ready;
+                mouse-cursor: self.pressed ? grabbing : grab;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        root.focus(); root.dragging = true; root.last-x = self.mouse-x; root.last-y = self.mouse-y;
+                    } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel { root.dragging = false; }
+                }
+                moved => {
+                    if root.dragging && self.pressed {
+                        root.orbit((self.mouse-x - root.last-x) / 1px * 0.55, (self.mouse-y - root.last-y) / 1px * 0.55);
+                        root.last-x = self.mouse-x; root.last-y = self.mouse-y;
+                    }
+                }
+                scroll-event(e) => {
+                    if e.delta-y != 0px { root.magnify(e.delta-y > 0px ? 1.12 : 1 / 1.12); return accept; }
+                    return reject;
+                }
+            }
+        }
+        HorizontalLayout {
+            height: 36px; spacing: 2px;
+            Text { text: root.mode == 2 ? Studio.inspect-result : "Drag to orbit · Scroll to zoom";
+                font-weight: root.mode == 2 ? 600 : 400; color: root.mode == 2 ? Theme.text : Theme.muted;
+                min-width: 0px; wrap: word-wrap; vertical-alignment: center; font-size: 12px; horizontal-stretch: 1; }
+            for button[i] in ["Orbit left", "Orbit right", "Orbit up", "Orbit down", "Zoom out", "Zoom in", "Reset view"]: CameraButton {
+                label: button; glyph: ["\u{e76b}", "\u{e76c}", "\u{e70e}", "\u{e70d}", "\u{e738}", "\u{e710}", "\u{e777}"][i];
+                enabled: Studio.inspect-ready;
+                activate => {
+                    if i == 0 { root.orbit(-15,0); } else if i == 1 { root.orbit(15,0); }
+                    else if i == 2 { root.orbit(0,15); } else if i == 3 { root.orbit(0,-15); }
+                    else if i == 4 { root.magnify(1 / 1.2); } else if i == 5 { root.magnify(1.2); } else { root.reset(); }
+                }
+            }
+        }
+        if Studio.message != "": Text { text: Studio.message; wrap: word-wrap; color: Theme.muted; font-size: 12px; }
+    }
+}
+
+export component StudioPage inherits Rectangle {
+    in property <bool> can-attach;
+    in property <bool> navigation-hidden;
+    callback browse();
+    private property <bool> images: Studio.area == "Images";
+    private property <bool> models: Studio.area == "Models";
+    private property <bool> binary: Studio.area == "Ghidra";
+    private property <bool> tile: images && Studio.image-mode == 3;
+    private property <bool> import-scene: models && Studio.model-mode == 4;
+    private property <bool> show-details;
+    private property <int> selected-id: Studio.selected.id;
+    changed selected-id => {root.show-details = false;}
+    private property <bool> ready: Studio.selected.state == "Ready";
+    private property <string> run-label: tile ? "Make tile" : images ? "Generate image" : import-scene ? "Export scene" : models ? "Create model" : "Decompile";
+    background: Theme.canvas;
+    Timer { interval: 750ms; running: root.binary && Studio.working && Studio.show-log &&
+        (Studio.selected.state == "Running" || Studio.selected.state == "Queued");
+        triggered => { Studio.command("log-tick"); } }
+    if Studio.inspecting: ModelInspector {}
+    if !Studio.inspecting: VerticalLayout {
+        x: (root.width - self.width) / 2; y: 22px; width: min(950px,root.width - 48px); height: root.height - 40px; spacing: 10px;
+        HorizontalLayout { height: 42px; spacing: 8px;
+            Text { text: root.images ? "Image studio" : root.models ? "3D model studio" : "Decompilation"; color: Theme.text; font-size: 28px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            if root.navigation-hidden: Action { label: "Tools and history"; width: 146px; glyph: "\u{e700}"; activate => { root.browse(); } }
+        }
+        Text { text: root.images ? "Generate artwork or build a seamless texture tile." : root.models ? "Design a prop, use a starter mesh, or export a Blender scene." : "Recover functions from a local game binary with Ghidra.";
+            color: Theme.muted; font-size: 14px; wrap:word-wrap; }
+        Rectangle { height: 1px; background: Theme.line; }
+        HorizontalLayout { height: 32px; spacing: 8px;
+            if root.images: ComboBox { width: 156px; accessible-label: "Image format";
+                model: ["Concept art","Inventory icon","Sprite sheet","Seamless tile","Custom style"]; current-index <=> Studio.image-mode; }
+            if root.images && Studio.image-mode == 4: LineEdit { horizontal-stretch: 1; placeholder-text: "Art direction…"; accessible-label: "Custom art direction"; text <=> Studio.custom-style; }
+            if root.models: ComboBox { width: 158px; accessible-label: "Model source";
+                model: ["From brief","Crystal","Barrel","Planter","Blender scene"]; current-index <=> Studio.model-mode; }
+            if root.binary: Text { text: "Local binary"; color: Theme.text; vertical-alignment: center; font-size: 15px; font-weight: 600; }
+            Rectangle { horizontal-stretch: 1; }
+            if !root.images: Action { label: root.models ? "Locate Blender" : "Locate Ghidra"; width: 118px; height: 32px; activate => {Studio.command("locate");} }
+        }
+        if root.images && !root.tile: LineEdit {
+            height: 40px; placeholder-text: "Describe the game image you want to make…"; accessible-label: "Art brief"; text <=> Studio.brief;
+        }
+        if root.tile: HorizontalLayout { height: 40px; spacing: 10px;
+            ComboBox { width: 150px; model: ["Moss","Basalt","Sand"]; accessible-label: "Tile material"; current-index <=> Studio.material; }
+            Text { text: "Seed"; color: Theme.muted; vertical-alignment: center; }
+            LineEdit { width: 115px; accessible-label: "Tile seed"; text <=> Studio.seed; }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.models && Studio.model-mode == 0: LineEdit { height: 40px; text <=> Studio.model-brief; accessible-label: "Model brief"; placeholder-text: "Describe the shape, proportions, and colors of your prop…"; }
+        if root.models && Studio.model-mode > 0 && !root.import-scene: LineEdit { height: 40px; text <=> Studio.model-name; accessible-label: "Model name"; placeholder-text: "Name your model…"; }
+        if root.import-scene || root.binary: HorizontalLayout { height: 36px; spacing: 8px;
+            Action { label: root.binary ? "Choose binary…" : "Choose scene…"; width: 136px; selected: true; activate => {Studio.command("pick");} }
+            Text { text: root.binary ? Studio.binary-path : Studio.scene-path; color: Theme.muted; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        }
+        if root.binary: LineEdit { height: 34px; text <=> Studio.filter; placeholder-text: "Function name contains (optional)"; accessible-label: "Function filter"; }
+        HorizontalLayout { height: 36px; spacing: 10px;
+            Action { label: Studio.working ? "Cancel run" : root.run-label; width: 138px; primary: !Studio.working;
+                enabled: Studio.working || (root.binary ? Studio.binary-path != "" : root.import-scene ? Studio.scene-path != "" :
+                    root.tile ? Studio.seed != "" : root.images ? Studio.brief != "" : Studio.model-mode == 0 ? Studio.model-brief != "" : Studio.model-name != "");
+                activate => {Studio.command(Studio.working ? "cancel" : "run");} }
+            Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            if root.binary || (root.images && !root.tile) || (root.models && Studio.model-mode==0): Action {
+                label:Studio.custom-task ? "Custom run settings" : "Run settings"; width:Studio.custom-task ? 181px : 137px;
+                glyph:"\u{e713}"; activate=>{Studio.command("edit-task");}
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+        if Studio.jobs.length == 0: VerticalLayout { alignment: center; spacing: 8px; vertical-stretch: 1;
+            Text { text: root.binary ? "Report preview" : root.models ? "Model preview" : "Image preview"; horizontal-alignment:center; color:Theme.text; font-size:18px; font-weight:600; }
+            Text { text: Studio.query != "" ? "Choose a different search in the run history." : root.binary ? "Choose a binary and run decompilation to read its report." : root.models ? "Create a model to inspect, export, or attach it to chat." : "Generate an image to preview, export, or attach it to chat.";
+                horizontal-alignment:center; wrap:word-wrap; color: Theme.muted; font-size: 14px; }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { height: 30px; spacing: 10px;
+            Text { text: Studio.selected.title; font-size: 18px; font-weight: 600; color: Theme.text; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+            Text { text: Studio.selected.state; color: Theme.muted; font-size: 13px; vertical-alignment: center; }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { vertical-stretch: 1;
+            Rectangle { horizontal-stretch: 1; background: Theme.sidebar; border-radius: 12px; clip: true;
+                if root.ready && !root.binary && !root.show-details: Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: Studio.preview; image-fit: contain; }
+                if root.ready && root.models && !root.show-details: Action {
+                    label: "Inspect model"; icon-only: true; width: parent.width; height: parent.height; background: transparent;
+                    Rectangle { x: parent.width - self.width - 10px; y: parent.height - self.height - 10px;
+                        width: 110px; height: 32px; border-radius: 16px; background: Theme.surface;
+                        Text { text: "Inspect model"; horizontal-alignment: center; vertical-alignment: center; color: Theme.text; font-size: 13px; }
+                    }
+                    activate => { Studio.command("inspect"); }
+                }
+                if root.binary: VerticalLayout { padding: 6px; spacing: 5px;
+                    HorizontalLayout { height: 30px; spacing: 4px; alignment: start;
+                        Action { label: "Report"; width: 66px; height: 30px; enabled: root.ready; selected: root.ready && !Studio.show-log && !Studio.show-summary; activate => {Studio.show-log=false;Studio.show-summary=false;} }
+                        if Studio.ai-summary!="": Action {label:"Summary";width:80px;height:30px;selected:Studio.show-summary;activate=>{Studio.show-log=false;Studio.show-summary=true;}}
+                        Action { label: "Run log"; width: 74px; height: 30px; selected: Studio.show-log || !root.ready; activate => {Studio.show-log=true;Studio.show-summary=false;} }
+                    }
+                    TextEdit { text: (Studio.show-log || !root.ready) ? Studio.run-log : Studio.show-summary ? Studio.ai-summary : Studio.code;
+                        read-only: true; font-family: Studio.show-summary ? "Segoe UI" : "Consolas"; font-size: Studio.show-summary ? 14px : 12px; vertical-stretch: 1;
+                        accessible-label: (Studio.show-log || !root.ready) ? "Decompilation log" : Studio.show-summary ? "AI summary" : "Recovered functions"; }
+                }
+                if !root.binary && (!root.ready || root.show-details): TextEdit { x: 10px; y: 10px; width: parent.width - 20px; height: parent.height - 20px;
+                    text: Studio.selected.detail != "" ? Studio.selected.detail : Studio.selected.state; read-only: true; font-size: 14px; accessible-label: "Run details"; }
+            }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { height: 28px; spacing: 8px;
+            Text { text: root.ready ? Studio.selected.detail : ""; horizontal-stretch: 1; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
+            if root.ready && !root.binary && Studio.selected.detail != "": Action { label: root.show-details ? "Preview" : "Details"; width: 72px; height: 28px; selected: root.show-details; activate => {root.show-details = !root.show-details;} }
+            Action { label: "Reuse settings"; width: 112px; height: 28px; activate => {Studio.command("reuse");} }
+        }
+        if Studio.jobs.length > 0: HorizontalLayout { height: 36px; spacing: 3px; alignment: start;
+            if root.ready: Action { label: "Save as…"; width: 78px; selected: true; activate => {Studio.command("export");} }
+            if root.ready: Action { label: "Attach to chat"; width: 110px; enabled: root.can-attach; activate => {Studio.command("attach");} }
+            if root.ready && root.models: Action { label: "Open in Blender"; width: 120px; activate => {Studio.command("edit");} }
+            if root.ready && root.models: Action { label: "Re-export"; width: 81px; enabled: !Studio.working; activate => {Studio.command("rebuild");} }
+            if Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted": Action {
+                label: "Retry run"; width: 88px; enabled: !Studio.working; activate => {Studio.command("retry");} }
+            if root.ready && root.binary: Action { label: "Run fresh"; width: 85px; enabled: !Studio.working; activate => {Studio.command("fresh");} }
+            if root.binary || (!root.ready && Studio.selected.state == "Failed"): Action { label: "Show files"; width: 90px; activate => {Studio.command("files");} }
+        }
+    }
+}

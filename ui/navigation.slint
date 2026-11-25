@@ -1,0 +1,49 @@
+import { Action, Theme } from "common.slint";
+import { ListView, LineEdit } from "std-widgets.slint";
+import { Studio } from "studio.slint";
+
+export component RailAction inherits Action {
+    in property <string> caption;
+    icon-only: true;
+    height: 56px; border-radius: 12px;
+    VerticalLayout { alignment: center; spacing: 4px;
+        Text { text: root.symbol; font-family: "Segoe MDL2 Assets"; font-size: 19px;
+            color: root.selected ? Theme.accent : Theme.muted; horizontal-alignment: center; accessible-role: none; }
+        Text { text: root.caption; font-size: 11px; font-weight: root.selected ? 600 : 400;
+            color: root.selected ? Theme.text : Theme.muted; horizontal-alignment: center; accessible-role: none; }
+    }
+    in property <string> symbol;
+}
+
+export component WorkshopMark inherits Rectangle {
+    width: 34px; height: 34px; background: Theme.brand-fill; border-radius: 11px;
+    for bar[i] in [0.34, 0.56, 0.44]: Rectangle {
+        x: parent.width * (0.23 + i * 0.20); y: (parent.height - self.height) / 2;
+        width: parent.width * 0.12; height: parent.height * bar;
+        border-radius: 2px; background: Theme.accent;
+    }
+}
+
+export component StudioNavigation inherits VerticalLayout {
+    spacing: 5px;
+    Text { text: "Game studio"; font-size: 19px; font-weight: 600; color: Theme.text; height: 40px; vertical-alignment: center; }
+    for tool[i] in ["Images", "Models", "Ghidra"]: Action {
+        label: tool; glyph: ["\u{e91b}", "\u{e7b8}", "\u{e943}"][i];
+        selected: Studio.area == tool; activate => {
+            Studio.editing-run = false; Studio.area = tool; Studio.query = ""; Studio.command("refresh"); root.picked();
+        }
+    }
+    Rectangle { height: 15px; }
+    Text { text: Studio.area == "Ghidra" ? "Report history" : "Run history"; color: Theme.muted; font-size: 13px; font-weight: 600; }
+    LineEdit { height: 34px; accessible-label: Studio.area == "Ghidra" ? "Search reports" : "Search assets";
+        placeholder-text: Studio.area == "Ghidra" ? "Find binary or function" : "Search assets"; text <=> Studio.query; }
+    if Studio.jobs.length == 0: Text { text: Studio.query != "" ? "No matching assets." : "No runs yet"; color: Theme.muted; font-size: 13px; height: 36px; vertical-alignment: center; }
+    history := ListView { vertical-stretch: 1;
+        for job in Studio.jobs: Action {
+            width: history.visible-width; height: 52px; label: job.title; detail: (Studio.area == "Ghidra" ? "#" + job.id + " · " : "") + (job.state == "Ready" ? job.date : job.state);
+            selected: Studio.selected.id == job.id; accessible-description: job.state + " " + job.date;
+            activate => {Studio.editing-run = false; Studio.select(job.id); root.picked();}
+        }
+    }
+    callback picked();
+}

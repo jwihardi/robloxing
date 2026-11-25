@@ -20,11 +20,22 @@ impl Store {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let configured = !args.is_empty() && self.team_settings()?.check_args == args;
+        if configured {
+            // If this recheck fails or is interrupted, an older pass must not authorize acceptance.
+            self.db
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM verified_team WHERE lead=?1", [id])?;
+        }
         let msg = runtime.block_on(self.run_check(id, args, &a.candidate))?;
         ensure!(
             git::capture(&work, &a.base)?.0 == a.candidate,
             "Check modified the reviewed files. Resume or retry to review its edits."
         );
+        if configured {
+            self.record_verification(id, &a.candidate, args)?;
+        }
         Ok(msg)
     }
     pub(crate) async fn run_check(

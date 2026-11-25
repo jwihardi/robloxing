@@ -2,8 +2,10 @@ use crate::{
     Attempt, Store, team,
     usage::{ContextUsage, UsageWindow, account_windows},
 };
+mod art;
 mod catalog;
 use anyhow::{Context, Result, bail, ensure};
+pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
 pub use catalog::{Catalog, Model as CatalogModel, load_models_and_usage, model_catalog};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
@@ -42,13 +44,18 @@ pub fn managed(
     stdout: Stdio,
     stderr: File,
 ) -> Result<Box<dyn ChildWrapper>> {
-    let mut cmd = CommandWrap::with_new(program, |cmd| {
-        cmd.args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(stdout)
-            .stderr(stderr);
-    });
+    spawn_managed(
+        CommandWrap::with_new(program, |cmd| {
+            cmd.args(args)
+                .current_dir(cwd)
+                .stdin(Stdio::piped())
+                .stdout(stdout)
+                .stderr(stderr);
+        }),
+        program,
+    )
+}
+fn spawn_managed(mut cmd: CommandWrap, program: &str) -> Result<Box<dyn ChildWrapper>> {
     cmd.wrap(KillOnDrop);
     #[cfg(windows)]
     {
@@ -167,16 +174,29 @@ async fn open_thread(stdin: &mut ChildStdin, store: &Store, a: &Attempt) -> Resu
         let policy = store.effective_worker_policy(a.id)?;
         let policy = serde_json::to_string(&policy)?;
         params["developerInstructions"] = json!(format!(
-            "You are the lead Codex agent in Workshop. Work inside this isolated project. When the user asks for subagents or workers, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Otherwise handle simple requests directly. For substantial divisible work, choose a parallel, sequential, or mixed plan. Submit all known assignments together in one workshop_delegate call. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model, and an empty max_effort means uncapped. Optionally choose model and effort per assignment within this policy; omit either to use its default. Leave depends_on empty for independent work. To order steps, list the prerequisite keys on each dependent task. If the next assignment needs a result to define its scope, delegate it after that result returns. Give every worker a stable key, short title, exact relative edit paths ([] for read-only), relevant interfaces in its deliverable and acceptance criteria. Workshop schedules these assignments and integrates their changes. Retry a blocked worker using its original key and failure feedback; report an unresolved blocker instead of creating a replacement key. Use workshop_checkpoint for design decisions and next unfinished work on substantial tasks. Project handoff:\n{context}"
+            "You are the lead Codex agent in Workshop. Work inside this isolated project. Follow the project’s delegation setting attached to the current request. When the creator specifically requests workers in the task itself, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Answer greetings and small, indivisible requests directly. When automatic delegation is enabled, or the creator asks for workers, manage the task from intake through verification without waiting for the user to divide it up or request workers. Inspect just enough to decide scope, then dispatch independent deliverables together. You own the acceptance criteria, interfaces and integrated result. Use a sequential or mixed plan where one assignment needs another's output. Include a scoped test or read-only acceptance review when it adds independent coverage. Honor explicit limits and requests to work alone. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model and an empty max_effort means uncapped. Choose a suitable allowed model and effort for each assignment or omit them for defaults. Give each worker a stable key, a short title, exact relative edit paths ([] for read-only), a concrete deliverable and observable acceptance criteria. Use depends_on for prerequisites. You can dispatch additional work as findings arrive. When a worker or check finds a problem, inspect the evidence, repair it or retry its owning key, and continue pending work. Respect a user-stopped worker. Inspect the integrated result against the original request and run relevant behavioral checks using the project’s own tools before finishing. A clean diff alone does not establish functional correctness. Report what passed. If your local tools fail, use the available worker checkouts when feasible without asking for delegation permission. When no authorized route remains, call workshop_blocked with the external blocker before ending. Use workshop_checkpoint for lasting decisions or unfinished work. Project handoff:\n{context}"
         ));
-        if a.session.is_empty() {
-            params["dynamicTools"] = team::tools();
-        }
     } else {
         params["developerInstructions"] = json!(
-            "You are a Workshop Codex worker in a private copy. Complete only the assigned deliverable within the declared edit scope, verify it and report the result. The lead integrates your edits. Do not delegate."
+            "You are a Workshop Codex worker in a private copy. Complete only the assigned deliverable within the declared edit scope, verify the acceptance criteria, and report concrete evidence and any remaining gaps. Use workshop_report_result with needs_changes when the criteria are unmet or a review finds an actionable defect. For a successful handoff, give downstream workers the relevant interfaces, findings and checks. The lead integrates your edits. Do not delegate."
         );
     }
+    let mut instructions = params["developerInstructions"].as_str().unwrap().to_owned();
+    instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
+    if a.session.is_empty() {
+        params["dynamicTools"] = team::tools(store.worker);
+    } else if let Some(cli) = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("workshop-cli{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|p| p.is_file())
+        && let Ok(project) = store.report_archive().and_then(|archive| archive.project())
+    {
+        instructions.push_str(&format!(" If those tools are unavailable, use the read-only Workshop CLI at {}. Supply the project path {project} via --project for both studio reports QUERY and studio read-report ID --offset BYTE.",cli.display()));
+    }
+    params["developerInstructions"] = json!(instructions);
     if !a.model.is_empty() {
         params["model"] = json!(a.model);
     }
@@ -195,8 +215,16 @@ async fn start_turn(
     session: &str,
     prompt: &Message,
     a: &Attempt,
+    team_preference: Option<&str>,
 ) -> Result<()> {
-    let mut params = json!({"threadId":session,"input":prompt.input()?});
+    let mut input = prompt.input()?;
+    if let Some(preference) = team_preference {
+        input
+            .as_array_mut()
+            .context("Expected turn input items")?
+            .push(json!({"type":"text","text":preference}));
+    }
+    let mut params = json!({"threadId":session,"input":input});
     if !a.model.is_empty() {
         params["model"] = json!(a.model);
     }
@@ -273,13 +301,18 @@ impl Connection {
     fn spawn(cwd: PathBuf, stderr: File) -> Result<Self> {
         let exe = codex_program();
 
-        let mut child = managed(
-            &exe,
-            &["app-server", "--listen", "stdio://"],
-            &cwd,
-            Stdio::piped(),
-            stderr,
-        )?;
+        let cmd = CommandWrap::with_new(&exe, |cmd| {
+            cmd.args(["app-server", "--listen", "stdio://"])
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(stderr);
+            // The new standalone server has its own sandbox runner. A Codex Desktop
+            // launcher's registered Core identity belongs only to that parent process.
+            #[cfg(windows)]
+            cmd.env_remove("CODEX_WINDOWS_REGISTERED_CORE");
+        });
+        let mut child = spawn_managed(cmd, &exe)?;
         let stdin = child.stdin().take().context("Provider stdin")?;
         let stdout = child.stdout().take().context("Provider stdout")?;
         Ok(Connection {
@@ -305,6 +338,32 @@ pub enum ReplyUpdate<'a> {
     Context(ContextUsage),
     AccountUsage(Vec<UsageWindow>),
     Activity(&'a str),
+}
+
+// A check runs on the isolated integrated copy. Keep Stop responsive while the
+// configured check process is active, including between automatic repair turns.
+async fn final_check(
+    store: &Store,
+    attempt: &Attempt,
+    controls: &mut Controls,
+    notify: &dyn Fn(ReplyUpdate<'_>),
+) -> Result<Option<Result<()>>> {
+    let verify = store.verify_final(attempt);
+    tokio::pin!(verify);
+    loop {
+        tokio::select! {
+            biased;
+            input = controls.recv() => match input {
+                None | Some(Control::Cancel) => return Ok(None),
+                Some(Control::StopWorker(_)) => {}
+                Some(Control::Steer(_)) => {
+                    store.event(attempt.id, "steer/unavailable", Some("Verification is running. Send your direction again after the check."))?;
+                    notify(ReplyUpdate::TranscriptChanged);
+                }
+            },
+            result = &mut verify => return Ok(Some(result)),
+        }
+    }
 }
 
 async fn exchange(
@@ -340,9 +399,25 @@ async fn exchange(
         )
         .await?;
     }
+    let team_preference = if store.worker {
+        None
+    } else if store.team_settings()?.auto_delegate {
+        Some(
+            "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence.",
+        )
+    } else {
+        Some(
+            "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request.",
+        )
+    };
     let mut turn = String::new();
     let mut next_id = 10;
     let mut cancelling = false;
+    let mut stopped_keys = std::collections::HashSet::new();
+    let mut previous_repair = None;
+    let mut repairs = 0;
+    let mut external_blocker = None;
+    let mut runner_failure = None;
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
     type ToolFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>>;
     let mut pending_tool: Option<(Value, ToolFuture<'_>)> = None;
@@ -387,7 +462,7 @@ async fn exchange(
             Next::Input(control) => match control {
                 None | Some(Control::Cancel) => {
                     if pending_tool.take().is_some() {
-                        store.interrupt_workers(a.id)?;
+                        store.interrupt_workers(a.id, true)?;
                         notify(ReplyUpdate::WorkersChanged);
                     }
                     if turn.is_empty() || cancelling {
@@ -398,7 +473,11 @@ async fn exchange(
                     deadline = Some(Instant::now() + Duration::from_secs(3));
                 }
                 Some(Control::StopWorker(id)) => {
-                    let _ = store.stop_worker(id);
+                    if store.stop_worker(id).is_ok()
+                        && let Some(worker) = store.workers(a.id)?.into_iter().find(|w| w.id == id)
+                    {
+                        stopped_keys.insert(worker.assignment.key);
+                    }
                 }
                 Some(Control::Steer(text)) => {
                     if turn.is_empty() || cancelling {
@@ -451,11 +530,38 @@ async fn exchange(
                 if let Some(method) = v["method"].as_str() {
                     if method == "item/tool/call"
                         && !v["id"].is_null()
-                        && !store.worker
                         && v["params"]["threadId"] == session.as_str()
                         && !cancelling
                     {
                         *used_tools = true;
+                        let args = &v["params"]["arguments"];
+                        if v["params"]["tool"] == "workshop_blocked"
+                            && !store.worker
+                            && pending_tool.is_none()
+                            && v["params"]["turnId"] == turn
+                        {
+                            external_blocker = args["reason"]
+                                .as_str()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(|s| s.chars().take(4000).collect::<String>());
+                        }
+                        let retries_stopped = match v["params"]["tool"].as_str() {
+                            Some("workshop_delegate") => {
+                                args["tasks"].as_array().is_some_and(|tasks| {
+                                    tasks.iter().any(|t| {
+                                        t["key"].as_str().is_some_and(|k| stopped_keys.contains(k))
+                                    })
+                                })
+                            }
+                            Some("workshop_resolve") => args["key"]
+                                .as_str()
+                                .is_some_and(|k| stopped_keys.contains(k)),
+                            _ => false,
+                        };
+                        if retries_stopped {
+                            send(stdin,json!({"id":v["id"],"result":{"success":false,"contentItems":[{"type":"inputText","text":"The user stopped this assignment. Leave it stopped until they resume the task."}]}})).await?;
+                            continue;
+                        }
                         if pending_tool.is_some() || v["params"]["turnId"] != turn {
                             send(stdin,json!({"id":v["id"],"result":{"success":false,"contentItems":[{"type":"inputText","text":"Wait for the active delegation batch before submitting another request."}]}})).await?;
                         } else {
@@ -481,6 +587,25 @@ async fn exchange(
                         )
                     {
                         *used_tools = true;
+                    }
+                    if method == "item/completed"
+                        && v["params"]["threadId"] == session.as_str()
+                        && v["params"]["turnId"] == turn
+                        && v["params"]["item"]["type"] == "commandExecution"
+                    {
+                        let item = &v["params"]["item"];
+                        if item["status"] == "failed" && item["exitCode"].as_i64() == Some(-1) {
+                            runner_failure = Some(
+                                item["aggregatedOutput"]
+                                    .as_str()
+                                    .unwrap_or("Command runner could not start")
+                                    .chars()
+                                    .take(1500)
+                                    .collect::<String>(),
+                            );
+                        } else if item["status"] == "completed" {
+                            runner_failure = None;
+                        }
                     }
                     if method == "item/agentMessage/delta"
                         && v["params"]["threadId"] == session.as_str()
@@ -541,7 +666,78 @@ async fn exchange(
                             pending_tool.is_none(),
                             "Lead ended its turn during a worker assignment"
                         );
-                        return Ok(true);
+                        if let Some(reason) = &external_blocker {
+                            bail!("Task blocked: {reason}");
+                        }
+                        let workers = store.workers(a.id)?;
+                        let unavailable = if let Some(reason) = &runner_failure
+                            && !workers.iter().any(|w| w.state == "finished")
+                            && crate::git::capture(&store.work(a.id), &a.base)?
+                                .1
+                                .is_empty()
+                            && (!store.worker || store.reported_result(a.id)?.is_none())
+                        {
+                            Some(anyhow::anyhow!(
+                                "Workspace command runner unavailable: {reason}"
+                            ))
+                        } else {
+                            None
+                        };
+                        if store.worker {
+                            return unavailable.map_or(Ok(true), Err);
+                        }
+                        if !*used_tools && workers.is_empty() && unavailable.is_none() {
+                            return Ok(true);
+                        }
+                        let verified = if let Some(error) = unavailable {
+                            Err(error)
+                        } else {
+                            let Some(result) = final_check(store, a, &mut controls, notify).await?
+                            else {
+                                return Ok(false);
+                            };
+                            result
+                        };
+                        let Err(error) = verified else {
+                            if store.has_open_blocker(a.id)? {
+                                store.event(a.id, "workshop/blocker_resolved", None)?;
+                            }
+                            return Ok(true);
+                        };
+                        if !stopped_keys.is_empty() {
+                            return Err(error.context("A worker was stopped by the user."));
+                        }
+                        let feedback = format!("{error:#}");
+                        let tree = crate::git::capture(&store.work(a.id), &a.base)?.0;
+                        let fingerprint = (tree, feedback.clone());
+                        if repairs >= 2 || previous_repair.as_ref() == Some(&fingerprint) {
+                            return Err(error.context(
+                                "Automatic repair stopped. Review the remaining blocker.",
+                            ));
+                        }
+                        previous_repair = Some(fingerprint);
+                        repairs += 1;
+                        let notice = format!(
+                            "Verification needs a repair (pass {repairs} of 2). {}",
+                            feedback.chars().take(1200).collect::<String>()
+                        );
+                        store.event(a.id, "workshop/repair", Some(&notice))?;
+                        notify(ReplyUpdate::TranscriptChanged);
+                        notify(ReplyUpdate::Activity(&notice));
+                        let direction = format!(
+                            "Workshop verification found unfinished work in the current request. Continue in this same isolated project and fix the cause. Retry the original owning keys, keep completed work, and verify the integrated result. If a worker exhausted its retries, inspect and repair directly before workshop_resolve. Report anything you genuinely cannot resolve.\n\n{feedback}"
+                        );
+                        start_turn(
+                            stdin,
+                            session,
+                            &Message::from(direction.as_str()),
+                            a,
+                            team_preference,
+                        )
+                        .await?;
+                        turn.clear();
+                        deadline = Some(Instant::now() + Duration::from_secs(90));
+                        continue;
                     }
                 } else {
                     match id {
@@ -560,7 +756,7 @@ async fn exchange(
                                 v["result"]["model"].as_str().unwrap_or_default(),
                                 v["result"]["reasoningEffort"].as_str().unwrap_or_default(),
                             )?;
-                            start_turn(stdin, session, prompt, a).await?;
+                            start_turn(stdin, session, prompt, a, team_preference).await?;
                         }
                         Some(3) => {
                             turn = v["result"]["turn"]["id"]
@@ -574,7 +770,7 @@ async fn exchange(
                                 .as_array()
                                 .context("Codex did not return the loaded thread IDs")?;
                             if loaded.iter().any(|id| id == session.as_str()) {
-                                start_turn(stdin, session, prompt, a).await?;
+                                start_turn(stdin, session, prompt, a, team_preference).await?;
                             } else {
                                 open_thread(stdin, store, a).await?;
                             }
@@ -592,7 +788,7 @@ pub(crate) async fn worker_turn(
     a: &Attempt,
     rx: Controls,
     notify: &dyn Fn(ReplyUpdate<'_>),
-) -> Result<()> {
+) -> Result<Option<String>> {
     let result = {
         let mut io = Connection::open(store, a)?;
         Box::pin(exchange(
@@ -606,6 +802,16 @@ pub(crate) async fn worker_turn(
         ))
         .await
     };
+    let report = store.reported_result(a.id)?;
+    let result = result.and_then(|finished| {
+        if finished && let Some((kind, detail)) = &report {
+            ensure!(
+                kind != "worker/needs_changes",
+                "Worker acceptance criteria unmet: {detail}"
+            );
+        }
+        Ok(finished)
+    });
     let summary = match &result {
         Ok(true) => "Ready for integration".into(),
         Ok(false) => "Worker interrupted".into(),
@@ -621,7 +827,7 @@ pub(crate) async fn worker_turn(
         &summary,
     )?;
     ensure!(result?, "Worker interrupted");
-    Ok(())
+    Ok(report.map(|(_, summary)| summary))
 }
 
 pub fn run(
@@ -694,16 +900,13 @@ pub fn run_turn(
             stream,
             &|event| observer.borrow_mut()(event),
         ))?;
-        if finished && !store.workers(a.id)?.is_empty() {
-            session.runtime.block_on(store.verify_final(a))?;
-        }
         if finished && !session.io.used_tools {
             *cached = Some(session);
         }
         Ok(finished)
     })();
     if !matches!(result, Ok(true)) {
-        store.interrupt_workers(a.id)?;
+        store.interrupt_workers(a.id, matches!(result, Ok(false)))?;
     }
     let failure;
     let (state, action) = match &result {

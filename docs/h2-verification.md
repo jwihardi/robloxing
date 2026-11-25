@@ -4,6 +4,10 @@ The Codex lead and workers were exercised with the Windows release build, standa
 
 ## Delegation and continuity
 
+A single release request asked Workshop to implement two Python APIs, add edge-case tests, document usage and verify the result. It did not specify workers or a plan. With automatic delegation on, the real lead assigned the label and duration APIs to two workers. The event stream showed both running at the same time. Both finished on their first attempt. The lead integrated the APIs, updated the README and reached review without a follow-up. Before acceptance the source project still contained only the original README and acceptance script. After one acceptance, all 10 unit tests, the public acceptance script and the examples extracted from the README passed independently on Python 3.8.10. The acceptance script was byte-for-byte unchanged.
+
+The deterministic release scenario also exercised recovery. A read-only reviewer found a misspelling in a worker’s output. On the same user request, Workshop returned that finding to the lead, which assigned a correction and retried the review. The dependent release-note worker received the reviewer's result and completed. Separate cases cover a single-file repair, an unavailable command runner, stopping during a final check and halting after repeated failures.
+
 Two real workers created `left.txt` and `right.txt` in separate project copies. The lead integrated their edits and proposed a decision to keep one word per file, with a reading guide as the next task. Acceptance applied both files together. A fresh Codex chat used the saved handoff, wrote `GUIDE.md` and reached acceptance in 44 seconds. The workers reported 54,038 and 54,115 total provider tokens respectively, including context.
 
 The first delegation exposed a Windows path-length failure opening the worker database. Shortening its storage path let the same lead resume the same assignment keys. The two-file change took 96 seconds from the first recorded event to acceptance, including the repair and one resume instruction. The resumed segment took 42 seconds. Each change required one explicit acceptance.
