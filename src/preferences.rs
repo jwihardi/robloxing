@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::process::Command;
 
+#[derive(Clone)]
 pub struct Row {
     pub id: String,
     pub label: String,
@@ -21,7 +22,7 @@ pub struct Row {
     pub button: &'static str,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
     Codex,
     Claude,
@@ -154,6 +155,7 @@ pub async fn list(
     p: Provider,
     section: PluginSection,
     project: Option<&workshop::Store>,
+    refresh: bool,
 ) -> Result<Vec<Row>> {
     match tab {
         "Providers" => {
@@ -191,7 +193,12 @@ pub async fn list(
             Ok(rows)
         }
         "Plugins" if section == PluginSection::Recommended => recommended::list(p).await,
-        "Plugins" => plugins(p, section == PluginSection::Marketplace).await,
+        "Plugins" => tokio::time::timeout(
+            Duration::from_secs(20),
+            plugins(p, section == PluginSection::Marketplace, refresh),
+        )
+        .await
+        .context("The plugin catalog timed out. Select Refresh to try again.")?,
         "Skills" => skills(p),
         _ => bail!("Unknown settings page"),
     }
@@ -230,7 +237,57 @@ fn gemini_account() -> Row {
     }
 }
 
-async fn plugins(p: Provider, browse: bool) -> Result<Vec<Row>> {
+async fn plugins(p: Provider, browse: bool, refresh: bool) -> Result<Vec<Row>> {
+    if p == Provider::Codex
+        && let Some(markets) = workshop::provider::plugins::list(refresh).await?
+    {
+        let mut rows = Vec::new();
+        for market in markets {
+            for plugin in market.plugins {
+                if !browse && !plugin.installed {
+                    continue;
+                }
+                let available = plugin
+                    .availability
+                    .as_deref()
+                    .is_none_or(|s| s == "AVAILABLE")
+                    && plugin.install_policy.as_deref() != Some("NOT_AVAILABLE");
+                let (state, action, button) = if plugin.installed {
+                    let state = if plugin.enabled {
+                        "Installed"
+                    } else {
+                        "Disabled"
+                    };
+                    (state, "remove", "Uninstall")
+                } else if available {
+                    ("Available", "install", "Install")
+                } else {
+                    ("Unavailable", "", "")
+                };
+                let interface = plugin.interface;
+                let description = interface
+                    .as_ref()
+                    .and_then(|i| i.short_description.as_deref())
+                    .unwrap_or("");
+                let detail = [state, &market.name, description]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                rows.push(Row {
+                    id: plugin.id,
+                    label: interface
+                        .and_then(|i| i.display_name)
+                        .unwrap_or(plugin.name),
+                    detail,
+                    action,
+                    button,
+                });
+            }
+        }
+        rows.sort_by_cached_key(|r| r.label.to_lowercase());
+        return Ok(rows);
+    }
     let mut cmd = command(p.program()?);
     cmd.args(["plugin", "list", "--json"]);
     if browse && p != Provider::Antigravity {
@@ -359,7 +416,7 @@ fn plugin_rows(value: &Value, browse: bool) -> Result<Vec<Row>> {
             });
         }
     }
-    rows.sort_by_key(|r| r.label.to_lowercase());
+    rows.sort_by_cached_key(|r| r.label.to_lowercase());
     Ok(rows)
 }
 
@@ -368,7 +425,12 @@ pub fn official_plugin(provider: &str, id: &str) -> bool {
     match provider {
         "Codex" => matches!(
             market,
-            Some("openai-curated-remote" | "openai-bundled" | "openai-primary-runtime")
+            Some(
+                "openai-curated"
+                    | "openai-curated-remote"
+                    | "openai-bundled"
+                    | "openai-primary-runtime"
+            )
         ),
         "Antigravity" => market == Some("antigravity-plugins-official"),
         "Claude Code" => market == Some("claude-plugins-official"),

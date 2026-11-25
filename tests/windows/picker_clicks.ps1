@@ -194,7 +194,19 @@ function Test-Recommendations {
     [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$normal.Width,[int]$normal.Height,0x16)
     Click 'Claude Code'
     Wait-For { Named 'Install plugin Image to Sculpt' } 'provider-specific plugin recommendation'
+    $installHold = Join-Path $root 'plugin.install.hold'
+    $refreshHold = Join-Path $root 'recommend.refresh.hold'
+    Set-Content $installHold 'hold'
+    Set-Content $refreshHold 'hold'
+    $before = (Named 'Frontend Design').Current.BoundingRectangle
     Click 'Install plugin Image to Sculpt'
+    Wait-For { (Named 'Installing… Image to Sculpt') -and (Named 'Frontend Design') } 'inline installation progress'
+    Remove-Item -LiteralPath $installHold
+    Wait-For { Test-Path (Join-Path $root 'recommend.refresh.ready') } 'install complete and provider reread pending'
+    if (!(Named 'Installed') -or !(Named 'Caveman') -or $before -ne (Named 'Frontend Design').Current.BoundingRectangle) {
+        throw 'Recommendation rows disappeared or shifted during install'
+    }
+    Remove-Item -LiteralPath $refreshHold
     Wait-For { (Named 'Installed') -and !(Named 'Install plugin Image to Sculpt') } 'Claude marketplace plugin installed'
     Click 'Installed plugins'
     Wait-For { (Named 'Image to Sculpt') -and (Named 'Uninstall') } 'recommended plugin in installed list'
@@ -206,6 +218,30 @@ function Test-Recommendations {
     Wait-For { Named 'Install plugin Image to Sculpt' } 'recommendation available after uninstall'
     Click 'Codex'
     Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'Codex installation survives provider switch'
+    Set-Content (Join-Path $root 'many.plugins') 'large catalog'
+    Click 'Browse plugins'
+    Wait-For { (Named 'Calendar') -and (Named 'Show more') } 'first marketplace page'
+    $search = (Named 'Filter list').GetCurrentPattern($valuePattern)
+    $search.SetValue('extra 65')
+    Wait-For { (Named 'Extra 65') -and !(Named 'Show more') } 'search beyond first page'
+    $search.SetValue('')
+    Wait-For { Named 'Show more' } 'restored first page'
+    Click 'Show more'
+    Wait-For { !(Named 'Show more') } 'remaining marketplace results'
+    $count = @(Get-Content (Join-Path $root 'browse.requests')).Count
+    Click 'Recommended'
+    Wait-For { Named 'Caveman' } 'back to recommendations'
+    Set-Content (Join-Path $root 'browse.fail') 'offline'
+    Click 'Browse plugins'
+    Wait-For { (Named 'Calendar') -and (Named 'Show more') } 'cached marketplace'
+    if (@(Get-Content (Join-Path $root 'browse.requests')).Count -ne $count) { throw 'Returning to Browse repeated the catalog request' }
+    Click 'Refresh'
+    Wait-For { (Named 'Calendar') -and (Named 'Codex plugin catalog: Fixture marketplace offline') } 'catalog stays visible after refresh failure'
+    Remove-Item -LiteralPath (Join-Path $root 'browse.fail'),(Join-Path $root 'many.plugins')
+    Click 'Refresh'
+    Wait-For { (Named 'Calendar') -and !(Named 'Show more') -and !(Named 'Codex plugin catalog: Fixture marketplace offline') } 'retry updates the catalog'
+    Click 'Recommended'
+    Wait-For { Named 'Caveman' } 'return to recommendations'
     'Recommended catalog, search and both provider install paths passed'
 }
 function Test-Delivery {

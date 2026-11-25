@@ -75,7 +75,7 @@ pub(super) async fn request(
     anyhow::bail!("Codex closed during {method}")
 }
 
-async fn initialized(project: &Path) -> Result<Connection> {
+pub(super) async fn initialized(project: &Path) -> Result<Connection> {
     let mut io = Connection::spawn(project.to_owned(), tempfile::tempfile()?)?;
     request(&mut io, 1, "initialize", json!({"clientInfo":{"name":"workshop","title":"Workshop","version":env!("CARGO_PKG_VERSION")}})).await?;
     send(&mut io.stdin, json!({"method":"initialized"})).await?;

@@ -30,6 +30,11 @@ class FixtureProvider {
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
     static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }
+    static object CatalogPlugin(string id, string label, string detail) {
+        bool installed = File.Exists(Path.Combine(Dir,"sample.plugin")) && File.ReadAllText(Path.Combine(Dir,"sample.plugin")) == id;
+        return new {id=id,name=id.Split('@')[0],installed=installed,enabled=installed,installPolicy="AVAILABLE",availability="AVAILABLE",
+            @interface=new {displayName=label,shortDescription=detail}};
+    }
     // Leave the input pipe live while a lead or a worker waits for a correction.
     static bool Delivery(string text) {
         if (!Mode("delivery-mode")) return false;
@@ -176,8 +181,17 @@ class FixtureProvider {
             if(args[1]=="marketplace" && args[2]=="list"){Send(File.Exists(market) ? new object[]{new {name="image-to-sculpt",source="github",repo="gokayfem/image-to-sculpt"}} : new object[0]);return;}
             if(args[1]=="marketplace" && args[2]=="add" && args[3]=="gokayfem/image-to-sculpt"){File.WriteAllText(market,args[3]);return;}
             if(args[1]=="install" && args[2]==sculpt.pluginId && !File.Exists(market)){Environment.Exit(1);}
-            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{File.ReadAllText(file)==sculpt.pluginId ? (object)sculpt : plugin} : new object[0],available=new object[]{plugin,official}});return;}
-            if(args[1]=="add" || args[1]=="install"){File.WriteAllText(file,args[2]);return;}
+            if(args[1]=="list"){
+                if(Mode("recommend.refresh.hold") && File.Exists(file)){
+                    File.WriteAllText(Path.Combine(Dir,"recommend.refresh.ready"),"ready");
+                    while(Mode("recommend.refresh.hold")) Thread.Sleep(30);
+                }
+                Send(new {installed=File.Exists(file) ? new object[]{File.ReadAllText(file)==sculpt.pluginId ? (object)sculpt : plugin} : new object[0],available=new object[]{plugin,official}});return;
+            }
+            if(args[1]=="add" || args[1]=="install"){
+                while(Mode("plugin.install.hold")) Thread.Sleep(30);
+                File.WriteAllText(file,args[2]);return;
+            }
             if(args[1]=="remove" || args[1]=="uninstall"){File.Delete(file);return;}
         }
         if(args.Length==1 && args[0]=="joined-check"){
@@ -208,6 +222,19 @@ class FixtureProvider {
             var p=(Dictionary<string,object>)msg["params"];
             var id=msg["id"];
             if(method=="initialize") Send(new {id=id,result=new {}});
+            if(method=="plugin/list"){
+                File.AppendAllText(Path.Combine(Dir,"browse.requests"),"list\n");
+                if(Mode("browse.fail")) { Send(new {id=id,error=new {code=-32000,message="Fixture marketplace offline"}}); continue; }
+                var official = new List<object>{CatalogPlugin("calendar@openai-curated-remote","Calendar","Plan events")};
+                if(Mode("many.plugins")){
+                    for(int n=1;n<=65;n++) official.Add(CatalogPlugin("extra-"+n+"@openai-curated-remote","Extra "+n.ToString("D2"),"Large catalog fixture"));
+                }
+                var markets = new object[] {
+                    new {name="fixture",plugins=new[]{CatalogPlugin("sample@fixture","Sample plugin","Community plugin")}},
+                    new {name="openai-curated-remote",plugins=official}
+                };
+                Send(new {id=id,result=new {marketplaces=markets}}); continue;
+            }
             if(method=="config/read") Send(new {id=id,result=new {config=new {model="fixture-fast",model_reasoning_effort="low"}}});
             if(method=="account/rateLimits/read") Send(new {id=id,result=new {rateLimits=new {limitId="codex",
                 primary=new {windowDurationMins=300,usedPercent=12},secondary=new {windowDurationMins=10080,usedPercent=69}}}});

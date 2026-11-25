@@ -460,13 +460,16 @@ export component Desk inherits Window {
     in property <[SettingRow]> settings-rows;
     in property <string> settings-status;
     in property <bool> settings-working;
+    in property <string> settings-working-id;
+    in property <bool> more-plugins;
+    callback show-more-plugins();
     in-out property <string> settings-query;
     changed settings-query => {root.confirm-id = ""; root.search-settings(root.settings-query);}
     private property <string> source-input;
     private property <bool> source-open;
     private property <string> confirm-id;
     changed settings-open => { root.confirm-id = ""; }
-    callback load-settings();
+    callback load-settings(bool);
     callback settings-action(string,string);
     callback search-settings(string);
     function visit-settings(tab: string, provider: string) {
@@ -476,7 +479,7 @@ export component Desk inherits Window {
             if tab != root.settings-tab { root.plugin-section = PluginSection.recommended; }
         }
         root.settings-tab = tab; root.settings-provider = provider;
-        root.load-settings();
+        root.load-settings(false);
         if tab=="Tasks" { TaskControls.open(false,TaskControls.area); }
     }
     title: project == "" ? "Workshop" : project + " · Workshop";
@@ -922,7 +925,7 @@ export component Desk inherits Window {
                     label: ["Recommended", "Installed", "Browse plugins"][i]; width: [130px,90px,132px][i];
                     accessible-label: self.label + (i == 1 ? " plugins" : ""); selected: root.plugin-section == section; enabled: !root.settings-working;
                     activate => { if root.plugin-section != section {
-                        root.plugin-section = section; root.settings-query = ""; root.confirm-id = ""; root.load-settings();
+                        root.plugin-section = section; root.settings-query = ""; root.confirm-id = ""; root.load-settings(false);
                     } }
                 }
             }
@@ -942,9 +945,8 @@ export component Desk inherits Window {
                     toggled => {root.search-settings(root.settings-query);} }
             }
             if (root.settings-query != "" || root.browse-plugins) && root.settings-rows.length == 0 && root.settings-status == "": Text {
-                text: root.settings-query != "" ? "No matches" : "No plugins from official marketplaces."; color: Theme.muted; font-size: 13px;
+                text: root.settings-query != "" ? "No matches" : root.official-only ? "No plugins from official marketplaces." : "No plugins available."; color: Theme.muted; font-size: 13px;
             }
-            if root.settings-status != "": Text { text: root.settings-status; color: Theme.muted; font-size: 13px; wrap: word-wrap; max-height: 70px; overflow: elide; }
             if root.settings-tab == "Appearance": AppearancePage { vertical-stretch: 1; }
             if root.settings-tab == "Notifications": VerticalLayout {
                 spacing: 6px; alignment: start;
@@ -971,8 +973,8 @@ export component Desk inherits Window {
                         }
                         VerticalLayout { alignment: center; width: root.recommendations ? 115px : 100px;
                             if root.recommendations && row.action == "": Text { text: row.button; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
-                            if row.action != "": Action { label: root.confirm-id == row.id ? "Confirm" : row.button;
-                                accessible-label: root.recommendations ? row.button + " " + row.label
+                            if row.action != "": Action { label: root.settings-working && root.settings-working-id == row.id && (row.action == "recommend" || row.action == "install") ? "Installing…" : root.confirm-id == row.id ? "Confirm" : row.button;
+                                accessible-label: root.recommendations ? self.label + " " + row.label
                                     : row.id == "Gemini CLI" ? row.button + " to Gemini" : self.label;
                                 accessible-description: row.button + " " + row.label; width: root.recommendations ? 112px : 98px; height: root.recommendations ? 36px : 32px; selected: true;
                                 enabled: !root.settings-working; activate => {
@@ -984,7 +986,12 @@ export component Desk inherits Window {
                     Rectangle { height: 1px; background: Theme.line; }
                 }
             }
-            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
+            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": HorizontalLayout {
+                height: 48px; spacing: 10px; alignment: stretch;
+                VerticalLayout { alignment: center; Action { label: "Refresh"; width: 83px; height: 34px; enabled: !root.settings-working; activate => {root.load-settings(true);} } }
+                Text { text: root.settings-status; color: Theme.muted; font-size: 13px; horizontal-stretch: 1; min-width: 0px; wrap: word-wrap; overflow: elide; vertical-alignment: center; }
+                if root.more-plugins: VerticalLayout { alignment: center; Action { label: "Show more"; width: 106px; height: 34px; activate => {root.show-more-plugins();} } }
+            }
         }
     }
 

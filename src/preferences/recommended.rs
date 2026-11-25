@@ -84,7 +84,10 @@ impl Pick {
 pub(super) async fn list(p: Provider) -> Result<Vec<Row>> {
     let local = skills(p)?;
     let installed = if p == Provider::Claude {
-        plugins(p, false).await
+        tokio::time::timeout(std::time::Duration::from_secs(15), plugins(p, false, false))
+            .await
+            .context("Claude plugin list timed out")
+            .and_then(|result| result)
     } else {
         Ok(Vec::new())
     };

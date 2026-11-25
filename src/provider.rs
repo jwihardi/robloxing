@@ -7,6 +7,7 @@ mod art;
 mod catalog;
 mod claude;
 pub mod gemini;
+pub mod plugins;
 
 pub fn provider_for(model: &str) -> &'static str {
     if model.starts_with("claude:") {
@@ -300,7 +301,9 @@ struct Frames {
 }
 impl Frames {
     async fn next_line(&mut self) -> Result<Option<String>> {
-        const MAX_FRAME: usize = 16 * 1024 * 1024;
+        self.next_line_with_limit(16 * 1024 * 1024).await
+    }
+    async fn next_line_with_limit(&mut self, limit: usize) -> Result<Option<String>> {
         loop {
             let bytes = self.reader.fill_buf().await?;
             if bytes.is_empty() {
@@ -313,8 +316,9 @@ impl Frames {
             let end = bytes.iter().position(|b| *b == b'\n');
             let count = end.unwrap_or(bytes.len());
             ensure!(
-                self.pending.len() + count <= MAX_FRAME,
-                "Provider event exceeded the 16 MiB frame limit"
+                self.pending.len() + count <= limit,
+                "Provider response exceeded the {} MiB limit",
+                limit / (1024 * 1024)
             );
             self.pending.extend_from_slice(&bytes[..count]);
             self.reader.consume(count + usize::from(end.is_some()));

@@ -10,7 +10,7 @@ mod preferences;
 mod sketch;
 mod transcript;
 use anyhow::{Context, Result};
-use slint::{ComponentHandle, ModelRc, Timer, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, VecModel};
 use std::{
     cell::{Cell, RefCell},
     fs,
@@ -21,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use workshop::{
     Attempt, Store, data_dir,
@@ -39,7 +39,12 @@ enum Update {
     StudioFinished(PathBuf, i64, Result<()>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
-    PreferenceChanged(Result<String>, bool),
+    PreferenceChanged {
+        result: Result<String>,
+        provider: preferences::Provider,
+        account_changed: bool,
+        recommendation: bool,
+    },
     Opened(Arc<Store>, Option<notifications::Target>),
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
@@ -78,7 +83,11 @@ struct App {
     studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
-    settings_rows: RefCell<Vec<preferences::Row>>,
+    settings_page: RefCell<Option<(String, preferences::Provider, PluginSection)>>,
+    settings_rows: RefCell<Rc<Vec<preferences::Row>>>,
+    settings_view: Rc<VecModel<SettingRow>>,
+    plugin_catalogs: RefCell<std::collections::HashMap<preferences::Provider, CachedPlugins>>,
+    plugin_limit: Cell<usize>,
     usage: RefCell<desktop_usage::AccountUsage>,
     catalog: RefCell<provider::Catalog>,
     ui: slint::Weak<Desk>,
@@ -100,6 +109,12 @@ struct App {
     session: RefCell<Option<provider::Session>>,
 }
 const DEFAULT_MODEL: &str = "Default model";
+const PLUGINS_PER_PAGE: usize = 50;
+
+struct CachedPlugins {
+    rows: Rc<Vec<preferences::Row>>,
+    loaded: Instant,
+}
 
 fn context_meter(context: ContextUsage, fresh: bool) -> MeterData {
     fn tokens(n: i64) -> String {
@@ -670,13 +685,12 @@ impl App {
         let query = query.to_lowercase();
         let terms: Vec<_> = query.split_whitespace().collect();
         let ui = self.ui.unwrap();
-        let official = ui.get_settings_tab() == "Plugins"
-            && ui.get_plugin_section() == PluginSection::Marketplace
-            && ui.get_official_only();
+        let browse = ui.get_settings_tab() == "Plugins"
+            && ui.get_plugin_section() == PluginSection::Marketplace;
+        let official = browse && ui.get_official_only();
         let provider = ui.get_settings_provider();
-        let rows: Vec<_> = self
-            .settings_rows
-            .borrow()
+        let all = self.settings_rows.borrow();
+        let mut matching = all
             .iter()
             .filter(|r| !official || preferences::official_plugin(&provider, &r.id))
             .filter(|r| {
@@ -685,7 +699,15 @@ impl App {
                 }
                 let searchable = format!("{} {} {}", r.label, r.id, r.detail).to_lowercase();
                 terms.iter().all(|term| searchable.contains(term))
-            })
+            });
+        let limit = if browse {
+            self.plugin_limit.get()
+        } else {
+            usize::MAX
+        };
+        let rows: Vec<_> = matching
+            .by_ref()
+            .take(limit)
             .map(|r| SettingRow {
                 id: r.id.as_str().into(),
                 label: r.label.as_str().into(),
@@ -694,37 +716,77 @@ impl App {
                 button: r.button.into(),
             })
             .collect();
-        self.ui
-            .unwrap()
-            .set_settings_rows(ModelRc::new(VecModel::from(rows)));
+        ui.set_more_plugins(browse && matching.next().is_some());
+        // Keep delegates (and their focus and scroll position) across status-only updates.
+        let view = &self.settings_view;
+        let shown = view.row_count();
+        if rows.len() < shown
+            || rows
+                .iter()
+                .take(shown)
+                .enumerate()
+                .any(|(i, r)| view.row_data(i).is_none_or(|old| old.id != r.id))
+        {
+            view.set_vec(rows);
+            return;
+        }
+        for (i, row) in rows.iter().take(shown).enumerate() {
+            if view.row_data(i).as_ref() != Some(row) {
+                view.set_row_data(i, row.clone());
+            }
+        }
+        if rows.len() > shown {
+            view.extend_from_slice(&rows[shown..]);
+        }
     }
-    fn load_preferences(&self, message: String) {
+    fn load_preferences(&self, message: String, refresh: bool) {
         let ui = self.ui.unwrap();
         if ui.get_settings_working() {
             return;
         }
         let generation = self.settings_generation.get() + 1;
         self.settings_generation.set(generation);
-        self.settings_rows.borrow_mut().clear();
-        self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
+        let p = preferences::Provider::from_label(&ui.get_settings_provider());
+        let section = ui.get_plugin_section();
+        let page = (tab.clone(), p, section);
+        let switched = self.settings_page.replace(Some(page.clone())).as_ref() != Some(&page);
+        self.settings_read.take();
+        let browse = tab == "Plugins" && section == PluginSection::Marketplace;
+        let catalogs = self.plugin_catalogs.borrow();
+        let cached = catalogs.get(&p).filter(|_| browse);
+        if switched {
+            self.plugin_limit.set(PLUGINS_PER_PAGE);
+            self.settings_rows
+                .replace(cached.map(|c| c.rows.clone()).unwrap_or_default());
+            self.filter_preferences(&ui.get_settings_query());
+        }
+        if !refresh
+            && message.is_empty()
+            && cached.is_some_and(|c| c.loaded.elapsed() < Duration::from_secs(300))
+        {
+            ui.set_settings_status("".into());
+            return;
+        }
         if matches!(tab.as_str(), "Tasks" | "Appearance" | "Notifications") {
-            self.settings_read.take();
             if tab == "Appearance" {
                 appearance::reload(&ui);
             }
             ui.set_settings_status("".into());
             return;
         }
-        let p = preferences::Provider::from_label(&ui.get_settings_provider());
-        let section = ui.get_plugin_section();
         let store = self.store.borrow().clone();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         self.settings_read.replace(Some(cancel));
         ui.set_settings_status(if message.is_empty() {
-            "Loading…".into()
+            if browse {
+                "Loading plugin catalog…"
+            } else {
+                "Loading…"
+            }
+            .into()
         } else {
-            format!("{message} Refreshing…").into()
+            message.clone().into()
         });
         let tx = self.updates.clone();
         std::thread::spawn(move || {
@@ -735,7 +797,7 @@ impl App {
                 .and_then(|rt| {
                     rt.block_on(async {
                         tokio::select! {
-                            rows = preferences::list(&tab, p, section, store.as_deref()) => rows,
+                            rows = preferences::list(&tab, p, section, store.as_deref(), refresh) => rows,
                             _ = cancelled => Ok(Vec::new()),
                         }
                     })
@@ -761,6 +823,7 @@ impl App {
             arg = path.to_string_lossy().into_owned();
         }
         ui.set_settings_working(true);
+        ui.set_settings_working_id(arg.as_str().into());
         self.settings_read.take();
         self.settings_generation
             .set(self.settings_generation.get() + 1);
@@ -789,7 +852,12 @@ impl App {
                         store.as_deref(),
                     ))
                 });
-            let _ = tx.send(Update::PreferenceChanged(result, tab == "Providers"));
+            let _ = tx.send(Update::PreferenceChanged {
+                result,
+                provider: p,
+                account_changed: tab == "Providers",
+                recommendation: action == "recommend",
+            });
         });
     }
     fn choose_inference(&self, changing_model: bool, value: &str) -> Result<()> {
@@ -1022,6 +1090,20 @@ impl App {
                     match rows {
                         Ok(rows) => {
                             let empty = rows.is_empty();
+                            let rows = Rc::new(rows);
+                            if ui.get_settings_tab() == "Plugins"
+                                && ui.get_plugin_section() == PluginSection::Marketplace
+                            {
+                                let provider =
+                                    preferences::Provider::from_label(&ui.get_settings_provider());
+                                self.plugin_catalogs.borrow_mut().insert(
+                                    provider,
+                                    CachedPlugins {
+                                        rows: rows.clone(),
+                                        loaded: Instant::now(),
+                                    },
+                                );
+                            }
                             self.settings_rows.replace(rows);
                             self.filter_preferences(&ui.get_settings_query());
                             let empty_label = if empty && ui.get_settings_tab() == "Skills" {
@@ -1044,10 +1126,33 @@ impl App {
                     }
                 }
                 Update::Preferences(..) => {}
-                Update::PreferenceChanged(result, account_changed) => {
+                Update::PreferenceChanged {
+                    result,
+                    provider,
+                    account_changed,
+                    recommendation,
+                } => {
                     ui.set_settings_working(false);
+                    let id = ui.get_settings_working_id();
+                    ui.set_settings_working_id("".into());
                     match result {
                         Ok(note) => {
+                            if account_changed {
+                                self.plugin_catalogs.borrow_mut().clear();
+                            } else {
+                                self.plugin_catalogs.borrow_mut().remove(&provider);
+                            }
+                            if recommendation {
+                                if let Some(row) =
+                                    Rc::make_mut(&mut self.settings_rows.borrow_mut())
+                                        .iter_mut()
+                                        .find(|r| r.action == "recommend" && r.id == id.as_str())
+                                {
+                                    row.action = "";
+                                    row.button = "Installed";
+                                }
+                                self.filter_preferences(&ui.get_settings_query());
+                            }
                             self.session.take();
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
                                 self.usage.borrow_mut().clear();
@@ -1055,7 +1160,7 @@ impl App {
                                 self.render_settings(s)?;
                                 self.load_models(s.project.clone());
                             }
-                            self.load_preferences(note);
+                            self.load_preferences(note, false);
                         }
                         Err(e) => ui.set_settings_status(format!("{e:#}").into()),
                     }
@@ -1505,6 +1610,10 @@ fn main() -> Result<()> {
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
+        settings_page: Default::default(),
+        settings_view: Default::default(),
+        plugin_catalogs: Default::default(),
+        plugin_limit: Cell::new(PLUGINS_PER_PAGE),
         usage: Default::default(),
         catalog: Default::default(),
         ui: ui.as_weak(),
@@ -1544,9 +1653,17 @@ fn main() -> Result<()> {
             .unwrap_or_default()
     });
     let a = app.clone();
-    ui.on_load_settings(move || a.load_preferences(String::new()));
+    ui.on_load_settings(move |refresh| a.load_preferences(String::new(), refresh));
     let a = app.clone();
-    ui.on_search_settings(move |query| a.filter_preferences(&query));
+    ui.on_search_settings(move |query| {
+        a.plugin_limit.set(PLUGINS_PER_PAGE);
+        a.filter_preferences(&query);
+    });
+    let a = app.clone();
+    ui.on_show_more_plugins(move || {
+        a.plugin_limit.set(a.plugin_limit.get() + PLUGINS_PER_PAGE);
+        a.filter_preferences(&a.ui.unwrap().get_settings_query());
+    });
     let a = app.clone();
     ui.on_settings_action(move |action, arg| {
         a.preference_action(action.to_string(), arg.to_string())
@@ -1638,6 +1755,7 @@ fn main() -> Result<()> {
         }
     });
     ui.set_turns(app.turns.clone().into());
+    ui.set_settings_rows(app.settings_view.clone().into());
     let a = app.clone();
     ui.on_updates_ready(move || {
         if let Err(e) = a.poll() {
