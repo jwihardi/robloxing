@@ -497,6 +497,7 @@ impl Store {
         lead: i64,
         w: &Worker,
         policy: &crate::worker_policy::WorkerPolicy,
+        mut controls: provider::Controls,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<()> {
         let mut assignment = w.assignment.clone();
@@ -506,7 +507,11 @@ impl Store {
         {
             assignment.model = "claude:default".into();
         }
-        let (model, effort) = self.worker_inference(policy, &assignment).await?;
+        let (model, effort) = tokio::select! {
+            biased;
+            _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
+            result = self.worker_inference(policy, &assignment) => result?,
+        };
         let child = self.child_store(lead, w.id)?;
         let last = if let Some(run) = w.run {
             let previous = child.attempt(run)?;
@@ -537,10 +542,8 @@ impl Store {
             params![w.id, a.id, a.model, a.effort],
         )?;
         notify(provider::ReplyUpdate::WorkersChanged);
-        let (tx, rx) = provider::channel();
-        self.controls.lock().unwrap().insert(w.id, tx);
         let update_error = std::cell::RefCell::new(None);
-        let result = provider::worker_turn(&child, &a, rx, &|event| {
+        let result = provider::worker_turn(&child, &a, controls, &|event| {
             let updated = match event {
                 provider::ReplyUpdate::AccountUsage(..) => return notify(event),
                 provider::ReplyUpdate::Usage(tokens) => self
@@ -564,7 +567,6 @@ impl Store {
             notify(provider::ReplyUpdate::WorkersChanged);
         })
         .await;
-        self.controls.lock().unwrap().remove(&w.id);
         if let Some(e) = update_error.into_inner() {
             return Err(e);
         }
@@ -585,9 +587,14 @@ impl Store {
         lead: i64,
         w: Worker,
         policy: &crate::worker_policy::WorkerPolicy,
+        controls: provider::Controls,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<()> {
-        if let Err(e) = self.run_assignment(lead, &w, policy, notify).await {
+        let result = self
+            .run_assignment(lead, &w, policy, controls, notify)
+            .await;
+        self.controls.lock().unwrap().remove(&w.id);
+        if let Err(e) = result {
             self.block_worker(w.id, &format!("{e:#}"))?;
             notify(provider::ReplyUpdate::WorkersChanged);
         }
@@ -743,7 +750,9 @@ impl Store {
                     "UPDATE workers SET state='running',tries=tries+1,run=NULL,detail='Preparing isolated copy' WHERE id=?1",
                     [w.id],
                 )?;
-                running.push(self.drive_worker(lead.id, w.clone(), &policy, notify));
+                let (tx, rx) = provider::channel();
+                self.controls.lock().unwrap().insert(w.id, tx);
+                running.push(self.drive_worker(lead.id, w.clone(), &policy, rx, notify));
             }
             notify(provider::ReplyUpdate::WorkersChanged);
             if let Some(done) = running.next().await {

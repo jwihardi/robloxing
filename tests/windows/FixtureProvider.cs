@@ -99,6 +99,8 @@ class FixtureProvider {
         }
     }
     static void Main(string[] args) {
+        if (Environment.GetEnvironmentVariable("GIT_DIR") != null && Mode("check-git-context"))
+            throw new InvalidDataException("Provider or check inherited the caller's repository");
         if(args.Length>0 && args[0]=="-p") { Claude(args); return; }
         if(args.Length > 0 && (args[0]=="auth" || args[0]=="login" || args[0]=="logout")){
             bool claude=args[0]=="auth";
@@ -151,6 +153,10 @@ class FixtureProvider {
             if(method=="initialize") Send(new {id=id,result=new {}});
             if(method=="config/read") Send(new {id=id,result=new {config=new {model="fixture-fast",model_reasoning_effort="low"}}});
             if(method=="model/list"){
+                if (Mode("catalog.hold")) {
+                    File.WriteAllText(Path.Combine(Dir, "catalog.ready"), "ready");
+                    while (Mode("catalog.hold")) Thread.Sleep(40);
+                }
                 var low=new {reasoningEffort="low"}; var high=new {reasoningEffort="high"};
                 Send(new {id=id,result=new {data=new[]{new {model="fixture-fast",defaultReasoningEffort="low",supportedReasoningEfforts=new[]{low},isDefault=true},
                     new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}}}});

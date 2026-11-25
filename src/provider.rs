@@ -65,6 +65,7 @@ pub fn managed(
     )
 }
 fn spawn_managed(mut cmd: CommandWrap, program: &str) -> Result<Box<dyn ChildWrapper>> {
+    crate::git::clear_repository_env(cmd.command_mut().as_std_mut());
     cmd.wrap(KillOnDrop);
     #[cfg(windows)]
     {

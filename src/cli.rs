@@ -295,32 +295,36 @@ fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
     drop(tx);
     result
 }
+
+fn list_models(project: &Path, provider: Option<&str>) -> Result<()> {
+    let project = dunce::canonicalize(project)?;
+    anyhow::ensure!(project.is_dir(), "Choose a folder for model discovery");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let catalog = runtime.block_on(provider::worker_catalog(&project, provider))?;
+    for model in catalog.models {
+        let efforts = model
+            .supported_reasoning_efforts
+            .iter()
+            .map(|e| e.reasoning_effort.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{}  {}", model.model, efforts);
+    }
+    Ok(())
+}
+
 pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let args = Args::parse_from(args);
-    if let Action::Studio { action } = args.command {
-        return studio(&args.project, action);
+    match args.command {
+        Action::Studio { action } => return studio(&args.project, action),
+        Action::Models { provider } => return list_models(&args.project, provider.as_deref()),
+        _ => {}
     }
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
-        Action::Studio { .. } => unreachable!(),
-        Action::Models { provider } => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            let catalog = runtime.block_on(provider::worker_catalog(
-                &store.project,
-                provider.as_deref(),
-            ))?;
-            for model in catalog.models {
-                let efforts = model
-                    .supported_reasoning_efforts
-                    .iter()
-                    .map(|e| e.reasoning_effort.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("{}  {}", model.model, efforts);
-            }
-        }
+        Action::Studio { .. } | Action::Models { .. } => unreachable!(),
         Action::Agents { id } => {
             println!("{}", serde_json::to_string_pretty(&store.workers(id)?)?);
             println!("{}", store.handoff(id)?);
