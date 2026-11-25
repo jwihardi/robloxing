@@ -2,6 +2,8 @@ import { Theme, ThemeColors, Action } from "common.slint";
 export { ThemeColors } from "common.slint";
 import { AppearancePage } from "appearance.slint";
 import { SketchPad, Sketch } from "sketch.slint";
+import { Comparison, ComparisonPage } from "comparison.slint";
+export { Comparison } from "comparison.slint";
 export { Sketch } from "sketch.slint";
 export { Appearance, ThemeChoice } from "appearance.slint";
 import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
@@ -10,7 +12,7 @@ export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string }
@@ -404,6 +406,14 @@ export component Desk inherits Window {
     callback attach(bool);
     callback remove-attachment(int);
     in-out property <bool> settings-open;
+    in property <bool> attention-enabled;
+    callback save-attention(bool);
+    out property <bool> watching-chat: root.chat-screen;
+    out property <bool> watching-studio: root.studio-open;
+    public function show-destination(studio: bool) {
+        root.chat-query = "";
+        root.visit(studio ? "studio" : "chat");
+    }
     in-out property <string> settings-tab: "Providers";
     in-out property <string> settings-provider: "Codex";
     in-out property <bool> browse-plugins;
@@ -547,8 +557,9 @@ export component Desk inherits Window {
             root.operate(root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
-    function new-chat() {root.chat-query=""; root.compact-context=false; root.open-panel=OpenPanel.closed; root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.settings-open = false; root.select-row(-1); composer.focus-input();}
+    function new-chat() {root.visit("chat"); root.chat-query=""; root.select-row(-1); composer.focus-input();}
     public function open-asset-draft() {
+        if Comparison.visible {Comparison.close();}
         root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
         if !root.writable { root.new-chat(); }
         composer.focus-input();
@@ -557,8 +568,8 @@ export component Desk inherits Window {
     private property <bool> compact: root.width < 940px;
     private property <bool> hide-context;
     private property <bool> compact-context;
-    private property <bool> chat-screen: !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
-    private property <bool> has-context: (root.project != "" || root.settings-open) && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting);
+    private property <bool> chat-screen: !Comparison.visible && !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
+    private property <bool> has-context: (root.project != "" || root.settings-open) && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting);
     private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
     private property <string> chat-query;
     private property <[PickerOption]> search-hits;
@@ -575,6 +586,7 @@ export component Desk inherits Window {
         root.open-panel = OpenPanel.closed;
     }
     function visit(where: string) {
+        if Comparison.visible {Comparison.close();}
         root.open-panel = OpenPanel.closed; root.viewing-shot = "";
         root.studio-open = where == "studio"; root.settings-open = where == "settings"; root.album-open = where == "album";
         root.compact-context = false;
@@ -609,7 +621,7 @@ export component Desk inherits Window {
         }
     }
     pane := Rectangle {
-        visible: !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
+        visible: root.chat-screen;
         x: rail.width; width: root.width - self.x; height: root.height;
         private property <length> measure: min(760px, self.width - (self.width < 610px ? 32px : 72px));
         Rectangle { y:55px; width:parent.width; height:1px; background: Theme.line; visible:root.project!=""; }
@@ -694,6 +706,11 @@ export component Desk inherits Window {
                             x: 12px; y: message.image-height + 15px; width: 106px; height: 29px;
                             label: "Annotate"; glyph: "\u{e104}"; enabled: !root.busy || root.running;
                             activate => {Sketch.annotate(turn.image-path,false);}
+                        }
+                        if message.has-sketch && turn.original-path != "": Action {
+                            x: 120px; y: message.image-height + 15px; width: 139px; height: 29px;
+                            label: "Compare"; accessible-description: turn.previous-output ? "Compare with the previous chat image" : "Compare with the original";
+                            activate => {Comparison.open(turn.original-path,turn.markup-path,turn.image-path,turn.previous-output);}
                         }
                         body := TextInput {
                             x: turn.from-user ? 16px : 0px; y: (turn.from-user ? 11px : 0px) + message.preview-height;
@@ -807,6 +824,9 @@ export component Desk inherits Window {
         Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
             source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
     }
+    if Comparison.visible: ComparisonPage {
+        x: rail.width; width: root.width - self.x; height: root.height; can-edit: !root.busy || root.running;
+    }
     if root.settings-open: Rectangle {
         x: rail.width; width: root.width - self.x; height: root.height; background: Theme.canvas;
         VerticalLayout {
@@ -848,13 +868,20 @@ export component Desk inherits Window {
             }
             if root.settings-status != "": Text { text: root.settings-status; color: Theme.muted; font-size: 13px; wrap: word-wrap; max-height: 70px; overflow: elide; }
             if root.settings-tab == "Appearance": AppearancePage { vertical-stretch: 1; }
+            if root.settings-tab == "Notifications": VerticalLayout {
+                spacing: 6px; alignment: start;
+                CheckBox { text: "Notify me when I’m needed"; checked: root.attention-enabled;
+                    toggled => {root.save-attention(self.checked);} }
+                Text { text: "Show a Windows notification when a background run needs your input or has work ready to review.";
+                    color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            }
             if root.settings-tab=="Tasks": defaults-scroll:=ScrollView {
                 vertical-stretch:1; content-width:self.visible-width; content-height:defaults-editor.preferred-height;
                 defaults-editor:=TaskEditor { width:defaults-scroll.visible-width - 8px;
                     catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
                     reload=>{root.reload-models();} back=>{root.settings-open=false;} }
             }
-            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance": preference-list := ListView { vertical-stretch: 1;
+            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
                 for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: 60px;
                     HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
                         VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
@@ -876,7 +903,7 @@ export component Desk inherits Window {
                     Rectangle { height: 1px; background: Theme.line; }
                 }
             }
-            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
+            if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": Action { label: "Refresh"; width: 83px; enabled: !root.settings-working; activate => {root.load-settings();} }
         }
     }
 
@@ -904,8 +931,8 @@ export component Desk inherits Window {
         if root.settings-open: VerticalLayout {
             padding: 14px; padding-top: 19px; alignment: start; spacing: 5px;
             Text { text: "Settings"; height: 36px; color: Theme.text; font-size: 20px; font-weight: 600; }
-            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance"]: Action {
-                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}","\u{e790}"][i]; selected: root.settings-tab == tab;
+            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance", "Notifications"]: Action {
+                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}","\u{e790}","\u{ea8f}"][i]; selected: root.settings-tab == tab;
                 enabled: !root.settings-working; activate => {root.visit-settings(tab,root.settings-provider);root.compact-context=false;}
             }
         }

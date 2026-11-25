@@ -1,6 +1,8 @@
 mod check;
 pub mod cli;
 mod git;
+mod image_comparison;
+pub use image_comparison::ImageComparison;
 pub mod provider;
 pub mod screenshots;
 pub mod studio;
@@ -64,6 +66,7 @@ pub struct Store {
 pub struct ChatMessage {
     pub screenshot: bool,
     pub image: Option<PathBuf>,
+    pub comparison: Option<ImageComparison>,
     pub id: i64,
     pub from_user: bool,
     pub delivery_notice: bool,
@@ -74,6 +77,13 @@ pub struct ChatMessage {
 impl Store {
     pub fn messages_after(&self, attempt: i64, after: i64) -> Result<Vec<ChatMessage>> {
         self.message_range(attempt, after, i64::MAX, -1, false)
+    }
+    pub fn last_chat_image_event(&self, attempt: i64) -> Result<i64> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT COALESCE(MAX(id),0) FROM events WHERE attempt=?1 AND kind='workshop/image'",
+            [attempt],
+            |r| r.get(0),
+        )?)
     }
     pub fn message_page(
         &self,
@@ -123,6 +133,11 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                comparison: if kind == "workshop/image" {
+                    self.comparison_before(&db, attempt, row.get(0)?)?
+                } else {
+                    None
+                },
                 image: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
@@ -384,15 +399,7 @@ impl Store {
         )
     }
     fn attached_chat_image<'a>(&self, files: &'a [PathBuf]) -> Option<&'a PathBuf> {
-        let folder = self.dir.join("chat-images");
-        files.iter().find(|path| {
-            path.parent() == Some(&folder)
-                && path.extension().is_some_and(|ext| ext == "png")
-                && path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
-        })
+        files.iter().find(|path| self.is_chat_image(path))
     }
     pub fn task_chat_image(&self, task: i64) -> Result<Option<PathBuf>> {
         Ok(self
@@ -400,13 +407,22 @@ impl Store {
             .cloned())
     }
     pub fn save_chat_image(&self, png: &[u8]) -> Result<PathBuf> {
-        let folder = self.dir.join("chat-images");
-        let path = folder.join(format!("{}.png", digest(png)));
+        Self::write_image(
+            self.dir
+                .join("chat-images")
+                .join(format!("{}.png", digest(png))),
+            png,
+        )
+    }
+    fn write_image(path: PathBuf, png: &[u8]) -> Result<PathBuf> {
         if !path.is_file() {
-            fs::create_dir_all(&folder)?;
-            let mut temp = tempfile::NamedTempFile::new_in(folder)?;
+            let folder = path.parent().context("Invalid chat image path")?;
+            fs::create_dir_all(folder)?;
+            // The Windows tempfile APIs need extended paths for deeply nested Workshop homes.
+            let absolute = fs::canonicalize(folder)?;
+            let mut temp = tempfile::NamedTempFile::new_in(&absolute)?;
             temp.write_all(png)?;
-            temp.persist(&path)?;
+            temp.persist(absolute.join(path.file_name().context("Invalid chat image filename")?))?;
         }
         Ok(path)
     }

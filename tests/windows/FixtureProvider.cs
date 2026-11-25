@@ -132,6 +132,7 @@ class FixtureProvider {
                 turn=Guid.NewGuid().ToString();
                 Send(new {id=id,result=new {turn=new {id=turn}}});
                 var first=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
+                while (Mode("notice.hold")) Thread.Sleep(40);
                 if(studio){
                     if(File.Exists(Path.Combine(Dir,"studio.hold"))) Thread.Sleep(Timeout.Infinite);
                     if (studioKind == "summary") {

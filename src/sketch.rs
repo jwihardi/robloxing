@@ -1,4 +1,4 @@
-use crate::{App, Desk, Sketch, capture};
+use crate::{App, Comparison, Desk, Sketch, capture};
 use anyhow::{Context, Result, ensure};
 use image::{ColorType, ImageEncoder, Pixel, Rgba, RgbaImage, codecs::png::PngEncoder, imageops};
 use slint::{Color, ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
@@ -145,6 +145,26 @@ impl Draft {
     pub(crate) fn has_content(&self) -> bool {
         self.original.is_some() || !self.strokes.is_empty()
     }
+    fn encode(pixels: &RgbaImage) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes).write_image(
+            pixels.as_raw(),
+            pixels.width(),
+            pixels.height(),
+            ColorType::Rgba8.into(),
+        )?;
+        Ok(bytes)
+    }
+    pub(crate) fn save(&self, store: &workshop::Store) -> Result<std::path::PathBuf> {
+        if let Some(original) = &self.original {
+            let clean = Self::encode(original)?;
+            if self.strokes.is_empty() {
+                return store.save_chat_image(&clean);
+            }
+            return store.save_annotation(&clean, &self.png()?);
+        }
+        store.save_chat_image(&self.png()?)
+    }
     pub(crate) fn png(&self) -> Result<Vec<u8>> {
         let mut full;
         let pixels = if let Some(original) = &self.original {
@@ -154,14 +174,7 @@ impl Draft {
         } else {
             &self.pixels
         };
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes).write_image(
-            pixels.as_raw(),
-            pixels.width(),
-            pixels.height(),
-            ColorType::Rgba8.into(),
-        )?;
-        Ok(bytes)
+        Self::encode(pixels)
     }
 }
 
@@ -210,6 +223,44 @@ impl App {
 }
 
 pub(crate) fn connect(ui: &Desk, app: &Rc<App>) {
+    let a = app.clone();
+    ui.global::<Comparison>()
+        .on_open(move |source, markup, revision, previous| {
+            let ui = a.ui.unwrap();
+            let panel = ui.global::<Comparison>();
+            let load = |path: &slint::SharedString| {
+                Image::load_from_path(Path::new(path.as_str()))
+                    .map_err(|_| anyhow::anyhow!("Could not open the comparison image at {path}."))
+            };
+            let result = (|| -> Result<()> {
+                let original = load(&source)?;
+                let revised = load(&revision)?;
+                let marked = if markup.is_empty() {
+                    Image::default()
+                } else {
+                    load(&markup)?
+                };
+                panel.set_original_path(source);
+                panel.set_revision_path(revision);
+                panel.set_previous(previous);
+                panel.set_original(original);
+                panel.set_marked(marked);
+                panel.set_revision(revised);
+                Ok(())
+            })();
+            if let Err(e) = result {
+                ui.set_notice(e.to_string().into());
+            }
+        });
+    let a = app.clone();
+    ui.global::<Comparison>().on_close(move || {
+        let ui = a.ui.unwrap();
+        let panel = ui.global::<Comparison>();
+        panel.set_revision(Default::default());
+        panel.set_marked(Default::default());
+        panel.set_original(Default::default());
+        ui.invoke_focus_draft();
+    });
     let panel = ui.global::<Sketch>();
     let a = app.clone();
     panel.on_replace(move |replace| {

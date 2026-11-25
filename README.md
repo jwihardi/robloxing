@@ -40,6 +40,10 @@ Choose **+ → Draw a sketch** to open a drawing pad above the message box. Draw
 
 To give feedback on an image, choose **Annotate** under a generated image in chat, on a finished image in **Game studio**, or in the full-size screenshot viewer. Mark the area you mean, type the change you want, and send. Workshop keeps the original and sends a marked-up PNG at the source resolution. Undo removes pen strokes while keeping the underlying image.
 
+Choose **Compare** under a returned image to drag a divider between versions. The arrow keys move the divider. Home and End reveal either side. **Show markup** brings back the strokes you sent, and **Annotate original** or **Annotate revision** starts another edit. For a text-only follow-up, Compare shows the previous image from that chat.
+
+Enable **Settings → Notifications → Notify me when I’m needed** for Windows alerts while Workshop runs in the background. An alert opens the chat or Studio result that needs attention. A blocked run, a new image, and changes or decisions ready for review can trigger an alert.
+
 ## Themes
 
 Open **Settings → Appearance** and select **Workshop Dark**, **Nord**, **Catppuccin Mocha**, or **Solarized Light** to apply it across Workshop. Choose **New theme** to start with the current palette. Give it a name, paste color declarations or choose **Load file…** to read a local CSS file. The preview updates as you edit. **Save theme** applies it and remembers it across projects and restarts. Select a saved custom theme and choose **Edit theme** to change or remove it.

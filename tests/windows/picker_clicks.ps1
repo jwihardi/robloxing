@@ -17,6 +17,7 @@ public class WorkshopPointer {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr target, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     private delegate bool EnumChildProc(IntPtr hwnd, IntPtr param);
@@ -59,6 +60,7 @@ $fixtureApp = Join-Path $root 'Workshop-test.exe'
 Copy-Item -LiteralPath $exe -Destination $fixtureApp
 $env:WORKSHOP_HOME = Join-Path $root 'data'
 $env:WORKSHOP_PROBE_DIR = $root
+$env:WORKSHOP_TEST_NOTICE_DIR = (New-Item -ItemType Directory -Path (Join-Path $root 'notifications')).FullName
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
 $env:WORKSHOP_CLAUDE = $env:WORKSHOP_CODEX
 $env:CODEX_HOME = Join-Path $root 'codex'
@@ -138,6 +140,73 @@ function Open-SketchPad {
     Click 'Draw a sketch'
     Wait-For { Named 'Sketch canvas' } 'drawing surface'
 }
+function Save-PrivateWindow($path) {
+    $rect = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
+    $bmp = [Drawing.Bitmap]::new([int]$rect.Width, [int]$rect.Height)
+    $g = [Drawing.Graphics]::FromImage($bmp)
+    $dc = $g.GetHdc()
+    try {
+        if (![WorkshopPointer]::PrintWindow($appWindow,$dc,2)) { throw 'Could not render the private Workshop window' }
+    } finally { $g.ReleaseHdc($dc); $g.Dispose() }
+    try { $bmp.Save($path,[Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+}
+function Test-Attention {
+    $toggle = "Notify me when I$([char]0x2019)m needed"
+    Click 'Settings'
+    Wait-For { (Named 'Notifications').Current.IsEnabled } 'notification settings section'
+    Click 'Notifications'
+    Wait-For { Named $toggle } 'notification preference'
+    $pattern = [System.Windows.Automation.TogglePattern]::Pattern
+    if ((Named $toggle).GetCurrentPattern($pattern).Current.ToggleState -ne 'Off') { throw 'Notifications must start disabled' }
+    Click $toggle
+    Wait-For { (Named $toggle).GetCurrentPattern($pattern).Current.ToggleState -eq 'On' } 'enabled notifications'
+    Click 'Close settings'
+    foreach ($blocked in @($false,$true)) {
+        Click 'New chat'
+        $hold = Join-Path $root 'notice.hold'
+        [void](New-Item -ItemType File -Path $hold)
+        if ($blocked) {
+            Remove-Item -LiteralPath (Join-Path $root 'small-talk')
+            [void](New-Item -ItemType File -Path (Join-Path $root 'blocker'))
+        }
+        $prompt = if ($blocked) { 'Prepare the release' } else { 'Hello from another chat' }
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($prompt)
+        Click 'Send message'
+        Wait-For { Named 'Stop response' } 'background chat running'
+        Click 'Settings'
+        Wait-For { Named $toggle } 'a different screen while the run finishes'
+        Remove-Item -LiteralPath $hold
+        Wait-For { (Named 'New chat').Current.IsEnabled } 'background run completion'
+        if (!$blocked) { Click 'Close settings' }
+    }
+    Wait-For { @(Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json').Count -ge 1 } 'notification delivery'
+    $notices = @(Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json')
+    $notice = Get-Content -Raw -LiteralPath $notices[0].FullName | ConvertFrom-Json
+    if ($notices.Count -ne 1 -or $notice.title -ne 'Chat needs your attention' -or $notice.detail -notlike '*Missing release input*') { throw 'Expected only the blocked chat to notify with its missing input' }
+    Click 'Close settings'
+    Click 'New chat'
+    Wait-For { !(Named 'Retry') -and !(Named 'Codex reply') } 'leave the blocked conversation'
+    [void](New-Item -ItemType File -Path ($notices[0].FullName + '.click'))
+    Wait-For { $el=Named 'Your message'; $el -and $el.GetCurrentPattern($valuePattern).Current.Value -eq 'Prepare the release' } 'notification activation restores the correct chat'
+    Click 'Game studio'
+    Wait-For { Named 'Images' } 'Studio tool list'
+    if (!(Named 'Art brief')) { Click 'Images' }
+    Wait-For { Named 'Art brief' } 'image workspace'
+    Copy-Item -LiteralPath $env:WORKSHOP_TEST_CAPTURE_IMAGE -Destination (Join-Path $root 'studio-image.png') -Force
+    (Named 'Art brief').GetCurrentPattern($valuePattern).SetValue('Moonlit harbor')
+    [void](New-Item -ItemType File -Path $hold)
+    Click 'Generate image'
+    Wait-For { Named 'Cancel run' } 'Studio run in progress'
+    Click 'Settings'
+    Wait-For { Named $toggle } 'background Studio run'
+    Remove-Item -LiteralPath $hold
+    Wait-For { @(Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json').Count -eq 2 } 'ready Studio notification'
+    $ready = Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json' | Where-Object { $_.FullName -ne $notices[0].FullName }
+    if ((Get-Content -Raw -LiteralPath $ready.FullName | ConvertFrom-Json).title -ne 'Studio result ready for review') { throw 'Missing Studio review alert' }
+    [void](New-Item -ItemType File -Path ($ready.FullName + '.click'))
+    Wait-For { (Named 'Attach to chat') -and (Named 'Moonlit harbor') } 'notification opens its completed Studio asset'
+    'Background notifications, chat activation and Studio result activation passed'
+}
 function Test-Sketch {
     Wait-For { (Named 'New chat').Current.IsEnabled } 'available project'
     Click 'New chat'
@@ -200,6 +269,7 @@ function Test-Sketch {
     }) } 'sketch-only follow-up delivered'
     Wait-For { (Named 'New chat').Current.IsEnabled -and !(Named 'Stop response') } 'finished sketch follow-up'
     Click 'New chat'
+    Wait-For { Named 'New conversation' } 'fresh chat before reopening the sketch history'
     Click $caption
     Wait-For {
         $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
@@ -263,7 +333,65 @@ function Test-Sketch {
             ForEach-Object { $_.GetCurrentPattern($valuePattern).Current.Value }
         (Named 'Enlarge image') -and $captions -contains 'Revised layout'
     } 'revised project image returned to the chat'
-    'Sketch drawing, delivery, history and annotated image refinement passed'
+    Click 'Compare'
+    $divider = 'Image comparison divider'
+    Wait-For { Named $divider } 'image comparison'
+    $range = [System.Windows.Automation.RangeValuePattern]::Pattern
+    Click $divider 0.25
+    Wait-For { $v=(Named $divider).GetCurrentPattern($range).Current.Value; $v -gt 23 -and $v -lt 27 } 'pointer adjusts reveal'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,35,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,35,1)
+    Wait-For { (Named $divider).GetCurrentPattern($range).Current.Value -eq 100 } 'End reveals the original'
+    $clean = Join-Path $root 'comparison-clean.png'
+    Save-PrivateWindow $clean
+    Click 'Show markup'
+    Wait-For { (Named 'Show markup').GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq 'On' } 'visible markup'
+    $ink = Join-Path $root 'comparison-marked.png'
+    Save-PrivateWindow $ink
+    $cleanPixels = [Drawing.Bitmap]::new($clean)
+    $inkPixels = [Drawing.Bitmap]::new($ink)
+    try {
+        $x = [int]($inkPixels.Width * 0.55)
+        $changes = 0
+        for ($y = [int]($inkPixels.Height/3); $y -lt $inkPixels.Height*0.75; $y++) {
+            $color = $inkPixels.GetPixel($x,$y)
+            if ($color.R -gt $color.B + 25 -and $color.ToArgb() -ne $cleanPixels.GetPixel($x,$y).ToArgb()) { $changes++ }
+        }
+        if ($changes -lt 2) { throw 'Markup toggle did not reveal the red annotation on the source' }
+    } finally { $cleanPixels.Dispose(); $inkPixels.Dispose() }
+    (Named $divider).GetCurrentPattern($range).SetValue(0)
+    Wait-For { (Named $divider).GetCurrentPattern($range).Current.Value -eq 0 } 'full revision'
+    $revision = Join-Path $root 'comparison-revision.png'
+    Save-PrivateWindow $revision
+    (Named $divider).GetCurrentPattern($range).SetValue(50)
+    Wait-For { (Named $divider).GetCurrentPattern($range).Current.Value -eq 50 } 'accessible divider'
+    Save-PrivateWindow (Join-Path $root 'comparison.png')
+    $half = [Drawing.Bitmap]::new((Join-Path $root 'comparison.png'))
+    $left = [Drawing.Bitmap]::new($ink)
+    $right = [Drawing.Bitmap]::new($revision)
+    try {
+        foreach ($fraction in @(0.46,0.65)) {
+            $side = if ($fraction -lt 0.5) { $left } else { $right }
+            $x = [int]($half.Width * $fraction)
+            for ($y = [int]($half.Height/3); $y -lt $half.Height*0.75; $y+=3) {
+                if ($half.GetPixel($x,$y).ToArgb() -ne $side.GetPixel($x,$y).ToArgb()) { throw 'Moving the divider shifted or exposed the wrong source image' }
+            }
+        }
+    } finally { $half.Dispose(); $left.Dispose(); $right.Dispose() }
+    Click 'Annotate revision'
+    Wait-For { Named 'Sketch canvas' } 'refine revision'
+    $revisedPad = (Named 'Sketch canvas').Current.BoundingRectangle
+    if ([Math]::Abs($revisedPad.Width / $revisedPad.Height - 200/140) -gt 0.03) { throw 'Wrong image selected for revision markup' }
+    Click 'Done'
+    Click 'Remove sketch'
+    Click 'Compare'
+    Wait-For { Named 'Annotate original' } 'comparison reopened'
+    Click 'Annotate original'
+    Wait-For { Named 'Sketch canvas' } 'refine original'
+    $originalPad = (Named 'Sketch canvas').Current.BoundingRectangle
+    if ([Math]::Abs($originalPad.Width / $originalPad.Height - 140/200) -gt 0.03) { throw 'Wrong image selected for original markup' }
+    'Sketch drawing, annotated image refinement and comparison passed'
+    Test-Attention
 }
 # A GUI-subsystem executable must accept automation arguments and finish with redirected output.
 $command = [Diagnostics.ProcessStartInfo]::new($fixtureApp, "--headless --project `"$project`" open")

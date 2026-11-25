@@ -4,6 +4,7 @@ mod capture;
 mod desktop_studio;
 mod desktop_tasks;
 mod inspector;
+mod notifications;
 mod preferences;
 mod sketch;
 use anyhow::{Context, Result};
@@ -27,14 +28,17 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
+    Attention(notifications::Target, &'static str, String),
+    NotificationClicked(notifications::Target),
+    NotificationError(String),
     StudioFinished(PathBuf, i64, Result<()>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged(Result<String>, bool),
-    Opened(Arc<Store>),
+    Opened(Arc<Store>, Option<notifications::Target>),
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
     AccountUsage(PathBuf, Vec<UsageWindow>),
@@ -64,6 +68,7 @@ impl Updates {
     }
 }
 struct App {
+    pending_notification: RefCell<Option<notifications::Target>>,
     inspector: RefCell<Option<inspector::Inspector>>,
     task_overrides:
         RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
@@ -477,6 +482,13 @@ impl App {
                 ..Default::default()
             };
             sketch::set_turn_image(&mut turn, message.image);
+            if let Some(pair) = message.comparison {
+                turn.original_path = pair.original.to_string_lossy().as_ref().into();
+                turn.previous_output = pair.previous_output;
+                if let Some(path) = pair.markup {
+                    turn.markup_path = path.to_string_lossy().as_ref().into();
+                }
+            }
             if !message.dispatched_workers.is_empty() {
                 let mut batch = Vec::new();
                 for id in message.dispatched_workers {
@@ -648,7 +660,7 @@ impl App {
         self.settings_rows.borrow_mut().clear();
         self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
-        if matches!(tab.as_str(), "Tasks" | "Appearance") {
+        if matches!(tab.as_str(), "Tasks" | "Appearance" | "Notifications") {
             self.settings_read.take();
             if tab == "Appearance" {
                 appearance::reload(&ui);
@@ -863,7 +875,7 @@ impl App {
             let _ = tx.send(Update::Finished(r));
         });
     }
-    fn poll(&self) -> Result<()> {
+    fn poll(self: &Rc<Self>) -> Result<()> {
         self.updates.pending.store(false, Ordering::Release);
         let ui = self.ui.unwrap();
         let mut partial = None::<String>;
@@ -871,9 +883,28 @@ impl App {
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             match update {
+                Update::Attention(target, title, detail) => self.notify(target, title, &detail),
+                Update::NotificationError(error) => ui.set_notice(error.into()),
+                Update::NotificationClicked(target) => {
+                    self.pending_notification.replace(Some(target));
+                    self.open_notification()?;
+                }
                 Update::StudioFinished(project, id, result) => {
                     let slot = self.store.borrow();
                     if let Some(store) = slot.as_ref().filter(|s| s.project == project) {
+                        let job = store.studio_job(id)?;
+                        let title = match job.state.as_str() {
+                            "Ready" => Some("Studio result ready for review"),
+                            "Failed" => Some("Studio run needs attention"),
+                            _ => None,
+                        };
+                        if let Some(title) = title {
+                            self.notify(
+                                notifications::Target::studio(project, id),
+                                title,
+                                &job.title,
+                            );
+                        }
                         self.studio_cancel.take();
                         let studio = ui.global::<Studio>();
                         studio.set_working(false);
@@ -894,6 +925,8 @@ impl App {
                             studio.set_message(format!("{e:#}").into());
                         }
                     }
+                    drop(slot);
+                    self.open_notification()?;
                 }
                 Update::Captured(project, attempt, command, result) => {
                     ui.set_capturing(false);
@@ -962,8 +995,14 @@ impl App {
                         Err(e) => ui.set_settings_status(format!("{e:#}").into()),
                     }
                 }
-                Update::Opened(store) => {
+                Update::Opened(store, target) => {
                     ui.invoke_reset_chat_navigation();
+                    if ui.global::<Comparison>().get_visible() {
+                        ui.global::<Comparison>().invoke_close();
+                    }
+                    if target.is_some() {
+                        self.pending_notification.replace(target);
+                    }
                     self.task_overrides.borrow_mut().clear();
                     self.close_inspector();
                     self.studio_cancel.take();
@@ -1090,6 +1129,7 @@ impl App {
                         .into(),
                     );
                     self.render()?;
+                    self.open_notification()?;
                 }
             }
         }
@@ -1110,6 +1150,9 @@ impl App {
         Ok(())
     }
     fn open(self: &Rc<Self>, path: PathBuf) {
+        self.open_to(path, None);
+    }
+    fn open_to(self: &Rc<Self>, path: PathBuf, target: Option<notifications::Target>) {
         if self
             .store
             .borrow()
@@ -1127,7 +1170,7 @@ impl App {
                 home.join("last-project.txt"),
                 s.project.to_string_lossy().as_bytes(),
             )?;
-            tx.send(Update::Opened(s))?;
+            tx.send(Update::Opened(s, target))?;
             Ok(String::new())
         });
     }
@@ -1169,7 +1212,7 @@ impl App {
         {
             let slot = self.store.borrow();
             let store = slot.as_ref().context("Open a project to send a sketch.")?;
-            message.files.push(store.save_chat_image(&sketch.png()?)?);
+            message.files.push(sketch.save(store)?);
             if message.text.trim().is_empty() {
                 message.text = "Sketch".into();
             }
@@ -1256,21 +1299,47 @@ impl App {
                     store.bind_draft_screenshots(a.id)?;
                 }
                 events.send(Update::Started(a.id))?;
-                provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
-                    let _ = events.send(match message {
-                        provider::ReplyUpdate::Delta(s) => Update::Delta(s.to_owned()),
-                        provider::ReplyUpdate::Context(context) => Update::Context(a.id, context),
-                        provider::ReplyUpdate::AccountUsage(windows) => {
-                            Update::AccountUsage(store.project.clone(), windows)
-                        }
-                        provider::ReplyUpdate::Usage(_) | provider::ReplyUpdate::Activity(_) => {
-                            return;
-                        }
-                        provider::ReplyUpdate::WorkersChanged => Update::WorkersChanged,
-                        provider::ReplyUpdate::Stored => Update::ReplyStored,
-                        provider::ReplyUpdate::TranscriptChanged => Update::TranscriptChanged,
+                let earlier_image = store.last_chat_image_event(a.id)?;
+                let earlier_checkpoint = store.current_checkpoint(a.id)?;
+                let outcome =
+                    provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
+                        let _ = events.send(match message {
+                            provider::ReplyUpdate::Delta(s) => Update::Delta(s.to_owned()),
+                            provider::ReplyUpdate::Context(context) => {
+                                Update::Context(a.id, context)
+                            }
+                            provider::ReplyUpdate::AccountUsage(windows) => {
+                                Update::AccountUsage(store.project.clone(), windows)
+                            }
+                            provider::ReplyUpdate::Usage(_)
+                            | provider::ReplyUpdate::Activity(_) => {
+                                return;
+                            }
+                            provider::ReplyUpdate::WorkersChanged => Update::WorkersChanged,
+                            provider::ReplyUpdate::Stored => Update::ReplyStored,
+                            provider::ReplyUpdate::TranscriptChanged => Update::TranscriptChanged,
+                        });
                     });
-                })?;
+                let finished = store.attempt(a.id)?;
+                if let Some(title) = notifications::chat_reason(
+                    &store,
+                    &a,
+                    &finished,
+                    earlier_image,
+                    earlier_checkpoint,
+                )? {
+                    let detail = if finished.state == "failed" {
+                        finished.action
+                    } else {
+                        a.prompt.clone()
+                    };
+                    events.send(Update::Attention(
+                        notifications::Target::chat(store.project.clone(), a.id),
+                        title,
+                        detail,
+                    ))?;
+                }
+                outcome?;
                 if let Some(live) = session {
                     events.send(Update::Warm(Box::new(live)))?;
                 }
@@ -1305,6 +1374,7 @@ fn main() -> Result<()> {
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
+        pending_notification: Default::default(),
         inspector: Default::default(),
         task_overrides: Default::default(),
         studio_cancel: Default::default(),
@@ -1337,6 +1407,7 @@ fn main() -> Result<()> {
     desktop_studio::connect(&ui, &app);
     desktop_tasks::connect(&ui, &app);
     sketch::connect(&ui, &app);
+    notifications::connect(&ui);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();
