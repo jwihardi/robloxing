@@ -2,6 +2,36 @@ use super::*;
 use std::fs;
 use tempfile::tempdir;
 
+#[test]
+fn posted_image_survives_project_edits_and_restricts_sources_to_the_working_copy() -> Result<()> {
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("p"), &tmp.path().join("data"))?;
+    let lead = store.prepare("Show the result", "", None)?;
+    let work = store.work(lead.id);
+    let source = work.join("result.png");
+    let pixels = image::RgbaImage::from_pixel(12, 18, image::Rgba([10, 20, 30, 77]));
+    pixels.save(&source)?;
+    let outside = tmp.path().join("outside.png");
+    pixels.save(&outside)?;
+    let rt = tokio::runtime::Builder::new_current_thread().build()?;
+    let send = |path: &str| {
+        rt.block_on(dispatch(&store, &lead,
+        &json!({"tool":"workshop_send_image","arguments":{"path":path,"caption":"Draft layout"}}), &|_| {}))
+    };
+    assert!(send(outside.to_str().unwrap()).is_err());
+    send("result.png")?;
+    fs::remove_file(source)?;
+    let messages = store.messages_after(lead.id, 0)?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "Draft layout");
+    assert!(!messages[0].from_user);
+    assert_eq!(
+        image::open(messages[0].image.as_ref().unwrap())?.into_rgba8(),
+        pixels
+    );
+    Ok(())
+}
+
 fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
     Assignment {
         key: key.into(),

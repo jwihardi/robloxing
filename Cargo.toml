@@ -6,7 +6,7 @@ default-run = "workshop"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:slint", "dep:rfd", "dep:gltf", "dep:glam"]
+desktop = ["dep:slint", "dep:rfd", "dep:gltf", "dep:glam", "dep:windows-sys"]
 
 [dependencies]
 anyhow = "1"
@@ -27,6 +27,9 @@ slint = { version = "1.19", default-features = false, features = ["std", "compat
 rfd = { version = "0.15", optional = true }
 gltf = { version = "1.4", default-features = false, features = ["utils"], optional = true }
 glam = { version = "0.30", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"], optional = true }
 
 [[bin]]
 name = "workshop"

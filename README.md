@@ -1,10 +1,10 @@
 # Workshop
 
-Workshop is a Windows desktop chat for working on a Git project with Codex. The lead can reply directly or assign parts of a task to workers. Replies stream into the conversation. Enter sends and Shift+Enter adds a line. Use **Chats** to search the current project’s conversations and reopen one. **Sidebar** toggles the chat list and opens it as a drawer in a narrow window. The desktop app keeps a successful direct chat connected for follow-ups and releases its connection when you switch chats, review changes or close the window.
+Workshop is a Windows desktop chat for working on a Git project with Codex or Claude Code. The lead can reply directly or assign parts of a task to workers. Replies stream into the conversation. Enter sends and Shift+Enter adds a line. Use **Chats** to search the current project’s conversations and reopen one. **Sidebar** toggles the chat list and opens it as a drawer in a narrow window. The desktop app keeps a successful direct chat connected for follow-ups and releases its connection when you switch chats, review changes or close the window.
 
 ## Run on Windows
 
-Install Git, stable Rust with its C/C++ build tools, and the standalone Codex CLI. Open **Settings → Providers** to sign in. Workshop starts `codex.exe app-server` from PATH. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation. Start Workshop from Explorer or a normal terminal.
+Install Git, stable Rust with its C/C++ build tools, and the CLI for each provider you want to use. Open **Settings → Providers** to sign in. Workshop starts `codex.exe app-server` or the signed-in `claude.exe` from PATH. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation. Start Workshop from Explorer or a normal terminal.
 
 ```powershell
 cargo run --locked --bin workshop
@@ -28,13 +28,21 @@ Workers can report unmet acceptance criteria and return a concrete finding to th
 
 If the lead finishes with an unresolved assignment or a failing final check, Workshop sends it the evidence in the same conversation. It can delegate a repair or fix the integrated copy itself. The transcript shows each automatic repair pass. Workshop stops after two extra passes, sooner if the same failure recurs on the same revision, the user stops an assignment, or the lead reports an external blocker. Use **Accept change** to apply the reviewed result. To configure a project check, pass its executable and arguments as a JSON array to `workshop-cli team --check-args`.
 
-Use **+** on the left of the composer to attach files, reference a folder, or paste text. Attachments appear above the draft and can be removed individually. Codex receives PNG, JPEG and WebP files as images, small UTF-8 files as text, and local paths for larger files, binary documents and folders. Keep the original files available when sending or retrying.
+Use **+** on the left of the composer to attach files, reference a folder, or paste text. Attachments appear above the draft and can be removed individually. The selected provider receives PNG, JPEG and WebP files as images, small UTF-8 files as text, and local paths for larger files, binary documents and folders. Keep the original files available when sending or retrying.
 
-Open the model and effort pill beside Send. Select the header showing the effort and model to open the model list. Drag the slider or use the arrow keys to choose an effort level. New-chat choices set the project defaults. Changes within an existing chat apply to its next message. Workshop gets the available models and effort levels from the installed Codex provider.
+Open the model and effort pill beside Send. Select the header showing the effort and model to open the model list. Drag the slider or use the arrow keys to choose an effort level. New-chat choices set the project defaults. Changes within an existing chat apply to its next message. Workshop gets the available models and effort levels from each installed CLI. Choose a Claude model for a Claude lead. Start a new chat to switch providers, or change models from the same provider between turns.
 
 Open **Subagents** beside **+**. Choose **Edit global defaults** to set allowed models and maximum effort across projects, or turn off **Use global defaults** to customize one chat. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
 Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Album** in the navigation rail. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
+
+Choose **+ → Draw a sketch** to open a drawing pad above the message box. Draw with the mouse or pen and type your explanation in the composer. **Undo stroke** removes the last mark. **Done** folds the sketch into the draft so you can edit or remove it before sending. Send a sketch by itself or with a caption. The selected model receives the drawing as a PNG, and clicking it in the conversation enlarges it.
+
+To give feedback on an image, choose **Annotate** under a generated image in chat, on a finished image in **Game studio**, or in the full-size screenshot viewer. Mark the area you mean, type the change you want, and send. Workshop keeps the original and sends a marked-up PNG at the source resolution. Undo removes pen strokes while keeping the underlying image.
+
+Choose **Compare** under a returned image to drag a divider between versions. The arrow keys move the divider. Home and End reveal either side. **Show markup** brings back the strokes you sent, and **Annotate original** or **Annotate revision** starts another edit. For a text-only follow-up, Compare shows the previous image from that chat.
+
+Enable **Settings → Notifications → Notify me when I’m needed** for Windows alerts while Workshop runs in the background. An alert opens the chat or Studio result that needs attention. A blocked run, a new image, and changes or decisions ready for review can trigger an alert.
 
 ## Themes
 
@@ -52,7 +60,11 @@ Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Past
 
 ## Provider settings
 
-**Settings → Providers** checks the installed Codex and Claude Code CLIs and opens the provider's own sign-in flow. Accounts and extensions are shared with the corresponding CLI. Chat and worker execution currently use Codex. Use `WORKSHOP_CLAUDE` to select a specific Claude Code executable.
+**Settings → Providers** checks the installed Codex and Claude Code CLIs and opens the provider's own sign-in flow. Accounts and extensions are shared with the corresponding CLI. Claude and Codex can each lead a chat or run its workers. With unrestricted subagent settings, an assignment that omits its model uses the lead’s provider. Select a single allowed worker model to fix the team pairing. Use `WORKSHOP_CLAUDE` to select a specific Claude Code executable.
+
+For headless use, list models with `workshop-cli models --provider claude`. For example, `workshop-cli run --provider claude --model sonnet "Describe this project"` starts a Claude chat. To pair a Codex lead with a Claude worker in a new project, use `workshop-cli team --lead-model gpt-6.2-sol --worker-model claude:sonnet`. Use model IDs reported by your installation. Claude runs in the isolated Git copy with its native edit permissions. Its account meter uses the limit information the CLI reports.
+
+**Settings → Plugins → Recommended** offers three optional installs. **Image to Sculpt** turns reference art into a Blender sculpt, **Frontend Design** helps with interface layout and styling, and **Caveman** gives you terse replies on request. Select Codex or Claude Code before installing. Manage installed skills under **Skills** and marketplace plugins under **Installed**. Image to Sculpt requires Python with its scientific packages and Blender 5.2+. Its generated views use a paid fal API key. [Image to Sculpt setup](https://github.com/gokayfem/image-to-sculpt#install)
 
 In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
@@ -69,14 +81,14 @@ Open **Studio** in the navigation rail. Select Images, Models or Ghidra in the a
 | Area | What you can make | Requirements |
 |---|---|---|
 | Images | Describe concept art, an inventory icon or a sprite sheet. **Seamless tile** generates a 256 × 256 PNG from a material and repeatable seed. | Prompted images use the signed-in Codex CLI’s image generation capability. Tiles run locally. |
-| Models | Generate an editable prop, choose a crystal, barrel or planter starter, or import a local Blender scene. Select **Inspect model** on a finished preview to explore the exported mesh. **Open in Blender** opens its editable source. **Re-export** saves your edits as a new version. | Creating and re-exporting models uses Blender with its glTF exporter. **From brief** also uses Codex. Inspection runs inside Workshop. |
+| Models | Generate an editable prop, choose a crystal, barrel or planter starter, or import a local Blender scene. Select **Inspect model** on a finished preview to explore the exported mesh. **Open in Blender** opens its editable source. **Re-export** saves your edits as a new version. | Creating and re-exporting models uses Blender with its glTF exporter. **From brief** also uses the selected agent model. Inspection runs inside Workshop. |
 | Ghidra | Choose a compiled game module and optionally filter its functions by name. Inspect the recovered C pseudocode and save the report. By default, each run attempts 64 matching functions with up to 12 seconds per function. | An extracted Ghidra distribution and its supported JDK on PATH or in `JAVA_HOME`. |
 
 In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/− also work. **Wireframe** shows triangle edges. **Overlaps** highlights coplanar faces that share surface area in orange, even behind another surface. The inspector reads static geometry and base material colors from GLB exports up to 64 MiB and 150,000 triangles. Dense models can show a partial overlap count when the comparison budget is reached.
 
-**Settings → Tasks** saves independent defaults for image generation, 3D model design, and decompilation across projects. For the two design tasks, choose the allowed Codex models and maximum reasoning effort. Select one model to use it every time. In **Game studio → Run settings**, turn off **Use task defaults** to customize the next run. Retrying a run or reusing its settings restores its original choices.
+**Settings → Tasks** saves independent defaults for image generation, 3D model design, and decompilation across projects. For the two design tasks, choose the allowed models and maximum reasoning effort. Select one model to use it every time. In **Game studio → Run settings**, turn off **Use task defaults** to customize the next run. Retrying a run or reusing its settings restores its original choices.
 
-Decompilation runs locally. Set **Functions per run** (1–256) and **Seconds per function** (1–120). Turn on **Generate an AI summary** to send up to 48 KiB of saved pseudocode to Codex, using the decompilation task’s own model and effort settings. Open **Summary** beside **Report** to read it. If Codex is unavailable, the pseudocode stays accessible and **Run log** records the summary error.
+Decompilation runs locally. Set **Functions per run** (1–256) and **Seconds per function** (1–120). Turn on **Generate an AI summary** to send up to 48 KiB of saved pseudocode to the selected provider, using the decompilation task’s own model and effort settings. Open **Summary** beside **Report** to read it. If the selected provider is unavailable, the pseudocode stays accessible and **Run log** records the summary error.
 
 Use **Locate Blender** to select the executable or **Locate Ghidra** to select the installation root. Workshop remembers these choices across projects. You can also set `WORKSHOP_BLENDER` to an executable and `WORKSHOP_GHIDRA` to an installation root. Standard Windows and Steam installations of Blender are detected automatically.
 
@@ -101,7 +113,7 @@ $cli = ".\target\debug\workshop-cli.exe"
 
 The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
 
-`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. Set `--function-limit` and `--seconds-per-function` to change local limits. Use `--summary` or `--summary=false` to override the saved summary preference. Image generation, prop design and enabled summaries accept `--model` and `--max-effort` for a single run. The read-only commands below also work while the desktop project is open. Codex leads and workers can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
+`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. Set `--function-limit` and `--seconds-per-function` to change local limits. Use `--summary` or `--summary=false` to override the saved summary preference. Image generation, prop design and enabled summaries accept `--model` and `--max-effort` for a single run. The read-only commands below also work while the desktop project is open. Leads and workers from either provider can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
 
 ```text
 workshop-cli --project . studio reports tile_cost
@@ -138,6 +150,6 @@ After a release build, run the Windows UI tests from PowerShell.
 .\tests\windows\cancel_cycles.ps1
 ```
 
-Each test runs on its own private Windows desktop. The tests exercise Workshop, its native file dialogs, and its screenshot picker there. The screenshot test selects pixels from a generated image. Use `-StudioOnly` with `picker_clicks.ps1` for the shorter Studio suite.
+Each test runs on its own private Windows desktop. The tests exercise Workshop, its native file dialogs, and its screenshot picker there. The screenshot test selects pixels from a generated image. Use `-StudioOnly` with `picker_clicks.ps1` for the shorter Studio suite or `-SketchOnly` for drawing, image markup, and message delivery.
 
 For an ad hoc UI check, dot-source `tests/windows/TestDesktop.ps1` and call `Invoke-WorkshopUiTest -Script .\my-check.ps1`. Inside the check, use `[TestDesktop]::StartApp($absoluteWorkshopExe, $absoluteProjectPath)` and `[TestDesktop]::WaitForWindow($process)` to drive the window on the private desktop. Script output and failures return to the caller.

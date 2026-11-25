@@ -8,8 +8,31 @@ use std::{
 };
 use tempfile::tempdir;
 
+// Hooks and Git frontends can export the caller's repository paths. Workshop
+// chooses a working directory for every command, including each worker copy.
+pub(crate) fn clear_repository_env(cmd: &mut Command) {
+    for key in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_QUARANTINE_PATH",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+        "GIT_GRAFT_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+    ] {
+        cmd.env_remove(key);
+    }
+}
+
 fn command(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
+    clear_repository_env(&mut cmd);
     cmd.current_dir(dir)
         .args([
             "--no-pager",

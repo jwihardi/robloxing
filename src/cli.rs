@@ -22,6 +22,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Open,
+    /// List the installed provider's model IDs and supported effort levels.
+    Models {
+        #[arg(long,value_parser=["claude","codex"])]
+        provider: Option<String>,
+    },
     /// Create game assets or inspect a local binary.
     Studio {
         #[command(subcommand)]
@@ -52,6 +57,9 @@ enum Action {
     },
     /// Stream provider JSON. Type /cancel or a steering message on stdin.
     Run {
+        /// Choose codex or claude. Claude defaults to the configured Claude Code model.
+        #[arg(long,value_parser=["codex","claude"])]
+        provider: Option<String>,
         prompt: String,
         #[arg(long, default_value = "")]
         model: String,
@@ -81,10 +89,10 @@ enum Action {
 }
 #[derive(clap::Args)]
 struct StudioAgentOptions {
-    /// Select a single Codex model for this run.
+    /// Select a single provider model for this run.
     #[arg(long)]
     model: Option<String>,
-    /// Maximum Codex reasoning effort for this run.
+    /// Maximum reasoning effort for this run.
     #[arg(long)]
     max_effort: Option<String>,
 }
@@ -181,7 +189,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
             }
             anyhow::ensure!(
                 value.summarize || (agent.model.is_none() && agent.max_effort.is_none()),
-                "Enable --summary to use a Codex model for a decompilation."
+                "Enable --summary to use an AI model for a decompilation."
             );
         }
         if let Some(model) = &agent.model {
@@ -287,14 +295,36 @@ fn run(store: &Store, a: Attempt, prompt: &str) -> Result<()> {
     drop(tx);
     result
 }
+
+fn list_models(project: &Path, provider: Option<&str>) -> Result<()> {
+    let project = dunce::canonicalize(project)?;
+    anyhow::ensure!(project.is_dir(), "Choose a folder for model discovery");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let catalog = runtime.block_on(provider::worker_catalog(&project, provider))?;
+    for model in catalog.models {
+        let efforts = model
+            .supported_reasoning_efforts
+            .iter()
+            .map(|e| e.reasoning_effort.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{}  {}", model.model, efforts);
+    }
+    Ok(())
+}
+
 pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let args = Args::parse_from(args);
-    if let Action::Studio { action } = args.command {
-        return studio(&args.project, action);
+    match args.command {
+        Action::Studio { action } => return studio(&args.project, action),
+        Action::Models { provider } => return list_models(&args.project, provider.as_deref()),
+        _ => {}
     }
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
-        Action::Studio { .. } => unreachable!(),
+        Action::Studio { .. } | Action::Models { .. } => unreachable!(),
         Action::Agents { id } => {
             println!("{}", serde_json::to_string_pretty(&store.workers(id)?)?);
             println!("{}", store.handoff(id)?);
@@ -343,7 +373,26 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                 println!("#{}  {}  {}\n    {}", a.id, a.state, a.prompt, a.action);
             }
         }
-        Action::Run { prompt, model } => {
+        Action::Run {
+            prompt,
+            model,
+            provider,
+        } => {
+            let model = match provider.as_deref() {
+                Some("claude") if model.is_empty() => "claude:default".into(),
+                Some("claude") if !model.starts_with("claude:") => format!("claude:{model}"),
+                Some("codex") if model.starts_with("claude:") => {
+                    anyhow::bail!("Choose a Codex model for --provider codex")
+                }
+                Some("codex")
+                    if model.is_empty()
+                        && store.team_settings()?.lead_model.starts_with("claude:") =>
+                {
+                    let a = store.prepare_inference(&prompt, "", "", None, None, &[])?;
+                    return run(&store, a, &prompt);
+                }
+                _ => model,
+            };
             run(&store, store.prepare(&prompt, &model, None)?, &prompt)?
         }
         Action::Retry { id } => {

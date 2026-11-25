@@ -1,3 +1,5 @@
+mod recommended;
+use crate::PluginSection;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
@@ -122,25 +124,28 @@ async fn account(p: Provider) -> Row {
     }
 }
 
-pub async fn list(tab: &str, p: Provider, browse: bool) -> Result<Vec<Row>> {
+pub async fn list(tab: &str, p: Provider, section: PluginSection) -> Result<Vec<Row>> {
     match tab {
         "Providers" => {
             let (codex, claude) = tokio::join!(account(Provider::Codex), account(Provider::Claude));
             Ok(vec![codex, claude])
         }
-        "Plugins" => {
-            let mut cmd = command(p.program());
-            cmd.args(["plugin", "list", "--json"]);
-            if browse {
-                cmd.arg("--available");
-            }
-            let value: Value = serde_json::from_slice(&checked(&mut cmd).await?.stdout)
-                .context("The provider returned an unreadable plugin list")?;
-            plugin_rows(&value, browse)
-        }
+        "Plugins" if section == PluginSection::Recommended => recommended::list(p).await,
+        "Plugins" => plugins(p, section == PluginSection::Marketplace).await,
         "Skills" => skills(p),
         _ => bail!("Unknown settings page"),
     }
+}
+
+async fn plugins(p: Provider, browse: bool) -> Result<Vec<Row>> {
+    let mut cmd = command(p.program());
+    cmd.args(["plugin", "list", "--json"]);
+    if browse {
+        cmd.arg("--available");
+    }
+    let value: Value = serde_json::from_slice(&checked(&mut cmd).await?.stdout)
+        .context("The provider returned an unreadable plugin list")?;
+    plugin_rows(&value, browse)
 }
 
 fn plugin_rows(value: &Value, browse: bool) -> Result<Vec<Row>> {
@@ -335,6 +340,9 @@ async fn install_skill(p: Provider, source: &str) -> Result<()> {
     let mut git = command("git".into());
     git.env("GIT_TERMINAL_PROMPT", "0")
         .args(["clone", "--depth", "1", "--quiet"]);
+    if parts.len() > 4 {
+        git.args(["--filter=blob:none", "--sparse"]);
+    }
     if let Some(branch) = parts.get(3) {
         git.args(["--branch", branch]);
     }
@@ -344,6 +352,17 @@ async fn install_skill(p: Provider, source: &str) -> Result<()> {
             .arg(&checkout),
     )
     .await?;
+    if parts.len() > 4 {
+        checked(
+            command("git".into())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["sparse-checkout", "set", "--"])
+                .arg(parts[4..].join("/")),
+        )
+        .await?;
+    }
     let mut src = checkout.clone();
     for part in parts.iter().skip(4) {
         src.push(part);
@@ -389,6 +408,9 @@ pub async fn change(tab: &str, p: Provider, act: &str, arg: &str) -> Result<Stri
         "Enter a valid source or name"
     );
     if tab == "Plugins" {
+        if act == "recommend" {
+            return recommended::install(p, arg).await;
+        }
         let mut cmd = command(p.program());
         cmd.arg("plugin");
         match act {

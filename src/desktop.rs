@@ -4,7 +4,9 @@ mod capture;
 mod desktop_studio;
 mod desktop_tasks;
 mod inspector;
+mod notifications;
 mod preferences;
+mod sketch;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
 use std::{
@@ -26,17 +28,20 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Desk, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem} from "ui/workshop.slint"; }
 
 enum Update {
+    Attention(notifications::Target, &'static str, String),
+    NotificationClicked(notifications::Target),
+    NotificationError(String),
     StudioFinished(PathBuf, i64, Result<()>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged(Result<String>, bool),
-    Opened(Arc<Store>),
+    Opened(Arc<Store>, Option<notifications::Target>),
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
-    AccountUsage(PathBuf, Vec<UsageWindow>),
+    AccountUsage(PathBuf, String, Vec<UsageWindow>),
     Started(i64),
     Delta(String),
     ReplyStored,
@@ -63,6 +68,7 @@ impl Updates {
     }
 }
 struct App {
+    pending_notification: RefCell<Option<notifications::Target>>,
     inspector: RefCell<Option<inspector::Inspector>>,
     task_overrides:
         RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
@@ -70,6 +76,7 @@ struct App {
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_rows: RefCell<Vec<preferences::Row>>,
+    account_limits: RefCell<std::collections::HashMap<String, Vec<UsageWindow>>>,
     catalog: RefCell<provider::Catalog>,
     ui: slint::Weak<Desk>,
     store: RefCell<Option<Arc<Store>>>,
@@ -81,6 +88,7 @@ struct App {
     chat_offset: Cell<usize>,
     drafts: RefCell<std::collections::HashMap<Option<i64>, String>>,
     attachments: RefCell<std::collections::HashMap<Option<i64>, Vec<PathBuf>>>,
+    sketches: RefCell<std::collections::HashMap<Option<i64>, sketch::Draft>>,
     draft_policy: RefCell<Option<WorkerPolicy>>,
     id: Cell<Option<i64>>,
     control: RefCell<Option<tokio::sync::mpsc::UnboundedSender<Control>>>,
@@ -131,7 +139,9 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
             };
             MeterData {
                 label: label.into(),
-                remaining: window.percent_left as f32 / 100.,
+                remaining: window
+                    .percent_left
+                    .map_or(-1.0, |value| value as f32 / 100.),
                 detail: detail.into(),
             }
         })
@@ -140,7 +150,16 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
 }
 
 fn model_label(id: &str) -> String {
-    if let Some(tail) = id.strip_prefix("gpt-") {
+    if let Some(name) = id.strip_prefix("claude:") {
+        let name = name.strip_prefix("claude-").unwrap_or(name);
+        format!(
+            "Claude {}",
+            name.split('-')
+                .map(capitalized)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    } else if let Some(tail) = id.strip_prefix("gpt-") {
         let mut parts = tail.split('-');
         let mut label = format!("GPT-{}", parts.next().unwrap_or_default());
         for part in parts {
@@ -186,6 +205,9 @@ fn picker(
         catalog
             .models
             .iter()
+            .filter(|m| {
+                project_default || provider::provider_for(&m.model) == provider::provider_for(model)
+            })
             .map(|m| option(&m.model, model_label(&m.model))),
     );
     let selected = if project_default && model.is_empty() {
@@ -214,9 +236,10 @@ fn picker(
             )
         })
         .collect();
-    let default = if efforts
-        .iter()
-        .any(|e| e.value == catalog.default_effort.as_str())
+    let default = if provider::provider_for(effective) == "codex"
+        && efforts
+            .iter()
+            .any(|e| e.value == catalog.default_effort.as_str())
     {
         catalog.default_effort.as_str()
     } else {
@@ -337,6 +360,17 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
         w.assignment.files.join(", ")
     };
     let mut stats = vec![scope];
+    if let Some(id) = &w.model {
+        let mut label = if id.is_empty() {
+            String::from("Codex default")
+        } else {
+            model_label(id)
+        };
+        if let Some(effort) = w.effort.as_deref().filter(|s| !s.is_empty()) {
+            label.push_str(&format!(" ({effort})"));
+        }
+        stats.push(label);
+    }
     if w.tries > 1 {
         let retries = w.tries - 1;
         stats.push(if retries == 1 {
@@ -452,11 +486,13 @@ impl App {
         let mut rows = Vec::new();
         if !more {
             rows.extend(self.preceding_shots(store, Some(attempt.id))?);
-            rows.push(ChatTurn {
+            let mut first = ChatTurn {
                 from_user: true,
                 body: attempt.prompt.as_str().into(),
                 ..Default::default()
-            });
+            };
+            sketch::set_turn_image(&mut first, store.task_chat_image(attempt.task)?);
+            rows.push(first);
         }
         for message in messages {
             if message.screenshot {
@@ -472,6 +508,14 @@ impl App {
                 body: message.text.into(),
                 ..Default::default()
             };
+            sketch::set_turn_image(&mut turn, message.image);
+            if let Some(pair) = message.comparison {
+                turn.original_path = pair.original.to_string_lossy().as_ref().into();
+                turn.previous_output = pair.previous_output;
+                if let Some(path) = pair.markup {
+                    turn.markup_path = path.to_string_lossy().as_ref().into();
+                }
+            }
             if !message.dispatched_workers.is_empty() {
                 let mut batch = Vec::new();
                 for id in message.dispatched_workers {
@@ -504,15 +548,28 @@ impl App {
         let ui = self.ui.unwrap();
         let catalog = self.catalog.borrow();
         self.render_worker_policy(store, &catalog)?;
-        ui.set_chat_choices(if let Some(id) = self.id.get() {
-            let a = store.attempt(id)?;
-            picker(&catalog, &a.model, &a.effort, false)
-        } else {
-            picker(&catalog, &s.lead_model, &s.lead_effort, true)
-        });
+        let chat = self.id.get().map(|id| store.attempt(id)).transpose()?;
+        let (model, effort) = chat
+            .as_ref()
+            .map_or((s.lead_model.as_str(), s.lead_effort.as_str()), |a| {
+                (a.model.as_str(), a.effort.as_str())
+            });
+        ui.set_chat_choices(picker(&catalog, model, effort, chat.is_none()));
+        self.show_provider(&ui, model);
         ui.set_parallel_workers(s.parallelism == 2);
         ui.set_auto_delegate(s.auto_delegate);
         Ok(())
+    }
+    fn show_provider(&self, ui: &Desk, model: &str) {
+        let provider = provider::provider_for(model);
+        ui.set_chat_provider(capitalized(provider).into());
+        ui.set_usage_meters(usage_meters(
+            self.account_limits
+                .borrow()
+                .get(provider)
+                .cloned()
+                .unwrap_or_default(),
+        ));
     }
     fn selected_policy(&self, store: &Store) -> Result<Option<WorkerPolicy>> {
         match self.id.get() {
@@ -593,7 +650,7 @@ impl App {
                 let _ = updates.send(Update::Models(project.clone(), Ok(catalog)));
             }) {
                 Ok(Some(windows)) => {
-                    let _ = updates.send(Update::AccountUsage(project, windows));
+                    let _ = updates.send(Update::AccountUsage(project, "codex".into(), windows));
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -606,8 +663,9 @@ impl App {
         let query = query.to_lowercase();
         let terms: Vec<_> = query.split_whitespace().collect();
         let ui = self.ui.unwrap();
-        let official =
-            ui.get_settings_tab() == "Plugins" && ui.get_browse_plugins() && ui.get_official_only();
+        let official = ui.get_settings_tab() == "Plugins"
+            && ui.get_plugin_section() == PluginSection::Marketplace
+            && ui.get_official_only();
         let provider = ui.get_settings_provider();
         let rows: Vec<_> = self
             .settings_rows
@@ -643,7 +701,7 @@ impl App {
         self.settings_rows.borrow_mut().clear();
         self.filter_preferences("");
         let tab = ui.get_settings_tab().to_string();
-        if matches!(tab.as_str(), "Tasks" | "Appearance") {
+        if matches!(tab.as_str(), "Tasks" | "Appearance" | "Notifications") {
             self.settings_read.take();
             if tab == "Appearance" {
                 appearance::reload(&ui);
@@ -652,7 +710,7 @@ impl App {
             return;
         }
         let p = preferences::Provider::from_label(&ui.get_settings_provider());
-        let browse = ui.get_browse_plugins();
+        let section = ui.get_plugin_section();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         self.settings_read.replace(Some(cancel));
         ui.set_settings_status(if message.is_empty() {
@@ -669,7 +727,7 @@ impl App {
                 .and_then(|rt| {
                     rt.block_on(async {
                         tokio::select! {
-                            rows = preferences::list(&tab, p, browse) => rows,
+                            rows = preferences::list(&tab, p, section) => rows,
                             _ = cancelled => Ok(Vec::new()),
                         }
                     })
@@ -701,6 +759,7 @@ impl App {
             match action.as_str() {
                 "login" => "Finish signing in with your provider…",
                 "remove" => "Uninstalling…",
+                "recommend" => "Installing recommendation…",
                 "install" | "folder" => "Installing…",
                 _ => "Updating…",
             }
@@ -713,10 +772,7 @@ impl App {
                 .build()
                 .map_err(anyhow::Error::from)
                 .and_then(|rt| rt.block_on(preferences::change(&tab, p, &action, &arg)));
-            let _ = tx.send(Update::PreferenceChanged(
-                result,
-                tab == "Providers" && arg == "Codex",
-            ));
+            let _ = tx.send(Update::PreferenceChanged(result, tab == "Providers"));
         });
     }
     fn choose_inference(&self, changing_model: bool, value: &str) -> Result<()> {
@@ -751,10 +807,11 @@ impl App {
             (model, value.to_owned())
         };
         let choices = picker(&catalog, &model, &effort, chat.is_none());
+        let selected_model = model.clone();
         let ui = self.ui.unwrap();
         if let Some(id) = chat {
             store.set_chat_inference(id, &model, &effort)?;
-            ui.set_model_name(model.as_str().into());
+            ui.set_model_name(model_label(&model).into());
             if let Some(chat) = self.attempts.borrow_mut().iter_mut().find(|a| a.id == id) {
                 chat.model = model;
                 chat.effort = effort;
@@ -764,6 +821,7 @@ impl App {
             settings.lead_effort = effort;
             store.configure_team(&settings)?;
         }
+        self.show_provider(&ui, &selected_model);
         ui.set_chat_choices(choices);
         Ok(())
     }
@@ -818,7 +876,7 @@ impl App {
             ui.set_context_meter(context_meter(store.context_usage(a)?, false));
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
-            ui.set_model_name(a.model.as_str().into());
+            ui.set_model_name(model_label(&a.model).into());
             let done = matches!(
                 a.state.as_str(),
                 "review" | "failed" | "interrupted" | "cancelled"
@@ -858,7 +916,7 @@ impl App {
             let _ = tx.send(Update::Finished(r));
         });
     }
-    fn poll(&self) -> Result<()> {
+    fn poll(self: &Rc<Self>) -> Result<()> {
         self.updates.pending.store(false, Ordering::Release);
         let ui = self.ui.unwrap();
         let mut partial = None::<String>;
@@ -866,9 +924,28 @@ impl App {
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             match update {
+                Update::Attention(target, title, detail) => self.notify(target, title, &detail),
+                Update::NotificationError(error) => ui.set_notice(error.into()),
+                Update::NotificationClicked(target) => {
+                    self.pending_notification.replace(Some(target));
+                    self.open_notification()?;
+                }
                 Update::StudioFinished(project, id, result) => {
                     let slot = self.store.borrow();
                     if let Some(store) = slot.as_ref().filter(|s| s.project == project) {
+                        let job = store.studio_job(id)?;
+                        let title = match job.state.as_str() {
+                            "Ready" => Some("Studio result ready for review"),
+                            "Failed" => Some("Studio run needs attention"),
+                            _ => None,
+                        };
+                        if let Some(title) = title {
+                            self.notify(
+                                notifications::Target::studio(project, id),
+                                title,
+                                &job.title,
+                            );
+                        }
                         self.studio_cancel.take();
                         let studio = ui.global::<Studio>();
                         studio.set_working(false);
@@ -889,6 +966,8 @@ impl App {
                             studio.set_message(format!("{e:#}").into());
                         }
                     }
+                    drop(slot);
+                    self.open_notification()?;
                 }
                 Update::Captured(project, attempt, command, result) => {
                     ui.set_capturing(false);
@@ -928,7 +1007,10 @@ impl App {
                             self.filter_preferences(&ui.get_settings_query());
                             let empty_label = if empty && ui.get_settings_tab() == "Skills" {
                                 "No user skills installed."
-                            } else if empty && ui.get_browse_plugins() {
+                            } else if empty
+                                && ui.get_settings_tab() == "Plugins"
+                                && ui.get_plugin_section() == PluginSection::Marketplace
+                            {
                                 "No plugins available."
                             } else if empty {
                                 "No plugins installed."
@@ -949,6 +1031,7 @@ impl App {
                         Ok(note) => {
                             self.session.take();
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
+                                self.account_limits.borrow_mut().clear();
                                 ui.set_usage_meters(usage_meters(Vec::new()));
                                 self.load_models(s.project.clone());
                             }
@@ -957,8 +1040,14 @@ impl App {
                         Err(e) => ui.set_settings_status(format!("{e:#}").into()),
                     }
                 }
-                Update::Opened(store) => {
+                Update::Opened(store, target) => {
                     ui.invoke_reset_chat_navigation();
+                    if ui.global::<Comparison>().get_visible() {
+                        ui.global::<Comparison>().invoke_close();
+                    }
+                    if target.is_some() {
+                        self.pending_notification.replace(target);
+                    }
                     self.task_overrides.borrow_mut().clear();
                     self.close_inspector();
                     self.studio_cancel.take();
@@ -980,12 +1069,14 @@ impl App {
                             .as_ref()
                             .into(),
                     );
+                    self.account_limits.borrow_mut().clear();
                     ui.set_usage_meters(usage_meters(Vec::new()));
                     self.id.set(None);
                     self.chat_offset.set(0);
                     self.displayed.set(None);
                     self.drafts.borrow_mut().clear();
                     self.attachments.borrow_mut().clear();
+                    self.sketches.borrow_mut().clear();
                     self.render_attachments();
                     self.draft_policy.take();
                     self.catalog.replace(Default::default());
@@ -1018,9 +1109,9 @@ impl App {
                                     self.task_settings("open", "")?;
                                 }
                             }
-                            Err(e) => ui.set_catalog_status(
-                                format!("Couldn’t load Codex models. {e}").into(),
-                            ),
+                            Err(e) => {
+                                ui.set_catalog_status(format!("Couldn’t load models. {e}").into())
+                            }
                         }
                     }
                 }
@@ -1029,14 +1120,27 @@ impl App {
                         ui.set_context_meter(context_meter(context, false));
                     }
                 }
-                Update::AccountUsage(project, windows) => {
+                Update::AccountUsage(project, provider, windows) => {
                     if self
                         .store
                         .borrow()
                         .as_ref()
                         .is_some_and(|s| s.project == project)
                     {
-                        ui.set_usage_meters(usage_meters(windows));
+                        let mut limits = self.account_limits.borrow_mut();
+                        if provider == "claude" {
+                            let saved = limits.entry(provider.clone()).or_default();
+                            for window in windows {
+                                saved.retain(|w| w.minutes != window.minutes);
+                                saved.push(window);
+                            }
+                            saved.sort_by_key(|w| w.minutes);
+                        } else {
+                            limits.insert(provider.clone(), windows);
+                        }
+                        if provider.eq_ignore_ascii_case(ui.get_chat_provider().as_str()) {
+                            ui.set_usage_meters(usage_meters(limits[&provider].clone()));
+                        }
                     }
                 }
                 Update::Started(id) => {
@@ -1046,6 +1150,7 @@ impl App {
                         self.chat_offset.set(0);
                     }
                     self.attachments.borrow_mut().remove(&self.id.get());
+                    self.sketches.borrow_mut().remove(&self.id.get());
                     self.id.set(Some(id));
                     self.render_attachments();
                     ui.set_draft("".into());
@@ -1083,6 +1188,7 @@ impl App {
                         .into(),
                     );
                     self.render()?;
+                    self.open_notification()?;
                 }
             }
         }
@@ -1103,6 +1209,9 @@ impl App {
         Ok(())
     }
     fn open(self: &Rc<Self>, path: PathBuf) {
+        self.open_to(path, None);
+    }
+    fn open_to(self: &Rc<Self>, path: PathBuf, target: Option<notifications::Target>) {
         if self
             .store
             .borrow()
@@ -1120,7 +1229,7 @@ impl App {
                 home.join("last-project.txt"),
                 s.project.to_string_lossy().as_bytes(),
             )?;
-            tx.send(Update::Opened(s))?;
+            tx.send(Update::Opened(s, target))?;
             Ok(String::new())
         });
     }
@@ -1143,16 +1252,31 @@ impl App {
         self.ui
             .unwrap()
             .set_attachments(ModelRc::new(VecModel::from(rows)));
+        self.render_sketch();
     }
-    fn draft_message(&self) -> provider::Message {
-        provider::Message::compose(
+    fn draft_message(&self) -> Result<provider::Message> {
+        let mut message = provider::Message::compose(
             &self.ui.unwrap().get_draft(),
             self.attachments
                 .borrow()
                 .get(&self.id.get())
                 .cloned()
                 .unwrap_or_default(),
-        )
+        );
+        if let Some(sketch) = self
+            .sketches
+            .borrow()
+            .get(&self.id.get())
+            .filter(|d| d.has_content())
+        {
+            let slot = self.store.borrow();
+            let store = slot.as_ref().context("Open a project to send a sketch.")?;
+            message.files.push(sketch.save(store)?);
+            if message.text.trim().is_empty() {
+                message.text = "Sketch".into();
+            }
+        }
+        Ok(message)
     }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
         let ui = self.ui.unwrap();
@@ -1161,7 +1285,7 @@ impl App {
                 return Ok(());
             }
             let draft = ui.get_draft().to_string();
-            if capture::requested(&draft) {
+            if capture::requested(&draft) && !ui.global::<Sketch>().get_has_content() {
                 self.capture(Some(draft));
                 return Ok(());
             }
@@ -1170,7 +1294,7 @@ impl App {
             let c = if op == "cancel" {
                 Control::Cancel
             } else {
-                Control::Steer(self.draft_message())
+                Control::Steer(self.draft_message()?)
             };
             self.control
                 .borrow()
@@ -1180,6 +1304,7 @@ impl App {
                 .map_err(|_| anyhow::anyhow!("Run has ended."))?;
             if op == "steer" {
                 self.attachments.borrow_mut().remove(&self.id.get());
+                self.sketches.borrow_mut().remove(&self.id.get());
                 self.render_attachments();
                 ui.set_draft("".into());
             }
@@ -1190,7 +1315,11 @@ impl App {
         }
         let store = self.store.borrow().clone().context("Open a project.")?;
         let id = self.id.get();
-        let draft = self.draft_message();
+        let draft = if matches!(op, "submit" | "resume") {
+            self.draft_message()?
+        } else {
+            "".into()
+        };
         let draft_policy = self.draft_policy.borrow().clone();
         let op = op.to_owned();
         let (tx, rx) = provider::channel();
@@ -1229,21 +1358,47 @@ impl App {
                     store.bind_draft_screenshots(a.id)?;
                 }
                 events.send(Update::Started(a.id))?;
-                provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
-                    let _ = events.send(match message {
-                        provider::ReplyUpdate::Delta(s) => Update::Delta(s.to_owned()),
-                        provider::ReplyUpdate::Context(context) => Update::Context(a.id, context),
-                        provider::ReplyUpdate::AccountUsage(windows) => {
-                            Update::AccountUsage(store.project.clone(), windows)
-                        }
-                        provider::ReplyUpdate::Usage(_) | provider::ReplyUpdate::Activity(_) => {
-                            return;
-                        }
-                        provider::ReplyUpdate::WorkersChanged => Update::WorkersChanged,
-                        provider::ReplyUpdate::Stored => Update::ReplyStored,
-                        provider::ReplyUpdate::TranscriptChanged => Update::TranscriptChanged,
+                let earlier_image = store.last_chat_image_event(a.id)?;
+                let earlier_checkpoint = store.current_checkpoint(a.id)?;
+                let outcome =
+                    provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
+                        let _ = events.send(match message {
+                            provider::ReplyUpdate::Delta(s) => Update::Delta(s.to_owned()),
+                            provider::ReplyUpdate::Context(context) => {
+                                Update::Context(a.id, context)
+                            }
+                            provider::ReplyUpdate::AccountUsage(source, windows) => {
+                                Update::AccountUsage(store.project.clone(), source.into(), windows)
+                            }
+                            provider::ReplyUpdate::Usage(_)
+                            | provider::ReplyUpdate::Activity(_) => {
+                                return;
+                            }
+                            provider::ReplyUpdate::WorkersChanged => Update::WorkersChanged,
+                            provider::ReplyUpdate::Stored => Update::ReplyStored,
+                            provider::ReplyUpdate::TranscriptChanged => Update::TranscriptChanged,
+                        });
                     });
-                })?;
+                let finished = store.attempt(a.id)?;
+                if let Some(title) = notifications::chat_reason(
+                    &store,
+                    &a,
+                    &finished,
+                    earlier_image,
+                    earlier_checkpoint,
+                )? {
+                    let detail = if finished.state == "failed" {
+                        finished.action
+                    } else {
+                        a.prompt.clone()
+                    };
+                    events.send(Update::Attention(
+                        notifications::Target::chat(store.project.clone(), a.id),
+                        title,
+                        detail,
+                    ))?;
+                }
+                outcome?;
                 if let Some(live) = session {
                     events.send(Update::Warm(Box::new(live)))?;
                 }
@@ -1278,12 +1433,14 @@ fn main() -> Result<()> {
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
+        pending_notification: Default::default(),
         inspector: Default::default(),
         task_overrides: Default::default(),
         studio_cancel: Default::default(),
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
+        account_limits: Default::default(),
         catalog: Default::default(),
         ui: ui.as_weak(),
         store: Default::default(),
@@ -1295,6 +1452,7 @@ fn main() -> Result<()> {
         chat_offset: Default::default(),
         drafts: Default::default(),
         attachments: Default::default(),
+        sketches: Default::default(),
         draft_policy: Default::default(),
         id: Cell::new(None),
         control: Default::default(),
@@ -1308,6 +1466,8 @@ fn main() -> Result<()> {
     });
     desktop_studio::connect(&ui, &app);
     desktop_tasks::connect(&ui, &app);
+    sketch::connect(&ui, &app);
+    notifications::connect(&ui);
     let a = app.clone();
     ui.on_take_screenshot(move || a.capture(None));
     let a = app.clone();

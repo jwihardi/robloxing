@@ -115,6 +115,91 @@ fn live_followup_reuses_the_session_and_streams_both_replies() -> Result<()> {
 }
 
 #[test]
+fn retries_keep_the_original_provider_and_native_sessions_stay_with_their_provider() -> Result<()> {
+    let case = Case::new()?;
+    let store = case.open()?;
+    let chat = store.prepare("hello", "claude:sonnet", None)?;
+    store.session(chat.id, "native-session")?;
+    store.finish(chat.id, "review", "Ready")?;
+    assert!(
+        store
+            .set_chat_inference(chat.id, "gpt-example", "high")
+            .is_err()
+    );
+    store.set_chat_inference(chat.id, "claude:opus", "high")?;
+    let retry = store.prepare("hello", "", Some(chat.id))?;
+    assert_eq!(
+        (&*retry.provider, &*retry.model, &*retry.effort),
+        ("claude", "claude:opus", "high")
+    );
+    assert!(retry.session.is_empty());
+    Ok(())
+}
+
+#[test]
+#[ignore = "uses the locally signed-in Claude Code CLI"]
+fn live_claude_streams_an_image_reply_and_resumes_after_restart() -> Result<()> {
+    use workshop::provider::{self, Message, ReplyUpdate};
+    let case = Case::new()?;
+    let store = case.open()?;
+    let reference = case.home.join("reference.png");
+    image::RgbImage::from_pixel(64, 64, image::Rgb([250, 10, 20])).save(&reference)?;
+    let first = "What color is the attached square? Reply in one word without tools.";
+    let files = vec![reference];
+    let a = store.prepare_with_files(first, "claude:sonnet", None, None, &files)?;
+    let mut warm = None;
+    let mut native_session = String::new();
+    for (index, text) in [
+        first,
+        "What color did you just name? Reply in one word without tools.",
+        "Repeat the same color. One word without tools.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 2 {
+            drop(warm.take());
+        }
+        let a = if index == 0 {
+            a.clone()
+        } else {
+            store.resume(a.id)?
+        };
+        let (_tx, rx) = provider::channel();
+        let mut reply = String::new();
+        provider::run_turn(
+            &mut warm,
+            &store,
+            &a,
+            Message::from(text),
+            rx,
+            false,
+            |update| {
+                if let ReplyUpdate::Delta(delta) = update {
+                    reply.push_str(delta);
+                }
+            },
+        )?;
+        assert!(reply.to_lowercase().contains("red"), "{reply}");
+        assert!(warm.is_some());
+        let saved = store.attempt(a.id)?;
+        assert!(store.context_usage(&saved)?.fraction_left().is_some());
+        if index == 0 {
+            native_session = saved.session;
+        } else {
+            assert_eq!(saved.session, native_session);
+        }
+        let replies = store
+            .messages_after(a.id, 0)?
+            .into_iter()
+            .filter(|m| !m.from_user)
+            .count();
+        assert_eq!(replies, index + 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn transcript_reopens_in_order_and_can_fetch_only_new_messages() -> Result<()> {
     let case = Case::new()?;
     let store = case.open()?;

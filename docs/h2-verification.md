@@ -2,6 +2,19 @@
 
 The Codex lead and workers were exercised with the Windows release build, standalone Codex CLI 0.172.0 and the same signed-in account. Both roles used `gpt-6.2-sol`. All projects used for these runs were disposable Git folders.
 
+## Claude Code and mixed teams
+
+The signed-in Windows Claude Code CLI (2.1.222, Claude Pro) and Codex each took both roles in disposable Git projects. Each request asked one worker to create a one-line greeting and the lead to record its capitalization. The native provider processes ran headlessly. Each pairing produced a worker attempt, an integrated review and the expected file after acceptance. The source project had no greeting before acceptance.
+
+| Lead | Worker | Result |
+|---|---|---|
+| Claude Sonnet | Claude Sonnet | Accepted |
+| Claude Sonnet | GPT-6.2 Sol | Accepted |
+| GPT-6.2 Sol | Claude Sonnet | Accepted |
+| GPT-6.2 Sol | GPT-6.2 Sol | Accepted |
+
+A fresh Codex chat correctly recalled the accepted Claude checkpoint. Claude identified the color of an attached image, repeated it on a warm follow-up, and recalled it after its process restarted. During a separate live Claude response, steering interrupted the original output and produced the requested replacement. Stopping a second response persisted a cancelled attempt. Studio exported a Claude-designed cube as a one-mesh GLB. The Windows fixture also exercises a stopped Claude worker while its sibling completes, resume without duplicating its sibling, and a conflicting edit with a Claude lead and Codex workers.
+
 ## Delegation and continuity
 
 A single release request asked Workshop to implement two Python APIs, add edge-case tests, document usage and verify the result. It did not specify workers or a plan. With automatic delegation on, the real lead assigned the label and duration APIs to two workers. The event stream showed both running at the same time. Both finished on their first attempt. The lead integrated the APIs, updated the README and reached review without a follow-up. Before acceptance the source project still contained only the original README and acceptance script. After one acceptance, all 10 unit tests, the public acceptance script and the examples extracted from the README passed independently on Python 3.8.10. The acceptance script was byte-for-byte unchanged.

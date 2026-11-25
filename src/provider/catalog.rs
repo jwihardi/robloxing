@@ -11,7 +11,7 @@ pub struct Model {
     pub model: String,
     pub supported_reasoning_efforts: Vec<Effort>,
     pub default_reasoning_effort: String,
-    is_default: bool,
+    pub(super) is_default: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -77,15 +77,57 @@ async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
     Ok((io, catalog))
 }
 
-pub(crate) async fn worker_catalog(project: &Path) -> Result<Catalog> {
-    Ok(catalog_connection(project).await?.1)
+async fn both_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
+    let (codex, claude) = tokio::join!(
+        catalog_connection(project),
+        tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))
+    );
+    let claude = claude
+        .context("Claude model discovery timed out")
+        .and_then(|r| r);
+    match (codex, claude) {
+        (Ok((io, mut catalog)), additional) => {
+            if let Ok(models) = additional {
+                catalog.models.extend(models);
+            }
+            Ok((Some(io), catalog))
+        }
+        (Err(_), Ok(models)) if !models.is_empty() => Ok((
+            None,
+            Catalog {
+                models,
+                ..Default::default()
+            },
+        )),
+        (Err(error), other) => anyhow::bail!(
+            "Model discovery failed. Codex: {error:#}. Claude: {}",
+            other
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "No models returned".into())
+        ),
+    }
+}
+
+pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result<Catalog> {
+    match only {
+        Some("codex") => Ok(catalog_connection(project).await?.1),
+        Some("claude") => Ok(Catalog {
+            models: tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))
+                .await
+                .context("Claude model discovery timed out")??,
+            default_model: "claude:default".into(),
+            default_effort: String::new(),
+        }),
+        _ => Ok(both_providers(project).await?.1),
+    }
 }
 
 pub fn model_catalog(project: &Path) -> Result<Catalog> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(catalog_connection(project))
+        .block_on(both_providers(project))
         .map(|(_, catalog)| catalog)
 }
 
@@ -97,8 +139,11 @@ pub fn load_models_and_usage(
         .enable_all()
         .build()?
         .block_on(async {
-            let (mut io, catalog) = catalog_connection(project).await?;
+            let (io, catalog) = both_providers(project).await?;
             loaded(catalog);
+            let Some(mut io) = io else {
+                return Ok(None);
+            };
             let limits = tokio::time::timeout(
                 Duration::from_secs(6),
                 request(&mut io, -1, "account/rateLimits/read", json!({})),

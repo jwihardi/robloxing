@@ -16,6 +16,13 @@ async fn art_turn(
     item_type: &str,
     inference: &(String, String),
 ) -> Result<Value> {
+    if super::provider_for(&inference.0) == "claude" {
+        ensure!(
+            item_type != "imageGeneration",
+            "Claude Code does not provide native image generation. Choose a Codex image model."
+        );
+        return super::claude::studio(dir, instructions, prompt, schema, inference).await;
+    }
     let mut io = Connection::spawn(dir.to_owned(), tempfile::tempfile()?)?;
     request(
         &mut io,
@@ -128,7 +135,7 @@ pub(crate) async fn summarize_report(
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .context("Codex returned an empty summary.")?;
+        .context("The selected model returned an empty summary.")?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     if excerpt {
         writeln!(file, "Based on the first 48 KiB of the saved report.\n")?;
@@ -146,6 +153,12 @@ pub(crate) async fn generate_image(
 ) -> Result<()> {
     let item=art_turn(dir,"Use the built-in image generation tool to produce one game image for the user's art brief. Use no other tools.",
         &format!("Art direction: {style}.\n{prompt}"), Value::Null,"imageGeneration",inference).await?;
+    let decoded = generated_image(&item, dir)?;
+    decoded.save(dir.join("image.png"))?;
+    Ok(())
+}
+
+pub(super) fn generated_image(item: &Value, cwd: &Path) -> Result<image::DynamicImage> {
     ensure!(
         item["failure"].is_null(),
         "Image generation failed: {}",
@@ -153,7 +166,8 @@ pub(crate) async fn generate_image(
     );
     let decoded = if let Some(path) = item["savedPath"]
         .as_str()
-        .filter(|p| Path::new(p).is_file())
+        .map(|p| cwd.join(p))
+        .filter(|p| p.is_file())
     {
         ImageReader::open(path)?.with_guessed_format()?.decode()?
     } else {
@@ -165,8 +179,7 @@ pub(crate) async fn generate_image(
             .with_guessed_format()?
             .decode()?
     };
-    decoded.save(dir.join("image.png"))?;
-    Ok(())
+    Ok(decoded)
 }
 
 pub(crate) async fn design_model(

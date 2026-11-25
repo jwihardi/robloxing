@@ -1,0 +1,85 @@
+import { CheckBox } from "std-widgets.slint";
+import { Action, Theme } from "common.slint";
+import { Sketch } from "sketch.slint";
+
+export global Comparison {
+    in property <image> original;
+    in property <image> marked;
+    in property <image> revision;
+    in property <string> original-path;
+    in property <string> revision-path;
+    in property <bool> previous;
+    out property <bool> visible: revision.width > 0;
+    callback open(string, string, string, bool);
+    callback close();
+}
+
+export component ComparisonPage inherits FocusScope {
+    in property <bool> can-edit;
+    private property <float> split: 50;
+    private property <bool> show-marks;
+    private property <string> before: Comparison.previous ? "earlier image" : "original";
+    private property <string> after: Comparison.previous ? "current image" : "revision";
+    function adjust(value: float) { root.split = clamp(value, 0, 100); }
+    init => { slider.focus(); }
+    capture-key-pressed(e) => {
+        if e.text == Key.Escape { Comparison.close(); return accept; }
+        return reject;
+    }
+    Rectangle { background: Theme.canvas; }
+    VerticalLayout {
+        padding: 20px; spacing: 12px;
+        HorizontalLayout {
+            height: 40px; spacing: 12px;
+            Action { label: "Back to chat"; icon-only: true; glyph: "\u{e72b}"; width: 38px; activate => {Comparison.close();} }
+            Text { text: "Compare images"; horizontal-stretch: 1; vertical-alignment: center; font-size: 22px; font-weight: 600; color: Theme.text; }
+            if Comparison.marked.width > 0: CheckBox { text: "Show markup"; checked <=> root.show-marks; }
+        }
+        stage := Rectangle {
+            vertical-stretch: 1; background: Theme.surface; border-radius: 12px; clip: true;
+            // Both images use the full stage. Only the left image's visible area changes.
+            Image { width: stage.width; height: stage.height; source: Comparison.revision; image-fit: contain; }
+            mask := Rectangle {
+                x: 0px; y: 0px; width: stage.width * root.split / 100; height: stage.height; clip: true; background: Theme.surface;
+                Image { x: 0px; width: stage.width; height: stage.height; source: root.show-marks ? Comparison.marked : Comparison.original; image-fit: contain; }
+            }
+            Rectangle { x: clamp(mask.width - 1px, 0px, stage.width - 2px); width: 2px; height: stage.height; background: Theme.accent; }
+            Rectangle {
+                x: clamp(mask.width - self.width/2, 0px, stage.width - self.width); y: (stage.height - self.height)/2;
+                width: 38px; height: 32px; border-radius: 16px; background: Theme.popup; border-width: 1px;
+                border-color: slider.has-focus ? Theme.accent : Theme.line;
+                Text { text: "‹  ›"; color: Theme.text; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            slider := FocusScope {
+                accessible-role: AccessibleRole.slider; accessible-label: "Image comparison divider";
+                accessible-description: "Drag or use the arrow keys to reveal each image.";
+                accessible-value: root.split; accessible-value-minimum: 0; accessible-value-maximum: 100; accessible-value-step: 1;
+                accessible-action-set-value(v) => { if v.is-float() { root.adjust(v.to-float()); } }
+                accessible-action-increment => {root.adjust(root.split + 1);}
+                accessible-action-decrement => {root.adjust(root.split - 1);}
+                key-pressed(e) => {
+                    if e.text == Key.LeftArrow {root.adjust(root.split - 1); return accept;}
+                    if e.text == Key.RightArrow {root.adjust(root.split + 1); return accept;}
+                    if e.text == Key.Home {root.adjust(0); return accept;}
+                    if e.text == Key.End {root.adjust(100); return accept;}
+                    return reject;
+                }
+                TouchArea {
+                    mouse-cursor: ew-resize;
+                    pointer-event(e) => { if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        slider.focus(); root.adjust(100 * self.mouse-x / self.width);
+                    } }
+                    moved => {if self.pressed {root.adjust(100 * self.mouse-x / self.width);}}
+                }
+            }
+        }
+        HorizontalLayout {
+            height: 38px;
+            Action { label: "Annotate " + root.before; glyph: "\u{e104}"; width: 170px; enabled: root.can-edit;
+                activate => {Sketch.annotate(Comparison.original-path,false);} }
+            Rectangle { horizontal-stretch: 1; }
+            Action { label: "Annotate " + root.after; glyph: "\u{e104}"; width: 170px; enabled: root.can-edit;
+                activate => {Sketch.annotate(Comparison.revision-path,false);} }
+        }
+    }
+}

@@ -10,10 +10,17 @@ class FixtureProvider {
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     static readonly string ThreadId = Guid.NewGuid().ToString();
     static string session, turn, task, studioKind;
-    static bool worker, studio;
+    static bool worker, studio, claudeStream;
     static string Dir { get { return Environment.GetEnvironmentVariable("WORKSHOP_PROBE_DIR"); } }
     static void Send(object message) { Console.WriteLine(Json.Serialize(message)); Console.Out.Flush(); }
     static void Done(string text) {
+        if (claudeStream) {
+            var usage = new {input_tokens=24,output_tokens=3};
+            Send(new {type="stream_event", @event=new {type="content_block_delta",delta=new {type="text_delta",text=text}}});
+            Send(new {type="assistant", message=new {model="fixture",usage=usage,content=new[]{new {type="text",text=text}}}});
+            Send(new {type="result",subtype="success",is_error=false,result=text,usage=usage,modelUsage=new {fixture=new {contextWindow=100}}});
+            return;
+        }
         Send(new { method="item/agentMessage/delta", @params=new {threadId=session,turnId=turn,itemId="reply",delta=text} });
         Send(new { method="item/completed", @params=new {threadId=session,turnId=turn,item=new {type="agentMessage",id="reply",text=text}} });
         Send(new { method="thread/tokenUsage/updated", @params=new {threadId=session,tokenUsage=new {total=new {totalTokens=100}}} });
@@ -62,7 +69,39 @@ class FixtureProvider {
             // The harness tears down the complete job when the worker turn ends.
         }
     }
+    static void Claude(string[] args) {
+        claudeStream = true;
+        int instructions = Array.IndexOf(args,"--append-system-prompt");
+        worker = instructions >= 0 && args[instructions+1].StartsWith("You are a Workshop worker");
+        int resume = Array.IndexOf(args,"--resume");
+        session = resume >= 0 ? args[resume+1] : ThreadId;
+        string line;
+        while ((line=Console.ReadLine())!=null) {
+            var frame = Json.Deserialize<Dictionary<string,object>>(line);
+            switch ((string)frame["type"]) {
+                case "control_request":
+                    Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=new[]{new {value="default",supportedEffortLevels=new[]{"low","high"}}}}}});
+                    break;
+                case "user":
+                    Send(new {type="system",subtype="init",session_id=session});
+                    var msg=(Dictionary<string,object>)frame["message"];
+                    var blocks=(System.Collections.ArrayList)msg["content"];
+                    var first=(Dictionary<string,object>)blocks[0];
+                    if (worker) { Worker((string)first["text"]); break; }
+                    var tasks = new[]{Assignment("left"),Assignment("right")};
+                    Send(new {type="control_request",request_id="batch", request=new {subtype="mcp_message",server_name="workshop",message=new {jsonrpc="2.0",id=4,method="tools/call",@params=new {name="workshop_delegate",arguments=new {tasks=tasks}}}}});
+                    break;
+                case "control_response":
+                    if (!line.Contains("mcp_response")) throw new InvalidDataException("Missing MCP result");
+                    Done("Worker batch returned.");
+                    break;
+            }
+        }
+    }
     static void Main(string[] args) {
+        if (Environment.GetEnvironmentVariable("GIT_DIR") != null && Mode("check-git-context"))
+            throw new InvalidDataException("Provider or check inherited the caller's repository");
+        if(args.Length>0 && args[0]=="-p") { Claude(args); return; }
         if(args.Length > 0 && (args[0]=="auth" || args[0]=="login" || args[0]=="logout")){
             bool claude=args[0]=="auth";
             string file=Path.Combine(Dir,claude ? "claude.session" : "codex.session");
@@ -76,7 +115,12 @@ class FixtureProvider {
             string file=Path.Combine(Dir,"sample.plugin");
             var plugin=new {pluginId="sample@fixture",name="Sample plugin",marketplaceName="fixture"};
             var official=new {pluginId="calendar@openai-curated-remote",name="Calendar",marketplaceName="openai-curated-remote",description="Plan events"};
-            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{plugin} : new object[0],available=new object[]{plugin,official}});return;}
+            var sculpt=new {pluginId="image-to-sculpt@image-to-sculpt",name="Image to Sculpt",marketplaceName="image-to-sculpt"};
+            string market = Path.Combine(Dir,"sculpt.market");
+            if(args[1]=="marketplace" && args[2]=="list"){Send(File.Exists(market) ? new object[]{new {name="image-to-sculpt",source="github",repo="gokayfem/image-to-sculpt"}} : new object[0]);return;}
+            if(args[1]=="marketplace" && args[2]=="add" && args[3]=="gokayfem/image-to-sculpt"){File.WriteAllText(market,args[3]);return;}
+            if(args[1]=="install" && args[2]==sculpt.pluginId && !File.Exists(market)){Environment.Exit(1);}
+            if(args[1]=="list"){Send(new {installed=File.Exists(file) ? new object[]{File.ReadAllText(file)==sculpt.pluginId ? (object)sculpt : plugin} : new object[0],available=new object[]{plugin,official}});return;}
             if(args[1]=="add" || args[1]=="install"){File.WriteAllText(file,args[2]);return;}
             if(args[1]=="remove" || args[1]=="uninstall"){File.Delete(file);return;}
         }
@@ -98,6 +142,7 @@ class FixtureProvider {
             if(!msg.ContainsKey("method")){
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
+                if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
                 if(Convert.ToString(msg["id"])=="block") Done("Waiting for the release input.");
                 continue;
             }
@@ -108,6 +153,10 @@ class FixtureProvider {
             if(method=="initialize") Send(new {id=id,result=new {}});
             if(method=="config/read") Send(new {id=id,result=new {config=new {model="fixture-fast",model_reasoning_effort="low"}}});
             if(method=="model/list"){
+                if (Mode("catalog.hold")) {
+                    File.WriteAllText(Path.Combine(Dir, "catalog.ready"), "ready");
+                    while (Mode("catalog.hold")) Thread.Sleep(40);
+                }
                 var low=new {reasoningEffort="low"}; var high=new {reasoningEffort="high"};
                 Send(new {id=id,result=new {data=new[]{new {model="fixture-fast",defaultReasoningEffort="low",supportedReasoningEfforts=new[]{low},isDefault=true},
                     new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}}}});
@@ -117,7 +166,7 @@ class FixtureProvider {
                     !Object.Equals(p["sandbox"], "workspace-write") || !Object.Equals(p["approvalPolicy"], "never")))
                     throw new InvalidDataException("Unexpected provider process identity or sandbox settings");
                 session=p.ContainsKey("threadId")?(string)p["threadId"]:ThreadId;
-                worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop Codex worker");
+                worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop worker");
                 studio=p.ContainsKey("ephemeral") && Object.Equals(p["ephemeral"],true);
                 string instructions = (string)p["developerInstructions"];
                 studioKind = instructions.StartsWith("Summarize the supplied") ? "summary" :
@@ -131,6 +180,7 @@ class FixtureProvider {
                 turn=Guid.NewGuid().ToString();
                 Send(new {id=id,result=new {turn=new {id=turn}}});
                 var first=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
+                while (Mode("notice.hold")) Thread.Sleep(40);
                 if(studio){
                     if(File.Exists(Path.Combine(Dir,"studio.hold"))) Thread.Sleep(Timeout.Infinite);
                     if (studioKind == "summary") {
@@ -151,6 +201,17 @@ class FixtureProvider {
                 }
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
+                if (message == "Show the reference drawing" && Mode("chat-image.png")) {
+                    Send(new {method="item/completed", @params=new {threadId=session,turnId=turn,
+                        item=new {type="imageGeneration",status="completed",savedPath=Path.Combine(Dir,"chat-image.png")}}});
+                    Done("Here is the reference."); continue;
+                }
+                if (message == "Move the highlighted area to the right" && Mode("chat-image.png")) {
+                    File.Copy(Path.Combine(Dir,"capture-fixture.png"),"revised.png",true);
+                    Send(new {id="posted-image",method="item/tool/call",@params=new {threadId=session,turnId=turn,
+                        callId="posted-image",tool="workshop_send_image",arguments=new {path="revised.png",caption="Revised layout"}}});
+                    continue;
+                }
                 if (Mode("small-talk")) { Done("Hello!"); continue; }
                 if (Mode("blocker")) {
                     File.WriteAllText("answer.txt","partial");

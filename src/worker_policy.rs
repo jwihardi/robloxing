@@ -33,7 +33,13 @@ impl WorkerPolicy {
         catalog: &provider::Catalog,
     ) -> Result<(String, String)> {
         self.validate()?;
-        let allowed = |id: &str| self.models.is_empty() || self.models.iter().any(|m| m == id);
+        let allowed = |id: &str| {
+            if self.models.is_empty() {
+                !model_id.is_empty() || provider::provider_for(id) == "codex"
+            } else {
+                self.models.iter().any(|m| m == id)
+            }
+        };
         let rank = |value: &str| EFFORTS.iter().position(|&e| e == value);
         let cap = rank(&self.max_effort).unwrap_or(usize::MAX);
         let requested = if effort.is_empty() {
@@ -191,9 +197,42 @@ impl Store {
             return Ok((String::new(), String::new()));
         }
         let mut cache = self.worker_catalog.lock().await;
-        if cache.is_none() {
-            *cache = Some(provider::worker_catalog(&self.project).await?);
+        let mut sources = std::collections::BTreeSet::new();
+        if !model.is_empty() || policy.models.is_empty() {
+            sources.insert(provider::provider_for(model));
+        } else {
+            sources.extend(policy.models.iter().map(|id| provider::provider_for(id)));
         }
-        policy.resolve(model, effort, cache.as_ref().unwrap())
+        let available = cache.get_or_insert_with(Default::default);
+        let mut errors = Vec::new();
+        for source in sources {
+            if available
+                .models
+                .iter()
+                .any(|m| provider::provider_for(&m.model) == source)
+            {
+                continue;
+            }
+            match provider::worker_catalog(&self.project, Some(source)).await {
+                Ok(found) => {
+                    available.models.extend(found.models);
+                    if source == "codex" || available.default_model.is_empty() {
+                        available.default_model = found.default_model;
+                        available.default_effort = found.default_effort;
+                    }
+                }
+                Err(error) => errors.push(format!("{source}: {error:#}")),
+            }
+        }
+        if !errors.is_empty()
+            && (!model.is_empty()
+                || policy
+                    .models
+                    .iter()
+                    .all(|id| !available.models.iter().any(|m| m.model == *id)))
+        {
+            anyhow::bail!("Model discovery failed. {}", errors.join(". "));
+        }
+        policy.resolve(model, effort, available)
     }
 }

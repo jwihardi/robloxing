@@ -55,7 +55,13 @@ impl App {
             }
         }
         controls.set_inherited(run && !drafts.contains_key(&area));
-        controls.set_choices(policy_choices(&setting.agent, &self.catalog.borrow()));
+        let mut catalog = self.catalog.borrow().clone();
+        if area == "Images" {
+            catalog
+                .models
+                .retain(|m| workshop::provider::provider_for(&m.model) == "codex");
+        }
+        controls.set_choices(policy_choices(&setting.agent, &catalog));
         controls.set_function_limit(i32::from(setting.function_limit));
         controls.set_seconds(i32::from(setting.seconds_per_function));
         controls.set_summary(setting.summarize);

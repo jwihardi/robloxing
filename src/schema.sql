@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS attempts(
 );
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, attempt INTEGER NOT NULL REFERENCES attempts,
     recorded TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, summary TEXT);
+CREATE TABLE IF NOT EXISTS event_images(event INTEGER PRIMARY KEY REFERENCES events(id), path TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS annotation_sources(attachment TEXT PRIMARY KEY, original TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS chat_image_events ON events(attempt,id) WHERE kind='workshop/image';
 CREATE TABLE IF NOT EXISTS decisions(attempt INTEGER PRIMARY KEY REFERENCES attempts, decision TEXT NOT NULL,
     recorded TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, attempt INTEGER NOT NULL REFERENCES attempts,
@@ -24,7 +27,7 @@ INSERT OR IGNORE INTO team_settings(id,lead_model,worker_model,parallelism,check
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL REFERENCES attempts,
     name TEXT NOT NULL, spec TEXT NOT NULL, state TEXT NOT NULL, run INTEGER, tries INTEGER NOT NULL DEFAULT 0,
     detail TEXT NOT NULL DEFAULT '', signature TEXT NOT NULL DEFAULT '', repeats INTEGER NOT NULL DEFAULT 0,
-    tokens INTEGER, UNIQUE(lead,name));
+    tokens INTEGER, model TEXT, effort TEXT, UNIQUE(lead,name));
 CREATE TABLE IF NOT EXISTS checkpoints(lead INTEGER PRIMARY KEY REFERENCES attempts, decisions TEXT NOT NULL, next_task TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_by_attempt ON events(attempt,id);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);

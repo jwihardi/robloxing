@@ -17,6 +17,7 @@ function Invoke-WorkshopUiTest([string]$Script, [hashtable]$Parameters = @{}) {
         $encodedPath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($request))
         $code = @'
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + $env:PSModulePath
 $request = Import-Clixml -LiteralPath ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('REQUEST_PATH')))
 try {
     . $request.Helper
@@ -32,7 +33,9 @@ try {
 }
 '@
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code.Replace('REQUEST_PATH', $encodedPath)))
-        $run = [TestDesktop]::Launch($name, (Get-Process -Id $PID).Path, $encoded, (Get-Location).ProviderPath)
+        # The packaged pwsh host can open a helper on the interactive desktop.
+        $shellPath = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        $run = [TestDesktop]::Launch($name, $shellPath, $encoded, (Get-Location).ProviderPath)
         while (!$run.Finished()) { Start-Sleep -Milliseconds 200 }
         $status = $run.ExitCode()
         if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding utf8 }

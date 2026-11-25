@@ -10,8 +10,8 @@ import tempfile
 import time
 
 
-def wait_for(predicate, message):
-    deadline = time.monotonic() + 45
+def wait_for(predicate, message, timeout=45):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
@@ -38,7 +38,7 @@ class Case:
         self.project.mkdir()
         self.home = root / "data"
         self.env = dict(os.environ, WORKSHOP_HOME=str(self.home),
-                        WORKSHOP_CODEX=str(fixture), WORKSHOP_PROBE_DIR=str(root))
+                        WORKSHOP_CODEX=str(fixture), WORKSHOP_CLAUDE=str(fixture), WORKSHOP_PROBE_DIR=str(root))
         self.cmd = [str(cli), "--project", str(self.project)]
         self.call("open")
         self.db = next(self.home.glob("*/workshop.sqlite"))
@@ -116,6 +116,47 @@ def stop_one(case):
     case.call("accept", "1")
 
 
+def stop_preparing_worker(case):
+    case.call("team", "--parallelism", "1", "--worker-model", "fixture-fast")
+    case.hold("catalog")
+    proc = case.run("run", "delegate")
+    try:
+        wait_for(lambda: (case.root / "catalog.ready").exists(), "worker never requested models")
+        proc.stdin.write(b"/stop-worker 1\n")
+        proc.stdin.flush()
+        wait_for(lambda: case.workers()[0][1] == "blocked",
+                 "worker ignored stop during model discovery", timeout=10)
+        with sqlite3.connect(case.db) as db:
+            assert db.execute("SELECT run FROM workers WHERE id=1").fetchone() == (None,)
+    finally:
+        case.release("catalog")
+        proc.communicate(timeout=60)
+    assert proc.returncode != 0
+    assert not (case.root / "left.ready").exists()
+    assert [w[1] for w in case.workers()] == ["blocked", "finished"]
+
+
+def read_only_models(case):
+    folder = case.root / "ordinary-folder"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("unfinished work")
+    home = case.root / "unused-home"
+    result = subprocess.run([case.cmd[0], "--project", str(folder), "models", "--provider", "codex"],
+                            env=dict(case.env, WORKSHOP_HOME=str(home)), capture_output=True,
+                            text=True, check=True, timeout=30)
+    assert "fixture-fast" in result.stdout
+    assert list(folder.iterdir()) == [folder / "notes.txt"], "model lookup modified the folder"
+    assert not home.exists(), "model lookup created Workshop storage"
+    case.hold("left")
+    proc = case.run("run", "delegate")
+    try:
+        case.started("left")
+        assert "fixture-fast" in case.call("models", "--provider", "codex")
+    finally:
+        case.release("left")
+        finish(proc, True)
+
+
 def overlap(case):
     case.call("team", "--parallelism", "2")
     (case.root / "overlap").touch()
@@ -189,6 +230,23 @@ def direct_repair(case):
     assert case.workers() == []
     case.call("accept", "1")
     assert (case.project / "answer.txt").read_text() == "correct"
+
+
+def foreign_git_environment(case):
+    caller = case.root / "caller"
+    subprocess.run(["git", "init", "--quiet", str(caller)], check=True)
+    notes = caller / "notes.txt"
+    notes.write_text("staged work")
+    subprocess.run(["git", "-C", str(caller), "add", "notes.txt"], check=True)
+    index = caller / ".git/index"
+    staged = index.read_bytes()
+    notes.write_text("unfinished changes")
+    case.env.update(GIT_DIR=str(caller / ".git"), GIT_INDEX_FILE=str(index),
+                    GIT_WORK_TREE=str(caller))
+    (case.root / "check-git-context").touch()
+    direct_repair(case)
+    assert notes.read_text() == "unfinished changes" and index.read_bytes() == staged
+    assert not (caller / "answer.txt").exists()
 
 
 def unavailable_runner(case):
@@ -279,6 +337,29 @@ def model_effort(case):
             assert any("delegation by request]" in hint for hint in hints)
 
 
+def claude_worker_stop_and_resume(case):
+    case.call("team", "--lead-model", "claude:default", "--worker-model", "claude:default")
+    stop_one(case)
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT provider,state FROM attempts").fetchall() == [("claude","accepted")]
+
+
+def claude_without_codex(case):
+    case.env["WORKSHOP_CODEX"] = str(case.root / "no-codex.exe")
+    assert "claude:default" in case.call("models")
+    case.call("run", "--provider", "claude", "delegate")
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT provider,state FROM attempts").fetchone() == ("claude", "review")
+        assert db.execute("SELECT model,state FROM workers ORDER BY id").fetchall() == [
+            ("claude:default", "finished"), ("claude:default", "finished")]
+    case.call("accept", "1")
+
+
+def mixed_provider_conflict(case):
+    case.call("team", "--lead-model", "claude:default", "--worker-model", "fixture-fast")
+    conflict(case)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", type=Path, default=Path("target/debug/workshop-cli.exe"))
@@ -289,8 +370,11 @@ def main():
         compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
-        for test in (autonomous_release, direct_repair, unavailable_runner, small_talk, manual_recheck, external_blocker,
-                     mixed_plan, conflict, stop_one, cancel_check, overlap, repeated_check, model_effort):
+        for test in (autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
+                     small_talk, manual_recheck, external_blocker, mixed_plan, conflict,
+                     stop_one, stop_preparing_worker, cancel_check, overlap,
+                     repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,
+                     mixed_provider_conflict, claude_without_codex):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))
             print(test.__name__ + " passed", flush=True)
 

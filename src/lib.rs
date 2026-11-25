@@ -1,6 +1,8 @@
 mod check;
 pub mod cli;
 mod git;
+mod image_comparison;
+pub use image_comparison::ImageComparison;
 pub mod provider;
 pub mod screenshots;
 pub mod studio;
@@ -42,6 +44,7 @@ pub struct Attempt {
     pub head: String,
     pub base: String,
     pub session: String,
+    pub provider: String,
     pub model: String,
     pub effort: String,
     pub patch: String,
@@ -63,6 +66,8 @@ pub struct Store {
 
 pub struct ChatMessage {
     pub screenshot: bool,
+    pub image: Option<PathBuf>,
+    pub comparison: Option<ImageComparison>,
     pub id: i64,
     pub from_user: bool,
     pub delivery_notice: bool,
@@ -73,6 +78,13 @@ pub struct ChatMessage {
 impl Store {
     pub fn messages_after(&self, attempt: i64, after: i64) -> Result<Vec<ChatMessage>> {
         self.message_range(attempt, after, i64::MAX, -1, false)
+    }
+    pub fn last_chat_image_event(&self, attempt: i64) -> Result<i64> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT COALESCE(MAX(id),0) FROM events WHERE attempt=?1 AND kind='workshop/image'",
+            [attempt],
+            |r| r.get(0),
+        )?)
     }
     pub fn message_page(
         &self,
@@ -100,10 +112,11 @@ impl Store {
         let db = self.db.lock().unwrap();
         let order = if descending { "DESC" } else { "ASC" };
         let mut stmt = db.prepare(&format!(
-            "SELECT id,kind,summary FROM events
-            WHERE attempt=?1 AND id>?2 AND id<?3 AND summary IS NOT NULL
+            "SELECT events.id,kind,summary,event_images.path FROM events
+            LEFT JOIN event_images ON event_images.event=events.id
+            WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair')
+                         'steer/error','steer/unavailable','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -121,12 +134,21 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                comparison: if kind == "workshop/image" {
+                    self.comparison_before(&db, attempt, row.get(0)?)?
+                } else {
+                    None
+                },
+                image: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                 screenshot: kind == "workshop/screenshot",
                 id: row.get(0)?,
                 from_user: matches!(kind.as_str(), "steer/sent" | "user/followup"),
                 delivery_notice: matches!(
                     kind.as_str(),
-                    "steer/error" | "steer/unavailable" | "workshop/repair"
+                    "steer/error"
+                        | "steer/unavailable"
+                        | "workshop/repair"
+                        | "workshop/image_error"
                 ),
                 dispatched_workers,
                 text,
@@ -188,6 +210,8 @@ impl Store {
                 "auto_delegate",
                 "INTEGER NOT NULL DEFAULT 1",
             ),
+            ("workers", "model", "TEXT"),
+            ("workers", "effort", "TEXT"),
             ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
         ] {
             let missing: bool = tx.query_row(
@@ -300,7 +324,7 @@ impl Store {
         } else {
             "WHERE ?1 IS NULL"
         };
-        let mut stmt=db.prepare(&format!("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate,a.effort FROM attempts a JOIN tasks t ON a.task=t.id {filter} ORDER BY a.id DESC LIMIT ?2 OFFSET ?3"))?;
+        let mut stmt=db.prepare(&format!("SELECT a.id,t.id,t.prompt,a.state,a.action,a.head,a.base,a.session,a.model,a.patch,a.candidate,a.effort,a.provider FROM attempts a JOIN tasks t ON a.task=t.id {filter} ORDER BY a.id DESC LIMIT ?2 OFFSET ?3"))?;
         Ok(stmt
             .query_map(params![id, limit, offset], |r| {
                 Ok(Attempt {
@@ -314,6 +338,7 @@ impl Store {
                     session: r.get(7)?,
                     model: r.get(8)?,
                     effort: r.get(11)?,
+                    provider: r.get(12)?,
                     patch: r.get(9)?,
                     candidate: r.get(10)?,
                 })
@@ -355,7 +380,14 @@ impl Store {
         let settings = self.team_settings()?;
         if let Some(id) = retry {
             let old = self.attempt(id)?;
-            return self.prepare_inference(prompt, model, &old.effort, retry, policy, &[]);
+            return self.prepare_inference(
+                prompt,
+                if model.is_empty() { &old.model } else { model },
+                &old.effort,
+                retry,
+                policy,
+                &[],
+            );
         }
         let effort = if model.is_empty() || model == settings.lead_model {
             &settings.lead_effort
@@ -377,11 +409,50 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?,
         )
     }
+    fn attached_chat_image<'a>(&self, files: &'a [PathBuf]) -> Option<&'a PathBuf> {
+        files.iter().find(|path| self.is_chat_image(path))
+    }
+    pub fn task_chat_image(&self, task: i64) -> Result<Option<PathBuf>> {
+        Ok(self
+            .attached_chat_image(&self.task_attachments(task)?)
+            .cloned())
+    }
+    pub fn save_chat_image(&self, png: &[u8]) -> Result<PathBuf> {
+        Self::write_image(
+            self.dir
+                .join("chat-images")
+                .join(format!("{}.png", digest(png))),
+            png,
+        )
+    }
+    fn write_image(path: PathBuf, png: &[u8]) -> Result<PathBuf> {
+        if !path.is_file() {
+            let folder = path.parent().context("Invalid chat image path")?;
+            fs::create_dir_all(folder)?;
+            // The Windows tempfile APIs need extended paths for deeply nested Workshop homes.
+            let absolute = fs::canonicalize(folder)?;
+            let mut temp = tempfile::NamedTempFile::new_in(&absolute)?;
+            temp.write_all(png)?;
+            temp.persist(absolute.join(path.file_name().context("Invalid chat image filename")?))?;
+        }
+        Ok(path)
+    }
+    pub(crate) fn post_chat_image(
+        &self,
+        id: i64,
+        image: &image::DynamicImage,
+        caption: &str,
+    ) -> Result<()> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png)?;
+        let path = self.save_chat_image(png.get_ref())?;
+        self.event_with_image(id, "workshop/image", Some(caption), Some(&path))
+    }
     pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
-        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3 WHERE id=?1 AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort])?;
+        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3,provider=?4 WHERE id=?1 AND (session='' OR provider=?4) AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort,provider::provider_for(model)])?;
         ensure!(
             n == 1,
-            "Wait for the current response before changing the model."
+            "Change models between responses. Start a new chat to switch providers."
         );
         Ok(())
     }
@@ -418,7 +489,7 @@ impl Store {
                 }
                 task
             };
-            tx.execute("INSERT INTO attempts(task,head,model,effort,state,action) VALUES(?1,?2,?3,?4,'preparing','Creating isolated copy')",params![task,head,model,effort])?;
+            tx.execute("INSERT INTO attempts(task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,'preparing','Creating isolated copy')",params![task,head,model,effort,provider::provider_for(model)])?;
             let id = tx.last_insert_rowid();
             if let Some(policy) = policy {
                 policy.validate()?;
@@ -434,7 +505,7 @@ impl Store {
         };
         match git::isolate(&self.project, &self.work(id), &head) {
             Ok(base) => {
-                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action='Connecting to Codex' WHERE id=?1",params![id,base])?;
+                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action=CASE provider WHEN 'claude' THEN 'Connecting to Claude' ELSE 'Connecting to Codex' END WHERE id=?1",params![id,base])?;
             }
             Err(e) => {
                 self.status(id, "failed", &format!("{e:#}"))?;
@@ -466,12 +537,38 @@ impl Store {
         Ok(())
     }
     pub fn event(&self, id: i64, kind: &str, action: Option<&str>) -> Result<()> {
+        self.event_with_image(id, kind, action, None)
+    }
+    fn message_event(&self, id: i64, kind: &str, message: &provider::Message) -> Result<()> {
+        self.event_with_image(
+            id,
+            kind,
+            Some(&message.text),
+            self.attached_chat_image(&message.files),
+        )
+    }
+    fn event_with_image(
+        &self,
+        id: i64,
+        kind: &str,
+        action: Option<&str>,
+        image: Option<&PathBuf>,
+    ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         tx.execute(
             "INSERT INTO events(attempt,kind,summary) VALUES(?1,?2,?3)",
             params![id, kind, action],
         )?;
+        if let Some(path) = image {
+            tx.execute(
+                "INSERT INTO event_images(event,path) VALUES(?1,?2)",
+                params![
+                    tx.last_insert_rowid(),
+                    path.to_str().context("Unreadable sketch path")?
+                ],
+            )?;
+        }
         if let Some(action) = action {
             tx.execute(
                 "UPDATE attempts SET action=?2 WHERE id=?1",
@@ -527,7 +624,7 @@ impl Store {
             use rusqlite::OptionalExtension;
             if let Some(last)=db.query_row("SELECT summary FROM events WHERE attempt=?1 AND kind='agent/message' ORDER BY id DESC LIMIT 1",[id],|r|r.get::<_,String>(0)).optional()? {
                 summary=last;
-            } else if bytes.is_empty() { summary="Codex finished without changing the working copy.".into(); }
+            } else if bytes.is_empty() { summary="Finished without changing the working copy.".into(); }
         }
         db.execute(
             "UPDATE attempts SET state=?2,action=?3,candidate=?4,patch=?5 WHERE id=?1",

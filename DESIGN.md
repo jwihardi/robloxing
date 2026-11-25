@@ -36,6 +36,8 @@ Keep the composer at the bottom in a new chat and throughout a conversation. The
 
 Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs opens screenshots for this chat and links to the album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)
 
+Sketches open inline above the composer from **Add to message**. **Annotate** opens a returned image on the same pad and keeps its aspect ratio. Keep the caption editable while the pad is open. The paper and pen colors are fixed across themes, with a white pen for dark images. The toolbar and chat bubble use the current theme. A collapsed sketch stays in its chat draft, and a sent sketch can expand inside its original message.
+
 ## Studio, settings and album
 
 Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.

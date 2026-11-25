@@ -42,6 +42,8 @@ pub struct Worker {
     pub detail: String,
     pub repeats: usize,
     pub tokens: Option<i64>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 fn clipped(s: &str, limit: usize) -> String {
@@ -181,7 +183,7 @@ impl Store {
     }
     pub fn workers(&self, lead: i64) -> Result<Vec<Worker>> {
         let db = self.db.lock().unwrap();
-        let mut q=db.prepare("SELECT id,spec,state,run,tries,detail,repeats,tokens FROM workers WHERE lead=?1 ORDER BY id")?;
+        let mut q=db.prepare("SELECT id,spec,state,run,tries,detail,repeats,tokens,model,effort FROM workers WHERE lead=?1 ORDER BY id")?;
         let rows = q.query_map([lead], |r| {
             Ok((
                 r.get(0)?,
@@ -192,10 +194,12 @@ impl Store {
                 r.get(5)?,
                 r.get(6)?,
                 r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, spec, state, run, tries, detail, repeats, tokens) = row?;
+            let (id, spec, state, run, tries, detail, repeats, tokens, model, effort) = row?;
             Ok(Worker {
                 id,
                 assignment: serde_json::from_str(&spec)?,
@@ -205,6 +209,8 @@ impl Store {
                 detail,
                 repeats,
                 tokens,
+                model,
+                effort,
             })
         })
         .collect()
@@ -440,11 +446,12 @@ pub(crate) fn tools(worker: bool) -> Value {
         return Value::Array(available);
     }
     let lead_tools = json!([
+        {"type":"function","name":"workshop_send_image","description":"Show a finished or revised project image in this chat so the creator can view and draw on it. Use a path inside the current project copy and a short descriptive caption. Built-in image generation results already appear automatically.","inputSchema":{"type":"object","properties":{"path":string,"caption":string},"required":["path","caption"],"additionalProperties":false}},
         {"type":"function","name":"workshop_find_assets","description":"Find ready game art in this project's Game studio when the creator asks to use an existing image or model. Use the returned ID with workshop_import_asset to copy it into the review.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
         {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
-        {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Codex workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Workshop workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
-        {"type":"function","name":"workshop_blocked","description":"Report a genuine external blocker that prevents completion after available alternatives have been tried. Include the missing input or capability and saved progress. This ends autonomous repair for this request.","inputSchema":{"type":"object","properties":{"reason":string},"required":["reason"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_blocked","description":"Report a genuine external blocker, including a decision only the creator can make, when work cannot continue. State the specific input or capability you need and any saved progress. Workshop can notify the creator. This ends autonomous repair for this request.","inputSchema":{"type":"object","properties":{"reason":string},"required":["reason"],"additionalProperties":false}},
         {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
     ]);
     available.extend(lead_tools.as_array().unwrap().iter().cloned());
@@ -490,9 +497,21 @@ impl Store {
         lead: i64,
         w: &Worker,
         policy: &crate::worker_policy::WorkerPolicy,
+        mut controls: provider::Controls,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<()> {
-        let (model, effort) = self.worker_inference(policy, &w.assignment).await?;
+        let mut assignment = w.assignment.clone();
+        if assignment.model.is_empty()
+            && policy.models.is_empty()
+            && self.attempt(lead)?.provider == "claude"
+        {
+            assignment.model = "claude:default".into();
+        }
+        let (model, effort) = tokio::select! {
+            biased;
+            _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
+            result = self.worker_inference(policy, &assignment) => result?,
+        };
         let child = self.child_store(lead, w.id)?;
         let last = if let Some(run) = w.run {
             let previous = child.attempt(run)?;
@@ -519,16 +538,14 @@ impl Store {
         );
         let a = child.prepare_inference(&prompt, &model, &effort, None, None, &[])?;
         self.db.lock().unwrap().execute(
-            "UPDATE workers SET run=?2,detail='Working in isolated copy' WHERE id=?1",
-            params![w.id, a.id],
+            "UPDATE workers SET run=?2,model=?3,effort=?4,detail='Working in isolated copy' WHERE id=?1",
+            params![w.id, a.id, a.model, a.effort],
         )?;
         notify(provider::ReplyUpdate::WorkersChanged);
-        let (tx, rx) = provider::channel();
-        self.controls.lock().unwrap().insert(w.id, tx);
         let update_error = std::cell::RefCell::new(None);
-        let result = provider::worker_turn(&child, &a, rx, &|event| {
+        let result = provider::worker_turn(&child, &a, controls, &|event| {
             let updated = match event {
-                provider::ReplyUpdate::AccountUsage(_) => return notify(event),
+                provider::ReplyUpdate::AccountUsage(..) => return notify(event),
                 provider::ReplyUpdate::Usage(tokens) => self
                     .db
                     .lock()
@@ -550,7 +567,6 @@ impl Store {
             notify(provider::ReplyUpdate::WorkersChanged);
         })
         .await;
-        self.controls.lock().unwrap().remove(&w.id);
         if let Some(e) = update_error.into_inner() {
             return Err(e);
         }
@@ -571,9 +587,14 @@ impl Store {
         lead: i64,
         w: Worker,
         policy: &crate::worker_policy::WorkerPolicy,
+        controls: provider::Controls,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<()> {
-        if let Err(e) = self.run_assignment(lead, &w, policy, notify).await {
+        let result = self
+            .run_assignment(lead, &w, policy, controls, notify)
+            .await;
+        self.controls.lock().unwrap().remove(&w.id);
+        if let Err(e) = result {
             self.block_worker(w.id, &format!("{e:#}"))?;
             notify(provider::ReplyUpdate::WorkersChanged);
         }
@@ -729,7 +750,9 @@ impl Store {
                     "UPDATE workers SET state='running',tries=tries+1,run=NULL,detail='Preparing isolated copy' WHERE id=?1",
                     [w.id],
                 )?;
-                running.push(self.drive_worker(lead.id, w.clone(), &policy, notify));
+                let (tx, rx) = provider::channel();
+                self.controls.lock().unwrap().insert(w.id, tx);
+                running.push(self.drive_worker(lead.id, w.clone(), &policy, rx, notify));
             }
             notify(provider::ReplyUpdate::WorkersChanged);
             if let Some(done) = running.next().await {
@@ -771,6 +794,35 @@ pub(crate) async fn dispatch(
 ) -> Result<String> {
     let args = &request["arguments"];
     match request["tool"].as_str() {
+        Some("workshop_send_image") if !store.worker => {
+            let work = dunce::canonicalize(store.work(lead.id))?;
+            let path = args["path"].as_str().context("Choose a project image.")?;
+            let path = std::path::Path::new(path);
+            let path = path.strip_prefix(&work).unwrap_or(path);
+            ensure!(
+                path.components().all(|part| matches!(
+                    part,
+                    std::path::Component::CurDir | std::path::Component::Normal(_)
+                )),
+                "Choose an image in the current project copy."
+            );
+            let path =
+                dunce::canonicalize(work.join(path)).context("Cannot find the project image.")?;
+            ensure!(
+                path.starts_with(&work) && path.is_file(),
+                "Choose an image in the current project copy."
+            );
+            let caption = args["caption"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("Describe the image.")?;
+            let image = image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .decode()?;
+            store.post_chat_image(lead.id, &image, &clipped(caption, 500))?;
+            notify(provider::ReplyUpdate::TranscriptChanged);
+            return Ok("Image added to the chat.".into());
+        }
         Some("workshop_report_result") if store.worker => {
             let kind = match args["status"].as_str() {
                 Some("complete") => "worker/complete",
