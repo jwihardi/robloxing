@@ -452,6 +452,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         {"type":"function","name":"workshop_import_asset","description":"On the creator's request, bring a finished Game studio PNG or GLB into this chat's isolated working copy at the requested project-relative path for normal review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
         {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Workshop workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_goal_result","description":"Report the outcome of the current chat goal. Use progress for a concrete new result that leaves work to do. Use complete only when the whole objective is satisfied and verified. Include the relevant evidence. Workshop checks the project before recording completion.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["progress","complete"]},"evidence":string},"required":["status","evidence"],"additionalProperties":false}},
         {"type":"function","name":"workshop_blocked","description":"Report a genuine external blocker, including a decision only the creator can make, when work cannot continue. State the specific input or capability you need and any saved progress. Workshop can notify the creator. This ends autonomous repair for this request.","inputSchema":{"type":"object","properties":{"reason":string},"required":["reason"],"additionalProperties":false}},
         {"type":"function","name":"workshop_checkpoint","description":"Save the design decisions and next unfinished task for this chat's review and project handoff.","inputSchema":{"type":"object","properties":{"decisions":string,"next_task":string},"required":["decisions","next_task"],"additionalProperties":false}}
     ]);
@@ -971,6 +972,17 @@ pub(crate) async fn dispatch(
             store.worker_state(w.id, "finished", detail)?;
             notify(provider::ReplyUpdate::WorkersChanged);
             store.execute_queue(lead, notify).await
+        }
+        Some("workshop_goal_result") => {
+            let status = args["status"].as_str().context("Choose a goal status.")?;
+            let evidence = args["evidence"]
+                .as_str()
+                .context("Describe the evidence.")?;
+            store.report_goal(lead.id, status, &clipped(evidence, 4000))?;
+            Ok(
+                "Goal report received. Finish this response so Workshop can verify the result."
+                    .into(),
+            )
         }
         Some("workshop_blocked") => {
             let reason = args["reason"]

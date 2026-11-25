@@ -494,7 +494,7 @@ pub(super) async fn exchange(
         first.insert(0, json!({"type":"text","text":instructions}));
         bridge.instructions = instructions;
     }
-    if let Some(pref) = team_preference(store)? {
+    if let Some(pref) = team_preference(store, a.id)? {
         first.push(json!({"type":"text","text":pref}));
     }
     let mut queued = VecDeque::from([first]);
@@ -507,7 +507,7 @@ pub(super) async fn exchange(
     let mut started = false;
     let mut cancelling = false;
     let mut stopped = HashSet::new();
-    let mut repairs = Repairs::default();
+    let mut repairs = Repairs::start(store, a)?;
     let mut blocker = None;
     let mut text = String::new();
     let mut cumulative = store.usage(a.id)?.unwrap_or_default();
@@ -758,6 +758,8 @@ pub(super) async fn exchange(
                         Finish::Cancelled => return Ok(false),
                         Finish::Continue(m) => queued.push_back(content(&m)?),
                     }
+                } else {
+                    repairs.reset_goal_reports(store, a.id)?;
                 }
             }
             _ => {}

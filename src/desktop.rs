@@ -701,6 +701,8 @@ impl App {
             && ui.get_plugin_section() == PluginSection::Marketplace;
         let official = browse && ui.get_official_only();
         let provider = ui.get_settings_provider();
+        let provider_page = ui.get_settings_tab() == "Providers";
+        let permissions = self.permissions.borrow();
         let all = self.settings_rows.borrow();
         let mut matching = all
             .iter()
@@ -726,6 +728,13 @@ impl App {
                 detail: r.detail.as_str().into(),
                 action: r.action.into(),
                 button: r.button.into(),
+                task_count: if provider_page {
+                    desktop_tasks::task_count(&permissions, &r.id)
+                        .unwrap_or_default()
+                        .into()
+                } else {
+                    Default::default()
+                },
             })
             .collect();
         ui.set_more_plugins(browse && matching.next().is_some());
@@ -965,6 +974,7 @@ impl App {
         )));
         let selected = rows.iter().position(|a| Some(a.id) == self.id.get());
         ui.set_selection(selected.map_or(-1, |i| i as i32));
+        self.render_goal(store, selected.map(|i| rows[i].id))?;
         ui.set_outputs(Self::screenshot_items(
             store.chat_screenshots(selected.map(|i| rows[i].id))?,
         ));
@@ -1313,6 +1323,7 @@ impl App {
                     }
                 }
                 Update::Started(id, clear_draft) => {
+                    ui.set_editing_goal(false);
                     ui.set_notice("".into());
                     if self.id.get().is_none() {
                         self.draft_policy.take();
@@ -1401,6 +1412,7 @@ impl App {
             && let Some(store) = self.store.borrow().as_ref()
             && let Some(attempt) = self.attempts.borrow().iter().find(|a| a.id == id)
         {
+            self.render_goal(store, Some(id))?;
             self.refresh_chat(store, attempt)?;
         }
         Ok(())
@@ -1452,8 +1464,11 @@ impl App {
         self.render_sketch();
     }
     fn draft_message(&self) -> Result<provider::Message> {
+        self.message_with_attachments(&self.ui.unwrap().get_draft())
+    }
+    fn message_with_attachments(&self, text: &str) -> Result<provider::Message> {
         let mut message = provider::Message::compose(
-            &self.ui.unwrap().get_draft(),
+            text,
             self.attachments
                 .borrow()
                 .get(&self.id.get())
@@ -1474,6 +1489,14 @@ impl App {
             }
         }
         Ok(message)
+    }
+    fn render_goal(&self, store: &Store, id: Option<i64>) -> Result<()> {
+        let goal = id.map(|id| store.chat_goal(id)).transpose()?.flatten();
+        let ui = self.ui.unwrap();
+        ui.set_goal_objective(goal.as_ref().map_or("", |g| g.objective.as_str()).into());
+        ui.set_goal_status(goal.as_ref().map_or("", |g| g.status.as_str()).into());
+        ui.set_goal_detail(goal.as_ref().map_or("", |g| g.detail.as_str()).into());
+        Ok(())
     }
     fn render_queue(&self, store: &Store, id: i64) -> Result<()> {
         let rows = store
@@ -1496,13 +1519,39 @@ impl App {
         self.ui.unwrap().set_draft("".into());
     }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
+        self.operate_with_goal(op, None)
+    }
+    fn operate_with_goal(self: &Rc<Self>, op: &str, editor: Option<&str>) -> Result<()> {
         let ui = self.ui.unwrap();
+        let input = ui.get_draft();
+        let from_composer = (editor.is_none() || ui.get_goal_uses_draft())
+            && !(op == "retry" && ui.get_editing_goal());
+        let mut objective = editor;
+
         if matches!(op, "submit" | "resume" | "steer" | "queue" | "steer-worker") {
             if ui.get_capturing() {
                 return Ok(());
             }
-            let draft = ui.get_draft().to_string();
-            if capture::requested(&draft) && !ui.global::<Sketch>().get_has_content() {
+            objective = objective.or_else(|| workshop::goals::command(&input));
+            if objective == Some("") {
+                anyhow::ensure!(
+                    !ui.get_busy() || !ui.get_goal_objective().is_empty(),
+                    "Stop the current response before starting a goal."
+                );
+                ui.invoke_open_goal(true);
+                return Ok(());
+            }
+            if objective.is_some() {
+                anyhow::ensure!(
+                    matches!(op, "submit" | "resume"),
+                    "Stop the current response before changing the chat goal."
+                );
+            }
+            let draft = input.to_string();
+            if objective.is_none()
+                && capture::requested(&draft)
+                && !ui.global::<Sketch>().get_has_content()
+            {
                 self.capture(Some(draft));
                 return Ok(());
             }
@@ -1522,6 +1571,27 @@ impl App {
             }
             self.clear_draft();
             ui.set_notice("".into());
+            return Ok(());
+        }
+        if op == "clear-goal" {
+            let slot = self.store.borrow();
+            let store = slot.as_ref().context("Open a project.")?;
+            store.clear_goal(self.id.get().context("Select a chat.")?)?;
+            self.render_goal(store, self.id.get())?;
+            ui.invoke_close_goal();
+            return Ok(());
+        }
+        if op == "pause-goal" {
+            let slot = self.store.borrow();
+            let store = slot.as_ref().context("Open a project.")?;
+            store.pause_goal(
+                self.id.get().context("Select a chat.")?,
+                "You paused this goal.",
+            )?;
+            if let Some(control) = self.control.borrow().as_ref() {
+                let _ = control.send(Control::Cancel);
+            }
+            self.render_goal(store, self.id.get())?;
             return Ok(());
         }
         if op == "steer" || op == "cancel" {
@@ -1546,8 +1616,17 @@ impl App {
         }
         let store = self.store.borrow().clone().context("Open a project.")?;
         let id = self.id.get();
+        let objective = objective.map(str::to_owned);
         let mut draft = if matches!(op, "submit" | "resume") {
-            self.draft_message()?
+            if let Some(text) = objective.as_deref() {
+                if from_composer {
+                    self.message_with_attachments(text)?
+                } else {
+                    text.into()
+                }
+            } else {
+                self.draft_message()?
+            }
         } else {
             "".into()
         };
@@ -1577,7 +1656,9 @@ impl App {
             if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
                 let a = match op.as_str() {
                     "submit" => store.prepare_with_files(
-                        &draft.text,
+                        &objective
+                            .as_ref()
+                            .map_or_else(|| draft.text.clone(), |goal| format!("/goal {goal}")),
                         "",
                         None,
                         draft_policy.as_ref(),
@@ -1594,17 +1675,21 @@ impl App {
                         draft = next;
                         attempt
                     }
-                    _ => store.resume(id.context("Select a task.")?)?,
+                    _ => store
+                        .resume_with_goal(id.context("Select a task.")?, objective.as_deref())?,
                 };
                 let prompt = if matches!(op.as_str(), "resume" | "send-next") {
                     draft
+                } else if op == "retry" {
+                    store.retry_prompt(&a)?.as_str().into()
                 } else {
                     a.prompt.as_str().into()
                 };
                 if op == "submit" {
                     store.bind_draft_screenshots(a.id)?;
                 }
-                events.send(Update::Started(a.id, op != "send-next"))?;
+                events.send(Update::Started(a.id, op != "send-next" && from_composer))?;
+                let active_goal = store.chat_goal(a.id)?.filter(|g| g.status == "active");
                 let earlier_image = store.last_chat_image_event(a.id)?;
                 let earlier_checkpoint = store.current_checkpoint(a.id)?;
                 let outcome =
@@ -1631,13 +1716,14 @@ impl App {
                     &store,
                     &a,
                     &finished,
+                    active_goal.is_some(),
                     earlier_image,
                     earlier_checkpoint,
                 )? {
                     let detail = if finished.state == "failed" {
                         finished.action
                     } else {
-                        a.prompt.clone()
+                        active_goal.map_or_else(|| a.prompt.clone(), |g| g.objective)
                     };
                     events.send(Update::Attention(
                         notifications::Target::chat(store.project.clone(), a.id),
@@ -1682,6 +1768,12 @@ fn main() -> Result<()> {
     transcript::connect(&ui);
     appearance::connect(&ui);
     ui.on_has_content(|text| !text.trim().is_empty());
+    ui.on_initial_goal_text(|draft, current| {
+        match workshop::goals::command(&draft).unwrap_or(draft.trim()) {
+            "" => current,
+            text => text.into(),
+        }
+    });
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
         pending_notification: Default::default(),
@@ -1945,6 +2037,19 @@ fn main() -> Result<()> {
             .ok()
             .and_then(|i| a.attempts.borrow().get(i).map(|r| r.id));
         a.select_chat(selected);
+    });
+    let a = app.clone();
+    ui.on_run_goal(move |objective| {
+        if let Err(e) = a.operate_with_goal(
+            if a.id.get().is_some() {
+                "resume"
+            } else {
+                "submit"
+            },
+            Some(objective.trim()),
+        ) {
+            a.ui.unwrap().set_notice(format!("{e:#}").into());
+        }
     });
     let a = app.clone();
     ui.on_operate(move |op| {

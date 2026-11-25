@@ -39,13 +39,15 @@ Keep the composer at the bottom in a new chat and throughout a conversation. The
 
 Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs opens screenshots for this chat and links to the album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)
 
+A chat goal sits above its conversation as one compact row with the objective and its current state. Selecting the row opens the editor in the composer area. Editing an existing goal preserves the unsent message. The same editor is available from **+** and `/goal`.
+
 Sketches open inline above the composer from **Add to message**. **Annotate** opens a returned image on the same pad and keeps its aspect ratio. Keep the caption editable while the pad is open. The paper and pen colors are fixed across themes, with a white pen for dark images. The toolbar and chat bubble use the current theme. A collapsed sketch stays in its chat draft, and a sent sketch can expand inside its original message.
 
 During a run, Enter steers the lead. The arrow beside Send opens delivery options. Pending follow-ups sit above the composer in a short scrollable list, each with its own remove action. Selecting **Send direction** on an expanded worker addresses the same composer to that worker. The recipient stays visible until the direction is sent or the user returns to the lead.
 
 ## Studio, settings and album
 
-Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. The album uses a responsive thumbnail grid with the project and capture date under each image.
+Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. Expand a provider to toggle the tasks it may handle. Show the number of enabled tasks beside its name, and keep account actions separate from the toggles. Closing Settings returns to the previous destination and selected output. The album uses a responsive thumbnail grid with the project and capture date under each image.
 
 ## Appearance
 
@@ -54,6 +56,8 @@ Each preset has a miniature conversation thumbnail and the active theme has a ch
 ## Components
 
 The files in `themes/` own the preset colors. Their CSS custom properties map directly to `ThemeColors` in `ui/common.slint`, which supplies the runtime palette to app components. The values above document Workshop Dark. Canvas brightness selects the light or dark treatment for standard Slint widgets. Segoe UI carries headings and conversation text. Consolas identifies code, model names and technical metadata. Mint marks the active destination and the assistant speaking. Blue identifies symbols and models, lilac identifies keywords and agent controls, and amber highlights constants and pending review. Capacity meters pair their green-to-red scale with numeric values. Worker states keep explicit labels.
+
+Center the visible label or icon-and-label group inside standalone actions. Align navigation, disclosure and picker rows to the leading edge, reserving space for trailing counts, shortcuts and checkmarks.
 
 Replies use the native transcript in `ui/transcript.slint`. Headings break up long answers. Code sits in a recessed panel with a language header and a keyboard-accessible copy action. Streaming code appears immediately in monospace and gains syntax colors when the reply settles. Saved conversations render through the same component.
 

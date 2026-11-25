@@ -312,7 +312,7 @@ pub(super) async fn exchange(
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
     store.artifact(a.id, "events", "events.jsonl")?;
     store.artifact(a.id, "stderr", "provider.stderr.log")?;
-    let worker_preference = team_preference(store)?;
+    let worker_preference = team_preference(store, a.id)?;
     let preference = worker_preference.as_deref();
     let mut first = Some(user_message(prompt, preference)?);
     if io.session.is_empty() {
@@ -326,7 +326,7 @@ pub(super) async fn exchange(
     let mut queued = VecDeque::new();
     let mut interrupt_requested = false;
     let mut stopped = HashSet::new();
-    let mut repairs = Repairs::default();
+    let mut repairs = Repairs::start(store, a)?;
     let mut blocker = None;
     let mut used = None;
     let mut model = String::new();
@@ -586,6 +586,7 @@ pub(super) async fn exchange(
                     bail!("Task blocked: {reason}");
                 }
                 let input = if let Some(input) = queued.pop_front() {
+                    repairs.reset_goal_reports(store, a.id)?;
                     input
                 } else {
                     match repairs

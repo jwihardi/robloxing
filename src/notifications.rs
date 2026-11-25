@@ -81,6 +81,7 @@ pub(crate) fn chat_reason(
     store: &Store,
     start: &Attempt,
     end: &Attempt,
+    had_active_goal: bool,
     previous_image: i64,
     previous_checkpoint: Option<(String, String)>,
 ) -> Result<Option<&'static str>> {
@@ -89,6 +90,13 @@ pub(crate) fn chat_reason(
     }
     if end.state != "review" {
         return Ok(None);
+    }
+    if had_active_goal && let Some(goal) = store.chat_goal(end.id)? {
+        match goal.status.as_str() {
+            "complete" => return Ok(Some("Goal complete")),
+            "paused" => return Ok(Some("Goal needs your attention")),
+            _ => {}
+        }
     }
     if store.last_chat_image_event(end.id)? > previous_image {
         return Ok(Some("Image ready for review"));
@@ -116,10 +124,10 @@ fn review_alerts_require_new_actionable_work() -> Result<()> {
     let start = store.prepare("Update the project", "", None)?;
     store.finish(start.id, "review", "Hello")?;
     let reply = store.attempt(start.id)?;
-    assert_eq!(chat_reason(&store, &start, &reply, 0, None)?, None);
+    assert_eq!(chat_reason(&store, &start, &reply, false, 0, None)?, None);
     store.checkpoint(start.id, "Use the smaller layout", "Update the menu")?;
     assert_eq!(
-        chat_reason(&store, &reply, &reply, 0, None)?,
+        chat_reason(&store, &reply, &reply, false, 0, None)?,
         Some("Decisions ready for review")
     );
     let checkpoint = store.current_checkpoint(start.id)?;
@@ -127,16 +135,23 @@ fn review_alerts_require_new_actionable_work() -> Result<()> {
     store.finish(start.id, "review", "Updated")?;
     let edited = store.attempt(start.id)?;
     assert_eq!(
-        chat_reason(&store, &reply, &edited, 0, checkpoint.clone())?,
+        chat_reason(&store, &reply, &edited, false, 0, checkpoint.clone())?,
         Some("Changes ready for review")
     );
     assert_eq!(
-        chat_reason(&store, &edited, &edited, 0, checkpoint.clone())?,
+        chat_reason(&store, &edited, &edited, false, 0, checkpoint.clone())?,
         None
     );
     store.status(start.id, "cancelled", "Stopped")?;
     assert_eq!(
-        chat_reason(&store, &reply, &store.attempt(start.id)?, 0, checkpoint)?,
+        chat_reason(
+            &store,
+            &reply,
+            &store.attempt(start.id)?,
+            false,
+            0,
+            checkpoint
+        )?,
         None
     );
     Ok(())

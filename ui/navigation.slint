@@ -1,4 +1,4 @@
-import { Action, Theme } from "common.slint";
+import { Action, RowAction, Theme } from "common.slint";
 import { ListView, LineEdit } from "std-widgets.slint";
 import { Studio } from "studio.slint";
 
@@ -31,7 +31,7 @@ export component WorkshopMark inherits Rectangle {
 export component StudioNavigation inherits VerticalLayout {
     spacing: 5px;
     Text { text: "Game studio"; font-size: 19px; font-weight: 600; color: Theme.text; height: 40px; vertical-alignment: center; }
-    for tool[i] in ["Images", "Models", "Ghidra"]: Action {
+    for tool[i] in ["Images", "Models", "Ghidra"]: RowAction {
         label: tool; glyph: ["\u{e91b}", "\u{e7b8}", "\u{e943}"][i];
         selected: Studio.area == tool; activate => {
             Studio.editing-run = false; Studio.area = tool; Studio.query = ""; Studio.command("refresh"); root.picked();
@@ -41,9 +41,9 @@ export component StudioNavigation inherits VerticalLayout {
     Text { text: Studio.area == "Ghidra" ? "Report history" : "Run history"; color: Theme.symbol; font-family: Theme.mono; font-size: 13px; }
     LineEdit { height: 34px; accessible-label: Studio.area == "Ghidra" ? "Search reports" : "Search assets";
         placeholder-text: Studio.area == "Ghidra" ? "Find binary or function" : "Search assets"; text <=> Studio.query; }
-    if Studio.jobs.length == 0: Text { text: Studio.query != "" ? "No matching assets." : "No runs yet"; color: Theme.muted; font-size: 13px; height: 36px; vertical-alignment: center; }
+    if Studio.jobs.length == 0: Text { text: Studio.query != "" ? (Studio.area == "Ghidra" ? "No matching reports." : "No matching assets.") : "No runs yet"; color: Theme.muted; font-size: 13px; height: 36px; vertical-alignment: center; }
     history := ListView { vertical-stretch: 1;
-        for job in Studio.jobs: Action {
+        for job in Studio.jobs: RowAction {
             width: history.visible-width; height: 52px; label: job.title; detail: (Studio.area == "Ghidra" ? "#" + job.id + " · " : "") + (job.state == "Ready" ? job.date : job.state);
             selected: Studio.selected.id == job.id; accessible-description: job.state + " " + job.date;
             activate => {Studio.editing-run = false; Studio.select(job.id); root.picked();}

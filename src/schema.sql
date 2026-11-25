@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS context_usage(attempt INTEGER PRIMARY KEY REFERENCES 
 CREATE TABLE IF NOT EXISTS verified_team(lead INTEGER PRIMARY KEY REFERENCES attempts, tree TEXT NOT NULL, check_args TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS chat_worker_policy(attempt INTEGER PRIMARY KEY REFERENCES attempts, policy TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS chat_goals(
+    attempt INTEGER PRIMARY KEY REFERENCES attempts,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','verifying','paused','complete')),
+    detail TEXT NOT NULL DEFAULT ''
+);
 
 CREATE TABLE IF NOT EXISTS studio_jobs(
     id INTEGER PRIMARY KEY, area TEXT NOT NULL, title TEXT NOT NULL, request TEXT NOT NULL,

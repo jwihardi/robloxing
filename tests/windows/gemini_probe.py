@@ -141,7 +141,9 @@ def main():
         result = subprocess.run([str(cli), "--project", str(project), "run", "--provider", "gemini",
                                  "SIGNED_OUT_PROBE"], env=signed_out, stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=40)
-        assert result.returncode and b"sign in" in result.stderr.lower(), result.stderr
+        error = result.stderr.lower()
+        assert result.returncode and b"needs authentication" in error, result.stderr
+        assert b"antigravity" in error and b"api key" in error, result.stderr
     print("Gemini discovery, streaming, resume, worker dispatch, usage, steering, queue, and signed-out handling passed.")
 
 

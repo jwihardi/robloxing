@@ -1,8 +1,10 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
+    if ($GoalOnly) { $parameters.GoalOnly = $true }
+    if ($NavigationOnly) { $parameters.NavigationOnly = $true }
     if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
     if ($SketchOnly) { $parameters.SketchOnly = $true }
@@ -166,15 +168,35 @@ function Open-SketchPad {
 }
 function Test-ProviderTasks {
     $toggle = [System.Windows.Automation.TogglePattern]::Pattern
+    function Count-Pixels($image) {
+        $bounds = (Named 'Codex').Current.BoundingRectangle
+        $dpi = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+        $p = [WorkshopPointer+Point]::new()
+        $p.X = [int]($bounds.Right-86*$dpi); $p.Y = [int]($bounds.Top+$bounds.Height/2-8*$dpi)
+        [void][WorkshopPointer]::ScreenToClient($appWindow,[ref]$p)
+        $bmp = [Drawing.Bitmap]::new($image)
+        $mask = [Text.StringBuilder]::new()
+        try {
+            for ($y=0; $y -lt 16*$dpi; $y++) { for ($x=0; $x -lt 76*$dpi; $x++) {
+                $pixel=$bmp.GetPixel($p.X+$x,$p.Y+$y)
+                [void]$mask.Append([int]([int]$pixel.R+$pixel.G+$pixel.B -gt 350))
+            } }
+            $mask.ToString()
+        } finally { $bmp.Dispose() }
+    }
     Click 'Subagents'
     Click 'Provider settings'
     Wait-For { Named 'Codex' } 'providers from the chat shortcut'
     Click 'Codex'
     Wait-For { (Named 'Workers') -and (Named 'Image generation') } 'Codex task choices'
+    $before = Join-Path $root 'all-provider-tasks.png'
+    Save-PrivateWindow $before
+    $all = Count-Pixels $before
     Click 'Workers'
     Wait-For { (Named 'Workers').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'Codex workers disabled'
     if ((Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -ne 'On') { throw 'Changing workers changed image generation' }
-    Save-PrivateWindow (Join-Path $root 'provider-tasks.png')
+    $after = Join-Path $root 'provider-tasks.png'
+    Wait-For { Save-PrivateWindow $after; (Count-Pixels $after) -ne $all } 'visible provider task count changes with the checkbox'
     Click 'Claude Code'
     Wait-For { (Named 'Workers') -and !(Named 'Image generation') } 'Claude supported tasks'
     if ((Named 'Workers').GetCurrentPattern($toggle).Current.ToggleState -ne 'On') { throw 'Changing Codex workers changed Claude workers' }
@@ -194,7 +216,7 @@ function Test-ProviderTasks {
     Wait-For { (Named 'Task defaults') -or (Named 'Worker defaults') } 'task settings opened'
     Click 'Image generation'
     Wait-For { (Named 'Allowed models') -and !(Named 'Any available model') } 'all image providers disabled'
-    Click 'Providers'
+    Click 'Choose providers'
     Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Antigravity image permission'
     Click 'Image generation'
     Click 'Codex'
@@ -230,6 +252,206 @@ function Save-PrivateWindow($path) {
         if (![WorkshopPointer]::PrintWindow($appWindow,$dc,3)) { throw 'Could not render the private Workshop window' }
     } finally { $g.ReleaseHdc($dc); $g.Dispose() }
     try { $bmp.Save($path,[Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+}
+function Test-NavigationLayout {
+    $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+    function Snapshot($screen) {
+        Start-Sleep -Milliseconds 140
+        Save-PrivateWindow (Join-Path $root "$size-$screen.png")
+    }
+    function Check-Center($name,$screen) {
+        $bounds = (Named $name).Current.BoundingRectangle
+        $origin = [WorkshopPointer+Point]::new()
+        $origin.X = [int]$bounds.X
+        $origin.Y = [int]$bounds.Y
+        [void][WorkshopPointer]::ScreenToClient($appWindow,[ref]$origin)
+        $bmp = [Drawing.Bitmap]::new((Join-Path $root "$size-$screen.png"))
+        try {
+            $w = [int]$bounds.Width
+            $h = [int]$bounds.Height
+            $inset = [int](4*$scale)
+            $bg = $bmp.GetPixel($origin.X+$inset, $origin.Y+[int]($h/2))
+            $xMin=$w; $xMax=0; $yMin=$h; $yMax=0
+            for ($y=[int]($h*0.18); $y -lt $h*0.82; $y++) {
+                for ($x=$inset; $x -lt $w-$inset; $x++) {
+                    $c = $bmp.GetPixel($origin.X+$x,$origin.Y+$y)
+                    $difference = [Math]::Abs([int]$bg.R-$c.R)+[Math]::Abs([int]$bg.G-$c.G)+[Math]::Abs([int]$bg.B-$c.B)
+                    if ($difference -gt 160) {
+                        $xMin=[Math]::Min($xMin,$x); $xMax=[Math]::Max($xMax,$x)
+                        $yMin=[Math]::Min($yMin,$y); $yMax=[Math]::Max($yMax,$y)
+                    }
+                }
+            }
+            if ($xMax -le $xMin -or $yMax -le $yMin) {throw "No visible label for $name at $size"}
+            # Font side bearings and descenders can be a few pixels off the logical text box.
+            $dx=($xMax+$xMin+1-$w)/(2*$scale); $dy=($yMax+$yMin+1-$h)/(2*$scale)
+            if ([Math]::Abs($dx) -gt 3 -or [Math]::Abs($dy) -gt 3) {throw "$name at $size is off center by ($dx, $dy) logical pixels"}
+        } finally { $bmp.Dispose() }
+    }
+    function Section($menu,$name,$ready) {
+        if (Named $menu) { Click $menu }
+        Wait-For { Named $name } "$name navigation"
+        Click $name
+        Wait-For { Named $ready } "$name contents"
+    }
+    foreach ($size in @(1050,760)) {
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]($size*$scale),[int](616*$scale),0x16)
+        Wait-For { Named 'Message Codex' } 'chat composer'
+        Snapshot 'chat'
+        Check-Center 'Explore project' 'chat'
+        Click 'Add to message'
+        Wait-For { Named 'Draw a sketch' } 'composer actions'
+        Snapshot 'add'
+        Click 'Draw a sketch'
+        Wait-For { Named 'Sketch canvas' } 'inline sketch'
+        Snapshot 'sketch'
+        Click 'Done'
+        if (Named 'Remove sketch') { Click 'Remove sketch' }
+        Click 'Chat model and effort'
+        Wait-For { Named 'Chat reasoning effort' } 'effort selection'
+        Snapshot 'effort'
+        Click 'Chat model'
+        Wait-For { Named 'Select model' } 'model list'
+        Snapshot 'models-list'
+        Click 'Subagents'
+        Wait-For { Named 'Use global defaults' } 'worker policy'
+        Snapshot 'subagents'
+        Click 'Done'
+        Click 'Game studio'
+        Wait-For { Named 'Art brief' } 'image studio'
+        Snapshot 'studio-images'
+        Click 'Run settings'
+        Wait-For { Named 'Choose providers' } 'provider selection from image run settings'
+        Click 'Choose providers'
+        Wait-For { Named 'Codex' } 'global provider selection from Studio'
+        Click 'Close settings'
+        Wait-For { (Named 'Image generation settings') -and (Named 'Use task defaults') } 'return to the same run settings'
+        Click 'Back to studio'
+        Section 'Tools and history' 'Models' 'Model brief'
+        Snapshot 'studio-models'
+        Section 'Tools and history' 'Ghidra' 'Choose binary…'
+        Snapshot 'studio-reports'
+        Check-Center 'Choose binary…' 'studio-reports'
+        Click 'Run settings'
+        Wait-For { Named 'Functions per run' } 'run settings'
+        Snapshot 'run-settings'
+        Click 'Back to studio'
+        Click 'Settings'
+        Section 'Settings sections' 'Providers' 'Codex'
+        Click 'Codex'
+        Wait-For { Named 'Decompilation summaries' } 'provider roles'
+        Snapshot 'providers'
+        Check-Center 'Refresh' 'providers'
+        Click 'Codex'
+        Section 'Settings sections' 'Plugins' 'Install skill Image to Sculpt'
+        Snapshot 'plugins'
+        Click 'Browse plugins'
+        Wait-For { Named 'Calendar' } 'marketplace'
+        Snapshot 'marketplace'
+        Section 'Settings sections' 'Skills' 'Filter list'
+        Snapshot 'skills'
+        Section 'Settings sections' 'Tasks' 'Task defaults'
+        Click 'Workers'
+        Wait-For { Named 'Worker defaults' } 'worker settings'
+        Snapshot 'worker-settings'
+        Click 'Image generation'
+        Section 'Settings sections' 'Notifications' "Notify me when I’m needed"
+        Snapshot 'notifications'
+        Section 'Settings sections' 'Appearance' 'New theme'
+        Snapshot 'appearance'
+        Check-Center 'New theme' 'appearance'
+        Click 'New theme'
+        Wait-For { Named 'Theme CSS editor' } 'theme editing'
+        Snapshot 'theme-editor'
+        Click 'Cancel'
+        Section 'Settings sections' 'Providers' 'Codex'
+        Click 'Close settings'
+        Wait-For { Named 'Choose binary…' } 'return to the previous Studio workspace'
+        Section 'Tools and history' 'Images' 'Art brief'
+        Click 'Screenshots'
+        Wait-For { Named 'No screenshots yet' } 'empty capture album'
+        Snapshot 'album'
+        Click 'Settings'
+        Click 'Close settings'
+        Wait-For { Named 'Screenshot album' } 'return to the album'
+        Click 'Chats'
+    }
+    Write-Output "Navigation and responsive layouts passed. Screenshots in $root"
+}
+
+function Test-ChatGoals {
+    function Draft($value) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($value) }
+    function Objective($value) { (Named 'Goal objective').GetCurrentPattern($valuePattern).SetValue($value) }
+    Draft '/goal'
+    Click 'Send message'
+    Wait-For { Named 'Goal objective' } 'bare goal command opens editor'
+    if ((Named 'Start goal').Current.IsEnabled) { throw 'An empty goal can start' }
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+    Wait-For { !(Named 'Goal objective') } 'Escape leaves the goal editor'
+    Draft '/goal Check the typed objective'
+    Click 'Add to message'
+    Click 'Set a goal'
+    Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq 'Check the typed objective' } 'the menu and slash command share one objective'
+    Click 'Close goal editor'
+    Draft 'Keep this draft'
+    Click 'Add to message'
+    Click 'Set a goal'
+    Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq 'Keep this draft' } 'start a goal from a draft'
+    Objective 'Cancel this edit'
+    Click 'Close goal editor'
+    Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq 'Keep this draft' } 'cancel preserves the draft'
+    $goal = 'Check the two fixture files'
+    [void](New-Item -ItemType File (Join-Path $root 'goal-mode'))
+    Draft "/goal $goal"
+    Click 'Send message'
+    Wait-For { Named 'Goal complete' } 'a progress turn continues and completes the goal'
+    Click 'Goal complete'
+    Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq $goal } 'saved objective'
+    if ((Named 'Goal update').GetCurrentPattern($valuePattern).Current.Value -notlike '*Verified both fixture files*') {throw 'Missing goal evidence'}
+    Save-PrivateWindow (Join-Path $root 'goal-complete.png')
+    Click 'Close goal editor'
+    Draft 'Unsent and unrelated'
+    Click 'Goal complete'
+    Objective 'Check the updated fixtures'
+    [void](New-Item -ItemType File (Join-Path $root 'goal.hold'))
+    Click 'Update goal'
+    Wait-For { (Named 'Stop response') -and (Named 'Active goal') } 'edited goal running'
+    Click 'Active goal'
+    Click 'Pause goal'
+    Wait-For { (Named 'Resume goal') -and !(Named 'Stop response') } 'paused goal can resume'
+    Remove-Item -LiteralPath (Join-Path $root 'goal.hold')
+    Save-PrivateWindow (Join-Path $root 'goal-paused.png')
+    Click 'Resume goal'
+    Wait-For { Named 'Goal complete' } 'resumed goal completes'
+    Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq 'Unsent and unrelated' } 'goal management preserved unrelated draft'
+    Click 'New chat'
+    Wait-For { !(Named 'Goal complete') -and (Named 'Explore project') } 'fresh chat has no inherited goal'
+    Click $goal
+    Wait-For { Named 'Goal complete' } 'original chat keeps its goal'
+    Click 'Goal complete'
+    Click 'Remove goal'
+    Click 'Confirm removal'
+    Wait-For { !(Named 'Goal complete') -and !(Named 'Goal objective') -and (Named 'Message Codex') } 'remove only the goal'
+    Click 'New chat'
+    Click 'Settings'
+    Click 'Notifications'
+    $alerts = "Notify me when I’m needed"
+    Click $alerts
+    Wait-For { (Named $alerts).GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq 'On' } 'goal alerts enabled'
+    Click 'Close settings'
+    $hold = Join-Path $root 'notice.hold'
+    Set-Content $hold 'hold'
+    Draft '/goal Finish the background check'
+    Click 'Send message'
+    Wait-For { Named 'Stop response' } 'background goal started'
+    Click 'Settings'
+    Remove-Item -LiteralPath $hold
+    Wait-For { Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json' | ForEach-Object {
+        $notice = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+        if ($notice.title -eq 'Goal complete' -and $notice.detail -eq 'Finish the background check') { $true }
+    } } 'background goal completion notification'
+    Write-Output "Chat goal command, continuation, editing, pause, resume and navigation passed. Screenshots in $root"
 }
 function Test-Recommendations {
     Wait-For { (Named 'Install skill Image to Sculpt') -and (Named 'Caveman') -and (Named 'Frontend Design') } 'Codex recommendations'
@@ -567,6 +789,11 @@ function Test-Sketch {
     Save-PrivateWindow $clean
     Click 'Show markup'
     Wait-For { (Named 'Show markup').GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq 'On' } 'visible markup'
+    Click 'Settings'
+    Wait-For { Named 'Close settings' } 'settings from image comparison'
+    Click 'Close settings'
+    Wait-For { (Named $divider).GetCurrentPattern($range).Current.Value -eq 100 -and
+        (Named 'Show markup').GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq 'On' } 'return to the same comparison and reveal position'
     $ink = Join-Path $root 'comparison-marked.png'
     Save-PrivateWindow $ink
     $cleanPixels = [Drawing.Bitmap]::new($clean)
@@ -665,6 +892,8 @@ try {
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($NavigationOnly) { Test-NavigationLayout; return }
+    if ($GoalOnly) { Test-ChatGoals; return }
     if ($ProviderTasksOnly) {
         Test-ProviderTasks
         Write-Output "Provider task settings passed. Screenshot in $root"

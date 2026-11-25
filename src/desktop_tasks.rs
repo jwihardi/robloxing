@@ -107,6 +107,16 @@ fn provider_id(label: &str) -> Result<&'static str> {
     }
 }
 
+pub(super) fn task_count(permissions: &ProviderPermissions, label: &str) -> Option<String> {
+    let provider = provider_id(label).ok()?;
+    let roles = TaskRole::ALL.into_iter().filter(|r| r.supports(provider));
+    let total = roles.clone().count();
+    let enabled = roles
+        .filter(|role| permissions.allows(provider, *role))
+        .count();
+    Some(format!("{enabled} of {total} tasks"))
+}
+
 pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
     let a = app.clone();
     ui.on_show_provider_roles(move |label| {
@@ -124,6 +134,7 @@ pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
                 })
                 .collect::<Vec<_>>();
             a.permissions.replace(permissions);
+            a.filter_preferences(&ui.get_settings_query());
             ui.set_permission_error("".into());
             ui.set_provider_roles(ModelRc::new(VecModel::from(roles)));
             Ok(())
@@ -153,6 +164,9 @@ pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
             Ok(())
         })();
         rows.set_row_data(index as usize, row);
+        if result.is_ok() {
+            a.filter_preferences(&ui.get_settings_query());
+        }
         ui.set_permission_error(
             result
                 .err()

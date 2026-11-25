@@ -1,0 +1,74 @@
+import { TextEdit, ScrollView } from "std-widgets.slint";
+import { Action, Theme } from "common.slint";
+
+export component GoalSummary inherits Action {
+    in property <string> objective;
+    in property <string> status;
+    out property <string> state-name: status == "complete" ? "Goal complete" : status == "paused" ? "Goal paused" : "Active goal";
+    icon-only: true; label: state-name; accessible-description: objective;
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 12px; spacing: 9px;
+        Text { text: root.status == "complete" ? "\u{e73e}" : "\u{e7c1}"; font-family:"Segoe MDL2 Assets";
+            color: root.status == "paused" ? Theme.halfway : Theme.accent; vertical-alignment:center; accessible-role:none; }
+        Text { text:root.state-name; color:Theme.text; font-size:13px; font-weight:600; vertical-alignment:center; accessible-role:none; }
+        Text { text:root.objective; color:Theme.muted; font-size:13px; vertical-alignment:center;
+            horizontal-stretch:1; min-width:0px; overflow:elide; accessible-role:none; }
+        Text { text:root.accessible-expanded ? "\u{e70d}" : "\u{e76c}"; font-family:"Segoe MDL2 Assets"; color:Theme.muted; font-size:11px; vertical-alignment:center; accessible-role:none; }
+    }
+}
+
+export component GoalEditor inherits FocusScope {
+    in property <string> objective;
+    in property <string> status;
+    in property <string> detail;
+    in-out property <string> value;
+    in property <bool> writable;
+    in property <bool> busy;
+    in property <bool> can-retry;
+    in property <bool> valid;
+    private property <bool> confirming;
+    callback close();
+    callback start(string);
+    callback pause();
+    callback clear();
+    callback retry();
+    public function begin() {
+        root.confirming = false;
+        if root.writable && !root.busy { field.focus(); } else { back.focus(); }
+    }
+    capture-key-pressed(e) => {
+        if e.text == Key.Escape { root.close(); return accept; }
+        if e.text == Key.Return && e.modifiers.control && root.valid && root.writable && !root.busy {root.start(root.value); return accept;}
+        return reject;
+    }
+    Rectangle { background: Theme.surface; border-color: Theme.line; border-width: 1px; border-radius: 20px; }
+    VerticalLayout {
+        padding: 16px; spacing: 8px;
+        HorizontalLayout { height: 30px; spacing: 8px;
+            Text { text: "\u{e7c1}"; font-family:"Segoe MDL2 Assets"; color:Theme.accent; vertical-alignment:center; accessible-role:none; }
+            Text { text: root.status == "paused" ? "Paused goal" : root.status == "complete" ? "Completed goal" : "Chat goal"; color:Theme.text;
+                horizontal-stretch:1; vertical-alignment:center; font-size:17px; font-weight:600; }
+            back := Action { label:"Close goal editor"; icon-only:true; glyph:"\u{e711}"; height:30px; width:30px; activate=>{root.close();} }
+        }
+        field := TextEdit { text <=> root.value; read-only:root.busy || !root.writable; vertical-stretch:1;
+            accessible-label:"Goal objective"; placeholder-text:"What outcome should the agent work toward?"; font-size:15px; }
+        if root.detail != "": notes := ScrollView {
+            height: min(52px, note-text.preferred-height + 2px); content-width:self.visible-width; content-height:note-text.preferred-height;
+            note-text := TextInput { width:notes.visible-width - 6px; height:self.preferred-height; read-only:true; single-line:false;
+                text:root.detail; font-size:13px; color:Theme.muted; wrap:word-wrap; accessible-label:"Goal update"; }
+        }
+        HorizontalLayout { height:36px; spacing:8px;
+            if root.status != "" && !root.busy: Action { label:root.confirming ? "Confirm removal" : "Remove goal"; width:root.confirming ? 134px : 110px;
+                activate=>{ if root.confirming {root.clear();} else {root.confirming=true;} } }
+            if root.objective == "": Text { text:"The agent keeps working until it finishes or needs you."; color:Theme.muted; font-size:13px;
+                wrap:word-wrap; vertical-alignment:center; min-width:0px; horizontal-stretch:1; }
+            if root.objective != "": Rectangle { horizontal-stretch:1; }
+            if root.busy && root.status == "active": Action { label:"Pause goal"; width:112px; outlined:true; activate=>{root.pause();} }
+            if !root.busy && !root.writable && root.can-retry: Action { label:"Retry in new chat"; width:150px; primary:true; activate=>{root.retry();} }
+            if !root.busy && root.writable: Action {
+                label: root.status != "" && root.value != root.objective ? "Update goal" : root.status == "paused" ? "Resume goal" : root.status == "complete" ? "Run goal again" : "Start goal";
+                width:120px; primary:true; enabled:root.valid; activate=>{root.start(root.value);}
+            }
+        }
+    }
+}

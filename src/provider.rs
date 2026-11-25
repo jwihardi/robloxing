@@ -430,7 +430,7 @@ pub enum ReplyUpdate<'a> {
     Activity(&'a str),
 }
 
-fn team_preference(store: &Store) -> Result<Option<String>> {
+fn team_preference(store: &Store, id: i64) -> Result<Option<String>> {
     use crate::provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole};
     if store.worker {
         return Ok(None);
@@ -440,18 +440,24 @@ fn team_preference(store: &Store) -> Result<Option<String>> {
         .into_iter()
         .filter(|p| permissions.allows(p, TaskRole::Workers))
         .collect();
-    if enabled.is_empty() {
-        return Ok(Some("[Workshop provider settings] The creator has disabled all worker providers. Work directly. If the creator asks for delegation, explain that a worker provider must first be enabled in Settings → Providers.".into()));
-    }
-    let mut message = if store.team_settings()?.auto_delegate {
+    let mut message = if enabled.is_empty() {
+        "[Workshop provider settings] The creator has disabled all worker providers. Work directly. If the creator asks for delegation, explain that a worker provider must first be enabled in Settings → Providers."
+    } else if store.team_settings()?.auto_delegate {
         "[Workshop project setting: automatic delegation] Use subagents for independent project deliverables in this request. Assign the separate owners with workshop_delegate before implementing their parts yourself. Manage dependencies, fixes and final verification. Answer conversation and small indivisible tasks directly. The creator’s explicit directions about workers take precedence."
     } else {
         "[Workshop project setting: delegation by request] Work directly unless the creator explicitly asks for subagents in this request."
     }.to_owned();
-    if enabled.len() < PROVIDERS.len() {
+    if !enabled.is_empty() && enabled.len() < PROVIDERS.len() {
         message.push_str(&format!(
             " Enabled worker providers: {}. Omit the model to use an allowed default.",
             enabled.join(", ")
+        ));
+    }
+    if let Some(goal) = store.chat_goal(id)?.filter(|g| g.status == "active") {
+        message.push_str(&format!(
+            "\n[Workshop chat goal]\n{}\nKeep working toward this objective across turns. {}",
+            goal.objective,
+            crate::goals::reporting(false)
         ));
     }
     Ok(Some(message))
@@ -484,8 +490,43 @@ enum Finish {
 struct Repairs {
     count: u8,
     previous: Option<(String, String)>,
+    goal: Option<crate::goals::GoalRun>,
 }
 impl Repairs {
+    fn start(store: &Store, a: &Attempt) -> Result<Self> {
+        Ok(Self {
+            goal: crate::goals::GoalRun::start(store, a.id)?,
+            ..Default::default()
+        })
+    }
+
+    fn advance_goal(
+        &mut self,
+        store: &Store,
+        id: i64,
+        notify: &dyn Fn(ReplyUpdate<'_>),
+    ) -> Result<Finish> {
+        let Some(goal) = &mut self.goal else {
+            return Ok(Finish::Done);
+        };
+        let next = goal.advance(store, id)?;
+        notify(ReplyUpdate::TranscriptChanged);
+        Ok(match next {
+            crate::goals::Next::Stop => Finish::Done,
+            crate::goals::Next::Continue(direction) => {
+                notify(ReplyUpdate::Activity("Continuing the goal…"));
+                Finish::Continue(direction.as_str().into())
+            }
+        })
+    }
+
+    fn reset_goal_reports(&mut self, store: &Store, id: i64) -> Result<()> {
+        if let Some(goal) = &mut self.goal {
+            goal.reset_reports(store, id)?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn verify(
         &mut self,
@@ -501,7 +542,7 @@ impl Repairs {
         if store.worker {
             return unavailable.map_or(Ok(Finish::Done), Err);
         }
-        if !used_tools && !has_workers && unavailable.is_none() {
+        if !used_tools && !has_workers && self.goal.is_none() && unavailable.is_none() {
             return Ok(Finish::Done);
         }
         let verified = if let Some(error) = unavailable {
@@ -516,6 +557,7 @@ impl Repairs {
                         None | Some(Control::Cancel) => return Ok(Finish::Cancelled),
                         Some(Control::Steer(message)) => {
                             store.message_event(a.id, "steer/sent", &message)?;
+                            self.reset_goal_reports(store, a.id)?;
                             notify(ReplyUpdate::TranscriptChanged);
                             return Ok(Finish::Continue(message));
                         }
@@ -534,8 +576,9 @@ impl Repairs {
             if store.has_open_blocker(a.id)? {
                 store.event(a.id, "workshop/blocker_resolved", None)?;
             }
-            return Ok(Finish::Done);
+            return self.advance_goal(store, a.id, notify);
         };
+        self.reset_goal_reports(store, a.id)?;
         if stopped {
             return Err(error.context("A worker was stopped by the user."));
         }
@@ -597,13 +640,13 @@ async fn exchange(
         )
         .await?;
     }
-    let team_preference = team_preference(store)?;
+    let team_preference = team_preference(store, a.id)?;
     let mut turn = String::new();
     let mut next_id = 10;
     let mut directions = std::collections::VecDeque::<Message>::new();
     let mut cancelling = false;
     let mut stopped_keys = std::collections::HashSet::new();
-    let mut repairs = Repairs::default();
+    let mut repairs = Repairs::start(store, a)?;
     let mut external_blocker = None;
     let mut runner_failure = None;
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
@@ -623,6 +666,7 @@ async fn exchange(
                         send(stdin,json!({"id":next_id,"method":"turn/steer","params":{"threadId":session,"expectedTurnId":turn,"input":input}})).await?;
                         next_id += 1;
                         store.message_event(a.id, "steer/sent", &message)?;
+                        repairs.reset_goal_reports(store, a.id)?;
                     }
                     Err(error) => store.event(
                         a.id,
@@ -763,6 +807,12 @@ async fn exchange(
                     }
                     if !v["id"].is_null() {
                         send(stdin,json!({"id":v["id"],"error":{"code":-32601,"message":"Unsupported client request"}})).await?;
+                        continue;
+                    }
+                    if method.starts_with("item/")
+                        && (v["params"]["threadId"] != session.as_str()
+                            || v["params"]["turnId"] != turn)
+                    {
                         continue;
                     }
                     // Release the process tree before capturing edits if a tool could have left work running.
@@ -1207,7 +1257,11 @@ fn run_one_turn(
             ("failed", failure.as_str())
         }
     };
+    if state != "review" && !store.worker {
+        store.pause_goal(a.id, action)?;
+    }
     if let Err(e) = store.finish(a.id, state, action) {
+        store.pause_goal(a.id, "Workshop could not save the review.")?;
         store.status(
             a.id,
             "failed",

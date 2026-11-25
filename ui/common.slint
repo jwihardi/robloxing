@@ -73,6 +73,8 @@ export component Action inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> selected: false;
     in property <bool> outlined: false;
+    in property <bool> leading: false;
+    in property <length> end-inset: 10px;
     in property <color> glyph-color: root.selected ? Theme.accent : Theme.muted;
     in property <string> label-font: "Segoe UI";
     in property <bool> enabled: true;
@@ -89,11 +91,13 @@ export component Action inherits Rectangle {
     accessible-action-default => { if root.enabled { root.activate(); } }
     forward-focus: focus;
     HorizontalLayout {
-        padding-left: root.icon-only ? 0px : 10px; padding-right: root.icon-only ? 0px : 10px;
-        spacing: 10px; alignment: root.icon-only ? center : start;
+        padding-left: root.icon-only ? 0px : 10px; padding-right: root.icon-only ? 0px : root.end-inset;
+        spacing: 8px; alignment: root.leading && !root.icon-only ? start : center;
         if root.glyph != "": Text { text: root.glyph; vertical-alignment: center; font-size: 15px;
-            font-family: "Segoe MDL2 Assets"; color: root.primary && root.enabled ? Theme.canvas : root.glyph-color; accessible-role: none; }
+            horizontal-alignment: center; font-family: "Segoe MDL2 Assets";
+            color: !root.enabled ? Theme.muted : root.primary ? Theme.canvas : root.glyph-color; accessible-role: none; }
         if !root.icon-only && root.detail == "": Text { text: root.label; vertical-alignment: center; font-size: 14px; font-family: root.label-font;
+            horizontal-alignment: root.leading ? left : center; min-width: 0px;
             color: root.primary && root.enabled ? Theme.canvas : root.enabled ? Theme.text : Theme.muted; overflow: elide; accessible-role: none; }
         if root.detail != "": VerticalLayout { alignment: center; spacing: 2px;
             Text { text: root.label; color: Theme.text; font-size: 14px; overflow: elide; min-width: 0px; accessible-role: none; }
@@ -104,4 +108,8 @@ export component Action inherits Rectangle {
     focus := FocusScope { focus-on-click: false; width: 0px; enabled: root.enabled;
         key-pressed(e) => { if e.text == Key.Return || e.text == Key.Space { root.activate(); return accept; } return reject; }
     }
+}
+
+export component RowAction inherits Action {
+    leading: true;
 }

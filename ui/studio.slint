@@ -175,7 +175,7 @@ export component StudioPage inherits Rectangle {
         x: (root.width - self.width) / 2; y: 22px; width: min(950px,root.width - 48px); height: root.height - 40px; spacing: 10px;
         HorizontalLayout { height: 42px; spacing: 8px;
             Text { text: root.images ? "Image studio" : root.models ? "3D model studio" : "Decompilation"; color: Theme.text; font-size: 28px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-            if root.navigation-hidden: Action { label: "Tools and history"; width: 146px; glyph: "\u{e700}"; activate => { root.browse(); } }
+            if root.navigation-hidden: Action { label: "Tools and history"; width: 162px; glyph: "\u{e700}"; activate => { root.browse(); } }
         }
         Text { text: root.images ? "Generate artwork or build a seamless texture tile." : root.models ? "Design a prop, use a starter mesh, or export a Blender scene." : "Recover functions from a local game binary with Ghidra.";
             color: Theme.muted; font-size: 14px; wrap:word-wrap; }

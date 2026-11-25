@@ -288,6 +288,10 @@ fn run(store: &Store, a: Attempt, prompt: provider::Message) -> Result<()> {
             if line.trim().is_empty() {
                 continue;
             }
+            if crate::goals::command(line.strip_prefix("/queue ").unwrap_or(&line)).is_some() {
+                eprintln!("Use /cancel, then resume this chat with an updated /goal objective.");
+                continue;
+            }
             let c = if line.trim() == "/cancel" {
                 Control::Cancel
             } else if let Some(text) = line.strip_prefix("/queue ") {
@@ -437,7 +441,8 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                         None,
                         &[],
                     )?;
-                    return run(&store, a, prompt.as_str().into());
+                    let message = a.prompt.as_str().into();
+                    return run(&store, a, message);
                 }
                 _ => model,
             };
@@ -451,18 +456,31 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             } else {
                 store.prepare(&prompt, &model, None)?
             };
-            run(&store, a, prompt.as_str().into())?
+            let message = a.prompt.as_str().into();
+            run(&store, a, message)?
         }
         Action::Retry { id } => {
             let a = store.attempt(id)?;
-            run(
-                &store,
-                store.prepare(&a.prompt, &a.model, Some(id))?,
-                a.prompt.as_str().into(),
-            )?;
+            let retry = store.prepare(&a.prompt, &a.model, Some(id))?;
+            let direction = store.retry_prompt(&retry)?;
+            run(&store, retry, direction.as_str().into())?;
         }
         Action::Resume { id, direction } => {
-            run(&store, store.resume(id)?, direction.as_str().into())?
+            let goal = crate::goals::command(&direction);
+            if goal == Some("") {
+                store.attempt(id)?;
+                if let Some(goal) = store.chat_goal(id)? {
+                    println!("{} · {}\n{}", goal.status, goal.objective, goal.detail);
+                } else {
+                    println!("No goal set for this chat.");
+                }
+            } else {
+                run(
+                    &store,
+                    store.resume_with_goal(id, goal)?,
+                    goal.unwrap_or(&direction).into(),
+                )?;
+            }
         }
         Action::SendNext { id } => {
             let (attempt, message) = store

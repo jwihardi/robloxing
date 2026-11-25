@@ -1,6 +1,7 @@
 mod check;
 pub mod cli;
 mod git;
+pub mod goals;
 mod image_comparison;
 mod message_queue;
 pub use image_comparison::ImageComparison;
@@ -253,6 +254,10 @@ impl Store {
             controls: Default::default(),
         };
         store.recover_workers()?;
+        store.db.lock().unwrap().execute(
+            "UPDATE chat_goals SET status='paused',detail='Workshop closed before this goal finished.' WHERE status IN ('active','verifying')",
+            [],
+        )?;
         let interrupted = {
             let db = store.db.lock().unwrap();
             let mut query=db.prepare("SELECT id FROM attempts WHERE state IN ('preparing','running','applying') ORDER BY id")?;
@@ -474,7 +479,16 @@ impl Store {
         policy: Option<&worker_policy::WorkerPolicy>,
         files: &[PathBuf],
     ) -> Result<Attempt> {
-        ensure!(!prompt.trim().is_empty(), "Describe the task first.");
+        let goal = if !self.worker && retry.is_none() {
+            goals::command(prompt)
+        } else {
+            None
+        };
+        let prompt = goal.unwrap_or(prompt);
+        ensure!(
+            !prompt.trim().is_empty(),
+            "Describe the task or enter an objective after /goal."
+        );
         let head = git::git(&self.project, &["rev-parse", "HEAD"])?;
         let id = {
             let mut db = self.db.lock().unwrap();
@@ -500,6 +514,11 @@ impl Store {
             };
             tx.execute("INSERT INTO attempts(task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,'preparing','Creating isolated copy')",params![task,head,model,effort,provider::provider_for(model)])?;
             let id = tx.last_insert_rowid();
+            if let Some(objective) = goal {
+                goals::set(&tx, id, objective)?;
+            } else if let Some(previous) = retry {
+                tx.execute("INSERT INTO chat_goals(attempt,objective,status) SELECT ?1,objective,'active' FROM chat_goals WHERE attempt=?2",params![id,previous])?;
+            }
             if let Some(policy) = policy {
                 policy.validate()?;
                 tx.execute(
@@ -517,6 +536,7 @@ impl Store {
                 self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action=CASE provider WHEN 'claude' THEN 'Connecting to Claude' WHEN 'antigravity' THEN 'Connecting to Antigravity' WHEN 'gemini' THEN 'Connecting to Gemini' ELSE 'Connecting to Codex' END WHERE id=?1",params![id,base])?;
             }
             Err(e) => {
+                self.pause_goal(id, "The working copy could not be prepared.")?;
                 self.status(id, "failed", &format!("{e:#}"))?;
                 return Err(e);
             }
@@ -525,6 +545,10 @@ impl Store {
     }
 
     pub fn resume(&self, id: i64) -> Result<Attempt> {
+        self.resume_with_goal(id, None)
+    }
+
+    pub fn resume_with_goal(&self, id: i64, objective: Option<&str>) -> Result<Attempt> {
         let a = self.attempt(id)?;
         ensure!(
             !a.session.is_empty()
@@ -534,8 +558,16 @@ impl Store {
                 ),
             "This attempt has no resumable session."
         );
-        let changes=self.db.lock().unwrap().execute("UPDATE attempts SET state='running',action='Resuming session' WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM attempts WHERE state IN ('running','preparing','applying'))",[id])?;
-        ensure!(changes == 1, "Finish the active operation first.");
+        {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            let changes=tx.execute("UPDATE attempts SET state='running',action='Resuming session' WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM attempts WHERE state IN ('running','preparing','applying'))",[id])?;
+            ensure!(changes == 1, "Finish the active operation first.");
+            if let Some(objective) = objective {
+                goals::set(&tx, id, objective)?;
+            }
+            tx.commit()?;
+        }
         self.attempt(id)
     }
     pub fn status(&self, id: i64, state: &str, action: &str) -> Result<()> {
@@ -638,18 +670,25 @@ impl Store {
             tmp.persist(self.folder(id).join(&name))?;
             self.artifact(id, "patch", &name)?;
         }
-        let db = self.db.lock().unwrap();
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
         let mut summary = action.to_string();
         if state == "review" {
             use rusqlite::OptionalExtension;
-            if let Some(last)=db.query_row("SELECT summary FROM events WHERE attempt=?1 AND kind='agent/message' ORDER BY id DESC LIMIT 1",[id],|r|r.get::<_,String>(0)).optional()? {
+            if let Some(last)=tx.query_row("SELECT summary FROM events WHERE attempt=?1 AND kind='agent/message' ORDER BY id DESC LIMIT 1",[id],|r|r.get::<_,String>(0)).optional()? {
                 summary=last;
             } else if bytes.is_empty() { summary="Finished without changing the working copy.".into(); }
         }
-        db.execute(
+        tx.execute(
             "UPDATE attempts SET state=?2,action=?3,candidate=?4,patch=?5 WHERE id=?1",
             params![id, state, summary, candidate, patch],
         )?;
+        tx.execute(
+            "UPDATE chat_goals SET status=CASE WHEN ?2='review' THEN 'complete' ELSE 'paused' END
+             WHERE attempt=?1 AND status='verifying'",
+            params![id, state],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     fn patch_path(&self, a: &Attempt) -> PathBuf {

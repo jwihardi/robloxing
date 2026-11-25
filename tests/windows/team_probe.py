@@ -74,6 +74,42 @@ def finish(proc, ok):
     assert (proc.returncode == 0) == ok, error.decode(errors="replace")
 
 
+def chat_goals(case):
+    case.env["WORKSHOP_GEMINI"] = case.env["WORKSHOP_ANTIGRAVITY"] = case.env["WORKSHOP_CODEX"]
+    marker = case.root / "goal-mode"
+    marker.touch()
+    objective = "Write and check both fixture files"
+    for index, provider in enumerate(("codex", "claude", "gemini", "antigravity"), start=1):
+        case.call("run", "--provider", provider, "/goal " + objective)
+        with sqlite3.connect(case.db) as db:
+            row = db.execute("SELECT t.prompt,g.objective,g.status,g.detail FROM attempts a "
+                             "JOIN tasks t ON t.id=a.task JOIN chat_goals g ON g.attempt=a.id WHERE a.id=?",
+                             (index,)).fetchone()
+            assert row == (objective, objective, "complete", "Verified both fixture files."), (provider, row)
+            assert db.execute("SELECT count(*) FROM events WHERE attempt=? AND kind='agent/message'",
+                              (index,)).fetchone()[0] == 2
+        assert "Verified both fixture files." in case.call("resume", str(index), "/goal")
+        work = case.db.parent / ("attempt-" + str(index)) / "work"
+        assert (work / "first.txt").read_text() == "one" and (work / "second.txt").read_text() == "two"
+
+    case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "check"]))
+    (case.root / "fail-check").touch()
+    case.call("run", "/goal Meet the project check", ok=False)
+    assert "paused" in case.call("resume", "5", "/goal")
+    (case.root / "fail-check").unlink()
+    case.call("resume", "5", "/goal Recheck the project")
+    assert "complete" in case.call("resume", "5", "/goal")
+    marker.unlink()
+    (case.root / "small-talk").touch()
+    case.call("run", "/goal Needs a report")
+    assert "paused" in case.call("resume", "6", "/goal")
+    case.call("run", "An ordinary conversation")
+    assert "No goal set" in case.call("resume", "7", "/goal")
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT count(*) FROM events WHERE attempt=6 AND kind='agent/message'").fetchone() == (2,)
+        assert db.execute("SELECT count(*) FROM events WHERE attempt=7 AND kind='agent/message'").fetchone() == (1,)
+
+
 def conflict(case):
     case.call("team", "--parallelism", "1")
     case.hold("left")
@@ -474,7 +510,7 @@ def main():
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
         for test in (autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
-                     small_talk, manual_recheck, external_blocker, mixed_plan, conflict,
+                     small_talk, chat_goals, manual_recheck, external_blocker, mixed_plan, conflict,
                      stop_one, stop_preparing_worker, steer_preparing_worker, cancel_check, steer_during_check, overlap,
                      repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,
                      mixed_provider_conflict, claude_without_codex):

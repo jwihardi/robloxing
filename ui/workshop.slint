@@ -1,4 +1,5 @@
-import { Theme, ThemeColors, Action, ActivityLine } from "common.slint";
+import { GoalEditor, GoalSummary } from "goal.slint";
+import { Theme, ThemeColors, Action, RowAction, ActivityLine } from "common.slint";
 import { ReplyView } from "transcript.slint";
 export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
 export { ThemeColors } from "common.slint";
@@ -17,7 +18,7 @@ export struct WorkerRow { id: int, title: string, state: string, assignment: str
 export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
-export struct SettingRow { id: string, label: string, detail: string, action: string, button: string }
+export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
 export enum PluginSection { recommended, installed, marketplace }
 export struct PickerOption { value: string, label: string }
 export struct MeterData { label: string, remaining: float, detail: string }
@@ -84,7 +85,7 @@ component WorkerGroup inherits VerticalLayout {
     callback stop-worker(int);
     callback direct-worker(int,string);
     alignment: start; spacing: 0px;
-    Action {
+    RowAction {
         label: root.label;
         glyph: root.open ? "\u{e70d}" : "\u{e76c}"; glyph-color: Theme.keyword; label-font: Theme.mono;
         outlined: true;
@@ -101,7 +102,7 @@ component WorkerGroup inherits VerticalLayout {
             }
             VerticalLayout { spacing: 0px;
                 HorizontalLayout { spacing: 7px;
-                    Action { label: agent.title; horizontal-stretch: 1; selected: root.expanded-worker == agent.id;
+                    RowAction { label: agent.title; horizontal-stretch: 1; selected: root.expanded-worker == agent.id;
                         accessible-expanded: root.expanded-worker == agent.id; activate => {root.choose-worker(agent.id);}
                     }
                     Text { text: agent.state; color: Theme.state-color(agent.state); vertical-alignment: center; font-family: Theme.mono; font-size: 13px; }
@@ -225,11 +226,11 @@ component AgentPolicyFields inherits VerticalLayout {
     if !root.inherited-policy && root.has-provider: models := ScrollView {
         height: min(model-list.preferred-height, root.list-height); content-width: self.visible-width; content-height: model-list.preferred-height;
         model-list := VerticalLayout { width: models.visible-width - 5px; spacing: 0px; alignment: start;
-            Action { label: "Any available model"; height: 30px;
+            RowAction { end-inset:32px; label: "Any available model"; height: 30px;
                 if root.all-models: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
                 accessible-checkable: true; accessible-checked: root.all-models;
                 activate => {root.change-policy("model","");} }
-            for model in root.policy-models: Action { label: model.label; height: 30px;
+            for model in root.policy-models: RowAction { end-inset:32px; label: model.label; height: 30px;
                 if model.selected: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
                 accessible-checkable: true; accessible-checked: model.selected;
                 activate => {root.change-policy("model",model.value);} }
@@ -253,6 +254,7 @@ component TaskEditor inherits VerticalLayout {
     in property <string> catalog-status;
     callback reload();
     callback back();
+    callback choose-providers();
     in property <bool> has-project;
     in property <bool> auto-delegate;
     in property <bool> parallel-workers;
@@ -268,7 +270,11 @@ component TaskEditor inherits VerticalLayout {
             selected:TaskControls.area==tab; activate=>{TaskControls.open(false,tab);}
         }
     }
-    Text { text:TaskControls.for-run ? root.title + " settings" : root.workers ? "Worker defaults" : "Task defaults"; font-size:21px; font-weight:600; color:Theme.text; }
+    HorizontalLayout { height:34px; spacing:8px;
+        Text { text:TaskControls.for-run ? root.title + " settings" : root.workers ? "Worker defaults" : "Task defaults";
+            vertical-alignment:center; horizontal-stretch:1; font-size:21px; font-weight:600; color:Theme.text; }
+        if !root.local || TaskControls.summary: Action { label:"Choose providers"; width:144px; glyph:"\u{e77b}"; activate=>{root.choose-providers();} }
+    }
     Text { text:TaskControls.for-run ? "Changes apply to the next run." : root.workers ? "Used across projects unless a chat has its own worker settings." : "Used across projects when you start a new run.";
         font-size:14px; color:Theme.muted; wrap:word-wrap; }
     if TaskControls.for-run: CheckBox { text:"Use task defaults"; checked:TaskControls.inherited; toggled=>{TaskControls.change(self.checked ? "inherit" : "customize","");} }
@@ -432,6 +438,26 @@ component Composer inherits Rectangle {
 }
 
 export component Desk inherits Window {
+    in property <string> goal-objective;
+    in property <string> goal-status;
+    in property <string> goal-detail;
+    in-out property <bool> editing-goal;
+    out property <bool> goal-uses-draft;
+    private property <string> goal-input;
+    pure callback initial-goal-text(string,string) -> string;
+    callback run-goal(string);
+    public function open-goal(use-draft: bool) {
+        root.goal-uses-draft = use-draft;
+        root.goal-input = use-draft ? root.initial-goal-text(root.draft,root.goal-objective) : root.goal-objective;
+        root.open-panel = OpenPanel.closed;
+        root.editing-goal = true;
+        goal-editor.begin();
+    }
+    public function close-goal() {
+        root.editing-goal = false;
+        if !root.goal-uses-draft && root.goal-objective != "" {goal-summary.focus();}
+        else {composer.focus-input();}
+    }
     in property <[PickerOption]> queued;
     callback remove-queued(string);
     in-out property <int> direction-worker: -1;
@@ -447,7 +473,6 @@ export component Desk inherits Window {
     in property <bool> capturing;
     private property <bool> album-open;
     in-out property <bool> studio-open;
-    changed studio-open => { if !studio-open { Studio.editing-run=false; } if !studio-open && Studio.inspecting { Studio.command("close-inspector"); } }
     private property <string> viewing-shot;
     private property <bool> return-to-outputs;
     callback refresh-album();
@@ -508,6 +533,10 @@ export component Desk inherits Window {
         root.load-settings(false);
         if tab=="Tasks" { TaskControls.open(false,TaskControls.area); }
     }
+    function choose-providers() {
+        if root.settings-open {root.visit-settings("Providers",root.settings-provider);}
+        else {root.settings-tab="Providers"; root.visit("settings");}
+    }
     title: project == "" ? "Workshop" : project + " · Workshop";
     preferred-width: 1080px; preferred-height: 740px; min-width: 740px; min-height: 530px;
     background: Theme.canvas; default-font-family: "Segoe UI";
@@ -549,7 +578,7 @@ export component Desk inherits Window {
     private property <bool> show-workers: true;
     private property <int> open-dispatch: -1;
     function toggle-worker(id: int) { root.expanded-worker = root.expanded-worker == id ? -1 : id; }
-    changed selection => { root.open-panel = OpenPanel.closed; root.open-dispatch = -1; root.expanded-worker = -1; root.show-workers = true; root.show-checkpoint=false; }
+    changed selection => { root.editing-goal = false; root.open-panel = OpenPanel.closed; root.open-dispatch = -1; root.expanded-worker = -1; root.show-workers = true; root.show-checkpoint=false; }
     in property <string> partial;
     in property <int> selection: -1;
     in property <string> state-label;
@@ -633,7 +662,7 @@ export component Desk inherits Window {
     function new-chat() {root.visit("chat"); root.chat-query=""; root.select-row(-1); composer.focus-input();}
     public function open-asset-draft() {
         if Comparison.visible {Comparison.close();}
-        root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
+        root.editing-goal = false; root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
         if !root.writable { root.new-chat(); }
         composer.focus-input();
     }
@@ -642,14 +671,17 @@ export component Desk inherits Window {
     private property <bool> hide-context;
     private property <bool> compact-context;
     private property <bool> chat-screen: !Comparison.visible && !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
-    private property <bool> has-context: (root.project != "" || root.settings-open) && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting);
+    private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting));
     private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
     private property <string> chat-query;
     private property <[PickerOption]> search-hits;
     callback find-chats(string) -> [PickerOption];
     callback select-hit(string);
     changed chat-query => {root.search-hits = root.find-chats(root.chat-query);}
-    public function reset-chat-navigation() {root.chat-query = ""; root.compact-context = false; root.clear-recipient();}
+    public function reset-chat-navigation() {
+        root.chat-query = ""; root.compact-context = false; root.clear-recipient();
+        root.settings-origin = "chat"; root.settings-origin-shot = ""; root.editing-goal = false;
+    }
     changed compact => {root.compact-context = false;}
     function toggle-context() {
         if root.compact {
@@ -658,12 +690,31 @@ export component Desk inherits Window {
         } else {root.hide-context = !root.hide-context;}
         root.open-panel = OpenPanel.closed;
     }
+    private property <string> settings-origin: "chat";
+    private property <string> settings-origin-shot;
+    private property <bool> studio-destination: root.studio-open || (root.settings-open && root.settings-origin == "studio");
+    changed studio-destination => {
+        if !root.studio-destination {
+            Studio.editing-run = false;
+            if Studio.inspecting {Studio.command("close-inspector");}
+        }
+    }
+    function close-settings() {
+        root.visit(root.settings-origin);
+        root.viewing-shot = root.settings-origin-shot;
+        settings.focus();
+    }
     function visit(where: string) {
-        if Comparison.visible {Comparison.close();}
+        if where == "settings" && !root.settings-open {
+            root.settings-origin = Comparison.visible ? "comparison" : root.studio-open ? "studio" : root.album-open ? "album" : "chat";
+            root.settings-origin-shot = root.viewing-shot;
+        }
+        root.editing-goal = false;
+        if Comparison.visible && where != "settings" && where != "comparison" {Comparison.close();}
         root.open-panel = OpenPanel.closed; root.viewing-shot = "";
         root.studio-open = where == "studio"; root.settings-open = where == "settings"; root.album-open = where == "album";
         root.compact-context = false;
-        if root.studio-open {Studio.command("refresh");}
+        if root.studio-open {Studio.command("refresh"); if Studio.editing-run { TaskControls.open(true,Studio.area); }}
         if root.settings-open {root.visit-settings(root.settings-tab,root.settings-provider);}
         if root.album-open {root.refresh-album();}
     }
@@ -680,14 +731,14 @@ export component Desk inherits Window {
                 RailAction { caption: "Chats"; label: "Chats"; symbol: "\u{e8bd}"; selected: root.chat-screen;
                     activate => {if root.chat-screen {root.toggle-context();} else {root.visit("chat");}} }
                 if root.project != "": RailAction { caption: "Studio"; label: "Game studio"; symbol: "\u{e7b8}"; selected: root.studio-open;
-                    activate => {root.visit(root.studio-open ? "chat" : "studio");} }
+                    activate => {if root.studio-open && root.compact {root.toggle-context();} else {root.visit(root.studio-open ? "chat" : "studio");}} }
                 RailAction { caption: "Album"; label:"Screenshots"; symbol: "\u{e91b}"; selected: root.album-open;
                     activate => {root.visit(root.album-open ? "chat" : "album");} }
                 Rectangle { vertical-stretch: 1; }
                 sidebar-switch := RailAction { visible: root.has-context; height: self.visible ? 56px : 0px; caption: "Sidebar"; label: root.context-visible ? "Hide sidebar" : "Show sidebar";
                     symbol: "\u{e700}"; accessible-expanded: root.context-visible; activate => {root.toggle-context();} }
                 settings := RailAction { caption: "Settings"; label: "Settings"; symbol: "\u{e713}"; selected: root.settings-open;
-                    activate => {root.visit(root.settings-open ? "chat" : "settings");} }
+                    activate => {if root.settings-open {root.close-settings();} else {root.visit("settings");}} }
                 RailAction { caption: "Project"; label: root.project == "" ? "Open project…" : root.project; symbol: "\u{e8b7}";
                     enabled: !root.busy; accessible-description: "Choose a project folder"; activate => {root.open-project();} }
             }
@@ -720,7 +771,7 @@ export component Desk inherits Window {
             }
         }
 
-        if root.home && root.turns.length == 0 && !Sketch.expanded: VerticalLayout {
+        if root.home && root.turns.length == 0 && !Sketch.expanded && !root.editing-goal: VerticalLayout {
             x: (parent.width - self.width) / 2; width: min(pane.measure, 590px);
             height: self.preferred-height; y: max(58px, ((root.project == "" ? pane.height : pad.y) - self.height) / 2);
             alignment: start; spacing: 14px;
@@ -741,8 +792,13 @@ export component Desk inherits Window {
                     activate=>{root.draft="Help me plan this change: "; composer.focus-input();} }
             }
         }
+        goal-summary := GoalSummary {
+            visible: !root.home && root.goal-objective != ""; x:(parent.width - self.width)/2; y:61px; width:pane.measure;
+            height: self.visible ? 36px : 0px; objective:root.goal-objective; status:root.goal-status;
+            accessible-expanded:root.editing-goal; activate=>{if root.editing-goal {root.close-goal();} else {root.open-goal(false);}}
+        }
         transcript := ScrollView {
-            visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: 61px; width: pane.measure;
+            visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: goal-summary.y + goal-summary.height; width: pane.measure;
             height: max(0px, queue-strip.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
@@ -821,7 +877,7 @@ export component Desk inherits Window {
             x: composer.x; width: composer.width;
             visible: root.queued.length > 0 && !root.home;
             height: self.visible ? 32px + min(root.queued.length,2) * 31px : 0px;
-            y: (root.writable ? pad.y : closed.y) - self.height;
+            y: (root.editing-goal ? goal-editor.y : root.writable ? pad.y : closed.y) - self.height;
             HorizontalLayout { height: 30px; spacing: 8px;
                 Text { text: "Queued (" + root.queued.length + ")"; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 1; font-size: 13px; }
                 if !root.busy && root.can-resume: Action { label: "Send next"; height: 30px; activate => {root.operate("send-next");} }
@@ -841,7 +897,7 @@ export component Desk inherits Window {
         }
         composer := Composer {
             chat-provider: root.chat-provider;
-            visible: root.project != "" && root.writable;
+            visible: root.project != "" && root.writable && !root.editing-goal;
             x: (parent.width - self.width) / 2; width: pane.measure;
             y: parent.height - self.height - feedback.height - 24px;
             value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || root.attachments.length > 0 || Sketch.has-content);
@@ -854,8 +910,17 @@ export component Desk inherits Window {
             recipient: root.direction-title; clear-recipient => {root.clear-recipient();composer.focus-input();}
             delivery(x,y,w,h) => {root.show-panel(OpenPanel.delivery,x,y,w,h);}
         }
+        goal-editor := GoalEditor {
+            visible:root.editing-goal; x:composer.x; width:pane.measure; height:root.goal-detail != "" ? 242px : 202px;
+            y:parent.height - self.height - feedback.height - 24px;
+            objective:root.goal-objective; status:root.goal-status; detail:root.goal-detail; value <=> root.goal-input;
+            writable:root.writable; busy:root.busy; valid:root.has-content(root.goal-input);
+            can-retry:root.can-retry; retry=>{root.operate("retry");}
+            start(v)=>{root.run-goal(v);} close=>{root.close-goal();}
+            pause=>{root.operate("pause-goal");} clear=>{root.operate("clear-goal");}
+        }
         closed := Rectangle {
-            visible: !root.home && !root.writable; x: (parent.width - self.width) / 2; width: pane.measure;
+            visible: !root.home && !root.writable && !root.editing-goal; x: (parent.width - self.width) / 2; width: pane.measure;
             height: 44px; y: parent.height - self.height - feedback.height - 24px;
             HorizontalLayout { alignment: center; spacing: 14px;
                 Text { text: root.state-label; color: Theme.muted; font-size: 14px; vertical-alignment: center; }
@@ -879,7 +944,7 @@ export component Desk inherits Window {
             Action { height:36px; label:"Back to studio"; glyph:"\u{e72b}"; width:142px; activate=>{Studio.editing-run=false;} }
             run-scroll:=ScrollView { vertical-stretch:1; content-width:self.visible-width; content-height:run-editor.preferred-height;
                 run-editor:=TaskEditor { width:run-scroll.visible-width - 8px; catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
-                    reload=>{root.reload-models();} back=>{Studio.editing-run=false;} }
+                    reload=>{root.reload-models();} back=>{Studio.editing-run=false;} choose-providers=>{root.choose-providers();} }
             }
         }
     }
@@ -924,6 +989,7 @@ export component Desk inherits Window {
             source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
     }
     if Comparison.visible: ComparisonPage {
+        visible: !root.settings-open;
         x: rail.width; width: root.width - self.x; height: root.height; can-edit: !root.busy || root.running;
     }
     if root.settings-open: Rectangle {
@@ -934,7 +1000,7 @@ export component Desk inherits Window {
             HorizontalLayout { height: 40px;
                 Text { text: root.settings-tab == "Tasks" ? "Task settings" : root.settings-tab; font-size: 28px; font-weight: 600; vertical-alignment: center; color: Theme.text; horizontal-stretch: 1; }
                 if !root.context-visible: Action { label:"Settings sections"; glyph:"\u{e700}"; width:152px; activate=>{root.toggle-context();} }
-                Action { label: "Close settings"; icon-only: true; glyph: "\u{e711}"; width: 38px; activate => {root.settings-open = false; settings.focus();} }
+                Action { label: "Close settings"; icon-only: true; glyph: "\u{e711}"; width: 38px; activate => {root.close-settings();} }
             }
             Rectangle { height: 1px; background: Theme.line; }
             if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 36px; spacing: 4px;
@@ -954,7 +1020,7 @@ export component Desk inherits Window {
                     } }
                 }
             }
-            if root.settings-tab == "Providers": Text { text: "Expand a provider to choose which tasks it can handle across projects."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
+            if root.settings-tab == "Providers": Text { text: "Choose a provider to manage its workers and Studio tasks across projects."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
             if root.settings-tab == "Providers" && root.permission-error != "": Text { text:root.permission-error; wrap:word-wrap; color:Theme.scarce; }
             if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
                 LineEdit { horizontal-stretch: 1; text <=> root.source-input; accessible-label: root.settings-tab == "Skills" ? "Skill source" : "Plugin source";
@@ -987,7 +1053,7 @@ export component Desk inherits Window {
                     has-project:root.project != ""; auto-delegate:root.auto-delegate; parallel-workers:root.parallel-workers;
                     schedule(auto,parallel)=>{root.save-scheduling(auto,parallel);}
                     catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
-                    reload=>{root.reload-models();} back=>{root.settings-open=false;} }
+                    reload=>{root.reload-models();} back=>{root.close-settings();} choose-providers=>{root.choose-providers();} }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
                 for row in root.settings-rows: item := VerticalLayout {
@@ -998,9 +1064,11 @@ export component Desk inherits Window {
                     account-header := HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
                         height: item.account ? 60px : max(root.recommendations ? 76px : 60px, row-copy.preferred-height + 18px);
                         row-copy := VerticalLayout { horizontal-stretch:1; alignment:center; spacing:3px;
-                            if item.account: Action { label:row.label; detail:row.detail; height:50px;
+                            if item.account: RowAction { label:row.label; detail:row.detail; height:50px; end-inset:92px;
                                 glyph:item.expanded ? "\u{e70d}" : "\u{e76c}"; glyph-color:item.expanded ? Theme.accent : Theme.muted;
-                                accessible-expanded:item.expanded; accessible-description:row.detail;
+                                accessible-expanded:item.expanded; accessible-description:row.detail + ". " + row.task-count + " allowed.";
+                                Text { x:parent.width - 86px; width:76px; height:parent.height; text:row.task-count;
+                                    horizontal-alignment:right; vertical-alignment:center; color:Theme.muted; font-size:12px; accessible-role:none; }
                                 activate=>{root.expand-provider(row.id);} }
                             if !item.account: Text { text: row.label; color: Theme.text; font-size: 15px; font-weight: 600; min-width: 0px; overflow: elide; }
                             if !item.account: Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 13px; min-width: 0px; wrap: word-wrap; }
@@ -1063,7 +1131,7 @@ export component Desk inherits Window {
         if root.settings-open: VerticalLayout {
             padding: 14px; padding-top: 19px; alignment: start; spacing: 5px;
             Text { text: "Settings"; height: 36px; color: Theme.text; font-size: 20px; font-weight: 600; }
-            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance", "Notifications"]: Action {
+            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance", "Notifications"]: RowAction {
                 label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}","\u{e790}","\u{ea8f}"][i]; selected: root.settings-tab == tab;
                 enabled: !root.settings-working; activate => {root.visit-settings(tab,root.settings-provider);root.compact-context=false;}
             }
@@ -1071,7 +1139,7 @@ export component Desk inherits Window {
         if root.chat-screen: VerticalLayout {
             padding: 14px; padding-top: 18px; spacing: 9px;
             Text { text: "Project"; color: Theme.muted; font-family: Theme.mono; font-size: 12px; height: 16px; }
-            Action { label: root.project == "" ? "Choose folder…" : root.project; accessible-label:"Switch project"; enabled: !root.busy; height:36px;
+            RowAction { end-inset:26px; label: root.project == "" ? "Choose folder…" : root.project; accessible-label:"Switch project"; enabled: !root.busy; height:36px;
                 glyph: "\u{e8b7}"; glyph-color: Theme.halfway; label-font: Theme.mono;
                 activate=>{root.open-project();}
                 Text { x: parent.width - 20px; text:"\u{e70d}"; font-family:"Segoe MDL2 Assets"; color:Theme.muted; font-size:11px; vertical-alignment:center; }
@@ -1082,11 +1150,11 @@ export component Desk inherits Window {
             if root.chat-query != "" && root.search-hits.length == 0: Text { text:"No matching chats"; color:Theme.muted; font-size:13px; wrap:word-wrap; }
             if root.project != "" && root.chat-query == "" && root.rows.length == 0: Text { text:"Your conversations appear here."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
             if root.chat-query == "": ListView { vertical-stretch: 1;
-                for chat[i] in root.rows: Action { label: chat; selected: i == root.selection;
+                for chat[i] in root.rows: RowAction { label: chat; selected: i == root.selection;
                     enabled: !root.busy; activate => {root.compact-context=false; root.select-row(i);} }
             }
             if root.chat-query != "": ListView { vertical-stretch: 1;
-                for hit in root.search-hits: Action { label: hit.label; enabled: !root.busy;
+                for hit in root.search-hits: RowAction { label: hit.label; enabled: !root.busy;
                     activate => {root.select-hit(hit.value); root.chat-query=""; root.compact-context=false;} }
             }
             if root.chat-query != "" && root.search-hits.length == 40: Text { text: "Showing the newest 40 matches."; color: Theme.muted; wrap:word-wrap; font-size:12px; }
@@ -1112,21 +1180,25 @@ export component Desk inherits Window {
         escape => {root.dismiss-panel();} init => {after-run.focus();}
         Rectangle {background: Theme.popup; border-color: Theme.line; border-width: 1px; border-radius: 16px;}
         delivery-rows := VerticalLayout { padding: 6px; spacing: 1px;
-            after-run := Action {label: "Send after this run"; glyph: "\u{e823}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("queue");composer.focus-input();}}
-            Action {label: "Steer current run"; glyph: "\u{e74a}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("steer");composer.focus-input();}}
+            after-run := RowAction {label: "Send after this run"; glyph: "\u{e823}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("queue");composer.focus-input();}}
+            RowAction {label: "Steer current run"; glyph: "\u{e74a}"; enabled: composer.can-send; activate => {root.dismiss-panel();root.operate("steer");composer.focus-input();}}
         }
     }
     if root.open-panel == OpenPanel.add: Flyout {
-        x: root.anchor-x; y: root.anchor-y - self.height - 6px; width: 212px; height: add-rows.preferred-height;
+        x: root.anchor-x; y: max(8px,root.anchor-y - self.height - 6px); width: 222px; height: add-rows.preferred-height;
         escape => {root.dismiss-panel();} init => {files.focus();}
         Rectangle { background: Theme.popup; border-color: Theme.line; border-width: 1px; border-radius: 16px; }
         add-rows := VerticalLayout { padding: 6px; spacing: 1px;
-            files := Action { label: "Attach files…"; glyph: "\u{e723}"; activate => {root.dismiss-panel(); root.attach(false);} }
-            Action { label: "Attach folder…"; glyph: "\u{e8b7}"; activate => {root.dismiss-panel(); root.attach(true);} }
+            files := RowAction { label: "Attach files…"; glyph: "\u{e723}"; activate => {root.dismiss-panel(); root.attach(false);} }
+            RowAction { label: "Attach folder…"; glyph: "\u{e8b7}"; activate => {root.dismiss-panel(); root.attach(true);} }
             Rectangle { height: 1px; background: Theme.line; }
-            Action { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
-            Action { label: "Draw a sketch"; glyph: "\u{e104}"; activate => {root.dismiss-panel(); Sketch.edit(); composer.focus-input();} }
-            Action { label: "Take screenshot"; glyph: "\u{e722}"; enabled: !root.capturing; activate => {root.dismiss-panel(); root.take-screenshot();} }
+            RowAction { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
+            RowAction { label:root.goal-objective == "" ? "Set a goal" : "Chat goal"; glyph:"\u{e7c1}"; enabled:!root.busy || root.goal-objective != "";
+                activate=>{root.open-goal(root.goal-objective == "");}
+                Text { x:parent.width - 56px; width:44px; height:parent.height; text:"/goal"; color:Theme.muted; font-family:Theme.mono; font-size:12px; horizontal-alignment:right; vertical-alignment:center; accessible-role:none; }
+            }
+            RowAction { label: "Draw a sketch"; glyph: "\u{e104}"; activate => {root.dismiss-panel(); Sketch.edit(); composer.focus-input();} }
+            RowAction { label: "Take screenshot"; glyph: "\u{e722}"; enabled: !root.capturing; activate => {root.dismiss-panel(); root.take-screenshot();} }
         }
     }
     if root.open-panel == OpenPanel.outputs: Flyout {
@@ -1180,7 +1252,7 @@ export component Desk inherits Window {
                     choose-worker(id)=>{root.toggle-worker(id);} stop-worker(id)=>{root.stop-worker(id);} direct-worker(id,title)=>{root.direct-worker(id,title);} }
                 if root.workers.length == 0: Text { text:root.running ? "No subagents dispatched yet." : "No subagents were dispatched."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
                 if root.checkpoint != "": Rectangle { height:1px; background:Theme.line; }
-                if root.checkpoint != "": Action { label:"Project handoff"; glyph:root.show-checkpoint ? "\u{e70d}" : "\u{e76c}";
+                if root.checkpoint != "": RowAction { label:"Project handoff"; glyph:root.show-checkpoint ? "\u{e70d}" : "\u{e76c}";
                     accessible-expanded:root.show-checkpoint; activate=>{root.show-checkpoint=!root.show-checkpoint;} }
                 if root.checkpoint != "" && root.show-checkpoint: Text { text:root.checkpoint; wrap:word-wrap; color:Theme.text; font-size:14px; }
             }
@@ -1211,9 +1283,9 @@ export component Desk inherits Window {
         Rectangle { background: Theme.surface; border-color: Theme.line; border-width: 1px; border-radius: 16px; }
         option-rows := VerticalLayout { padding: 6px; spacing: 2px;
             Text { text: root.state-label; color: Theme.muted; font-size: 12px; height: 25px; vertical-alignment: center; }
-            if root.can-review: Action { label: root.checkpoint-only ? "Accept decisions" : "Accept change"; activate => {root.operate("accept"); root.open-panel = OpenPanel.closed;} }
-            if root.can-retry: Action { label: "Retry in new chat"; activate => {root.operate("retry"); root.open-panel = OpenPanel.closed;} }
-            if root.can-discard: Action { label: "Discard change"; activate => {root.operate("discard"); root.open-panel = OpenPanel.closed;} }
+            if root.can-review: RowAction { label: root.checkpoint-only ? "Accept decisions" : "Accept change"; activate => {root.operate("accept"); root.open-panel = OpenPanel.closed;} }
+            if root.can-retry: RowAction { label: "Retry in new chat"; activate => {root.operate("retry"); root.open-panel = OpenPanel.closed;} }
+            if root.can-discard: RowAction { label: "Discard change"; activate => {root.operate("discard"); root.open-panel = OpenPanel.closed;} }
         }
     }
     if root.open-panel == OpenPanel.effort: Flyout {
@@ -1251,7 +1323,7 @@ export component Desk inherits Window {
         list := ScrollView { x: 8px; y: 40px; width: parent.width - 16px; height: parent.height - 51px;
             content-width: self.visible-width; content-height: model-rows.preferred-height;
             model-rows := VerticalLayout { width: list.visible-width;
-                for m[i] in root.chat-choices.models: Action {
+                for m[i] in root.chat-choices.models: RowAction { end-inset:34px;
                     height: 38px + (i == 0 ? root.default-extra : 0px); label: m.label; selected: i == root.highlighted; border-radius: 14px;
                     detail: m.value == "Default model" ? "Use the configured Codex model" : "";
                     accessible-description: i == root.chat-choices.model-index ? "Selected" : "";
@@ -1296,12 +1368,18 @@ export component Desk inherits Window {
             }
             CheckBox { text: "Use global defaults"; checked: root.inherit-policy;
                 toggled => { root.change-policy(self.checked ? "inherit" : "customize",""); } }
-            AgentPolicyFields { blocked-models:root.worker-models-blocked; has-provider:root.worker-provider-available; inherited-policy:root.inherit-policy; allowed-model-names:root.allowed-model-names;
+            if root.inherit-policy: Text {
+                private property <string> effort: root.cap-index < 0 || root.cap-index >= root.cap-levels.length || root.cap-levels[root.cap-index].value == ""
+                    ? "Any effort" : root.cap-levels[root.cap-index].label + " effort limit";
+                text:root.allowed-model-names + (root.worker-provider-available && !root.worker-models-blocked ? " · " + self.effort : "");
+                color:Theme.muted; font-size:13px; wrap:word-wrap; overflow:elide; max-height:54px;
+            }
+            if !root.inherit-policy: AgentPolicyFields { blocked-models:root.worker-models-blocked; has-provider:root.worker-provider-available; allowed-model-names:root.allowed-model-names;
                 all-models:root.all-models; policy-models:root.policy-models; cap-levels:root.cap-levels; cap-index:root.cap-index;
                 effort-name:"Maximum subagent effort"; change-policy(f,v)=>{root.change-policy(f,v);} dismiss=>{root.dismiss-panel();} }
-            if !root.catalog-ready: Action { label: "Refresh models"; enabled: root.catalog-status != "Loading models…"; activate => {root.reload-models();} }
-            Action { label:"Provider settings"; glyph:"\u{e713}";
-                activate=>{root.settings-tab="Providers"; root.visit("settings");} }
+            if !root.inherit-policy && !root.catalog-ready: Action { label: "Refresh models"; enabled: root.catalog-status != "Loading models…"; activate => {root.reload-models();} }
+            RowAction { label:"Provider settings"; glyph:"\u{e713}";
+                activate=>{root.choose-providers();} }
         }
     }
 

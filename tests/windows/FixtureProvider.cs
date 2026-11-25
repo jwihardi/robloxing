@@ -30,6 +30,20 @@ class FixtureProvider {
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
     static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }
+    static string GoalEvidence(bool first) {
+        if (first) {
+            File.WriteAllText("first.txt","one");
+            return "Created the first fixture file.";
+        }
+        File.WriteAllText("second.txt","two");
+        if (File.ReadAllText("first.txt") != "one") throw new InvalidDataException("First file changed");
+        return "Verified both fixture files.";
+    }
+    static string GoalReply() {
+        bool first = !File.Exists("first.txt");
+        string evidence = GoalEvidence(first);
+        return first ? evidence : "[Goal complete] " + evidence;
+    }
     static object CatalogPlugin(string id, string label, string detail) {
         bool installed = File.Exists(Path.Combine(Dir,"sample.plugin")) && File.ReadAllText(Path.Combine(Dir,"sample.plugin")) == id;
         return new {id=id,name=id.Split('@')[0],installed=installed,enabled=installed,installPolicy="AVAILABLE",availability="AVAILABLE",
@@ -135,6 +149,7 @@ class FixtureProvider {
                     }
                     if (Delivery((string)first["text"])) break;
                     if (worker) { Worker((string)first["text"]); break; }
+                    if (Mode("goal-mode")) { Done(GoalReply()); break; }
                     var tasks = new[]{Assignment("left"),Assignment("right")};
                     Send(new {type="control_request",request_id="batch", request=new {subtype="mcp_message",server_name="workshop",message=new {jsonrpc="2.0",id=4,method="tools/call",@params=new {name="workshop_delegate",arguments=new {tasks=tasks}}}}});
                     break;
@@ -161,7 +176,8 @@ class FixtureProvider {
                 case "session/prompt":
                     Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_thought_chunk",content=new {type="text",text="fixture"}}}});
                     while(Mode("thinking.hold")) Thread.Sleep(30);
-                    Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_message_chunk",content=new {type="text",text="Hello."}}}});
+                    string reply = Mode("goal-mode") ? GoalReply() : "Hello.";
+                    Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_message_chunk",content=new {type="text",text=reply}}}});
                     Send(new {id=id,result=new {stopReason="end_turn"}});break;
             }
         }
@@ -240,6 +256,11 @@ class FixtureProvider {
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
                 if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
+                if(Convert.ToString(msg["id"])=="goal-result") {
+                    var result=(Dictionary<string,object>)msg["result"];
+                    if(!Object.Equals(result["success"],true)) throw new InvalidDataException("Workshop rejected the goal report");
+                    Done("Checked the fixture files.");
+                }
                 if(Convert.ToString(msg["id"])=="block") Done("Waiting for the release input.");
                 continue;
             }
@@ -314,6 +335,14 @@ class FixtureProvider {
                 }
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
+                if (Mode("goal-mode")) {
+                    if (Mode("goal.hold")) continue;
+                    bool firstFile=!File.Exists("first.txt");
+                    string evidence=GoalEvidence(firstFile);
+                    Send(new {id="goal-result",method="item/tool/call",@params=new {threadId=session,turnId=turn,
+                        callId="goal-result",tool="workshop_goal_result",arguments=new {status=firstFile ? "progress" : "complete",evidence=evidence}}});
+                    continue;
+                }
                 if (message == "Show the reference drawing" && Mode("chat-image.png")) {
                     Send(new {method="item/started", @params=new {threadId=session,turnId=turn,item=new {type="imageGeneration"}}});
                     while(Mode("image.hold")) Thread.Sleep(30);
