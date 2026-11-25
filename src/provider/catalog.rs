@@ -75,29 +75,79 @@ pub(super) async fn request(
     anyhow::bail!("Codex closed during {method}")
 }
 
-async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
+async fn initialized(project: &Path) -> Result<Connection> {
     let mut io = Connection::spawn(project.to_owned(), tempfile::tempfile()?)?;
+    request(&mut io, 1, "initialize", json!({"clientInfo":{"name":"workshop","title":"Workshop","version":env!("CARGO_PKG_VERSION")}})).await?;
+    send(&mut io.stdin, json!({"method":"initialized"})).await?;
+    Ok(io)
+}
+
+pub(super) async fn codex_limits(project: &Path) -> Result<Vec<UsageWindow>> {
+    let mut io = initialized(project).await?;
+    read_limits(&mut io).await
+}
+
+async fn read_limits(io: &mut Connection) -> Result<Vec<UsageWindow>> {
+    let snapshot = request(io, -1, "account/rateLimits/read", json!({})).await?;
+    account_windows(
+        snapshot["rateLimitsByLimitId"]
+            .get("codex")
+            .unwrap_or(&snapshot["rateLimits"]),
+    )
+    .context("Codex did not report account limits")
+}
+
+async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
     let catalog = tokio::time::timeout(Duration::from_secs(20), async {
-            request(&mut io, 1, "initialize", json!({"clientInfo":{"name":"workshop","title":"Workshop","version":env!("CARGO_PKG_VERSION")}})).await?;
-            send(&mut io.stdin, json!({"method":"initialized"})).await?;
-            let config = request(&mut io, 2, "config/read", json!({"cwd":project})).await?;
-            let mut models: Vec<Model> = Vec::new();
-            let mut cursor = Value::Null;
-            for id in 3.. {
-                let page = request(&mut io, id, "model/list", json!({"cursor":cursor,"limit":100})).await?;
-                models.extend(serde_json::from_value::<Vec<Model>>(page["data"].clone())?);
-                let next = &page["nextCursor"];
-                if next.is_null() { break; }
-                ensure!(next != &cursor && id < 100, "Invalid model catalog pagination");
-                cursor = next.clone();
+        let mut io = initialized(project).await?;
+        let config = request(&mut io, 2, "config/read", json!({"cwd":project})).await?;
+        let mut models: Vec<Model> = Vec::new();
+        let mut cursor = Value::Null;
+        for id in 3.. {
+            let page = request(
+                &mut io,
+                id,
+                "model/list",
+                json!({"cursor":cursor,"limit":100}),
+            )
+            .await?;
+            models.extend(serde_json::from_value::<Vec<Model>>(page["data"].clone())?);
+            let next = &page["nextCursor"];
+            if next.is_null() {
+                break;
             }
-            ensure!(!models.is_empty(), "Codex returned no models");
-            let default_model = config["config"]["model"].as_str()
-                .or_else(|| models.iter().find(|m| m.is_default).map(|m| m.model.as_str()))
-                .unwrap_or_default().to_owned();
-            Ok::<_, anyhow::Error>(Catalog { models, default_model, default_effort: config["config"]["model_reasoning_effort"].as_str().unwrap_or_default().to_owned() })
-        }).await.context("Codex model discovery timed out")??;
-    Ok((io, catalog))
+            ensure!(
+                next != &cursor && id < 100,
+                "Invalid model catalog pagination"
+            );
+            cursor = next.clone();
+        }
+        ensure!(!models.is_empty(), "Codex returned no models");
+        let default_model = config["config"]["model"]
+            .as_str()
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.is_default)
+                    .map(|m| m.model.as_str())
+            })
+            .unwrap_or_default()
+            .to_owned();
+        Ok::<_, anyhow::Error>((
+            io,
+            Catalog {
+                models,
+                default_model,
+                default_effort: config["config"]["model_reasoning_effort"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            },
+        ))
+    })
+    .await
+    .context("Codex model discovery timed out")??;
+    Ok(catalog)
 }
 
 async fn all_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
@@ -169,19 +219,11 @@ pub fn load_models_and_usage(
             let Some(mut io) = io else {
                 return Ok(None);
             };
-            let limits = tokio::time::timeout(
-                Duration::from_secs(6),
-                request(&mut io, -1, "account/rateLimits/read", json!({})),
+            Ok(
+                tokio::time::timeout(Duration::from_secs(6), read_limits(&mut io))
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
             )
-            .await
-            .ok()
-            .and_then(Result::ok);
-            Ok(limits.and_then(|v| {
-                account_windows(
-                    v["rateLimitsByLimitId"]
-                        .get("codex")
-                        .unwrap_or(&v["rateLimits"]),
-                )
-            }))
         })
 }

@@ -32,6 +32,20 @@ pub struct UsageWindow {
     pub percent_left: Option<i64>,
 }
 
+// Claude's get_usage report uses percentages. Streaming unifiedWindows use fractions.
+pub(crate) fn claude_windows(buckets: &Value, scale: f64) -> Vec<UsageWindow> {
+    [("five_hour", 300), ("seven_day", 10080)]
+        .into_iter()
+        .filter_map(|(key, minutes)| {
+            let used = buckets[key]["utilization"].as_f64()? * scale;
+            Some(UsageWindow {
+                minutes: Some(minutes),
+                percent_left: Some(100 - used.clamp(0., 100.).round() as i64),
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn account_windows(snapshot: &Value) -> Option<Vec<UsageWindow>> {
     if !snapshot.is_object() || snapshot["limitId"].as_str().is_some_and(|id| id != "codex") {
         return None;

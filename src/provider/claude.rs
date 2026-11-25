@@ -155,6 +155,28 @@ pub(super) async fn models(project: &Path) -> Result<Vec<CatalogModel>> {
     bail!("Claude closed during model discovery")
 }
 
+pub(super) async fn account_limits() -> Result<Vec<UsageWindow>> {
+    let scratch = tempfile::tempdir()?;
+    let mut args = STREAM.to_vec();
+    args.extend(["--strict-mcp-config", "--no-session-persistence"]);
+    let mut io = spawn(scratch.path(), &args, tempfile::tempfile()?)?;
+    send(&mut io.stdin, init(&[])).await?;
+    send(&mut io.stdin, json!({"type":"control_request","request_id":"workshop-usage","request":{"subtype":"get_usage"}})).await?;
+    while let Some(line) = io.lines.next_line().await? {
+        let event: Value = serde_json::from_str(&line)?;
+        let reply = &event["response"];
+        if reply["request_id"] == "workshop-usage" {
+            ensure!(
+                reply["subtype"] == "success",
+                "Claude did not return an account usage report"
+            );
+            let report = &reply["response"];
+            return Ok(crate::usage::claude_windows(&report["rate_limits"], 1.0));
+        }
+    }
+    bail!("Claude closed during account usage lookup")
+}
+
 fn parse_models(models: &Value) -> Result<Vec<CatalogModel>> {
     models
         .as_array()
@@ -502,8 +524,14 @@ pub(super) async fn exchange(
             }
             "rate_limit_event" => {
                 let info = &event["rate_limit_info"];
-                if let Some(window) = crate::usage::claude_window(info) {
-                    notify(ReplyUpdate::AccountUsage("claude", vec![window]));
+                let mut windows = crate::usage::claude_windows(&info["unifiedWindows"], 100.0);
+                if let Some(window) = crate::usage::claude_window(info)
+                    && !windows.iter().any(|w| w.minutes == window.minutes)
+                {
+                    windows.push(window);
+                }
+                if !windows.is_empty() {
+                    notify(ReplyUpdate::AccountUsage("claude", windows));
                 }
             }
             "result" => {

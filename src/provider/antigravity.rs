@@ -391,6 +391,17 @@ pub fn usage_key(model: &str) -> &str {
     }
 }
 
+pub(super) async fn account_limits_with_default(project: &Path) -> Result<AccountLimits> {
+    let (limits, model) = tokio::join!(account_limits(), current_model(project));
+    let mut limits = limits?;
+    if let Ok(id) = model
+        && let Some(windows) = limits.get(usage_key(&format!("antigravity:{id}"))).cloned()
+    {
+        limits.insert("antigravity:default".into(), windows);
+    }
+    Ok(limits)
+}
+
 pub async fn account_limits() -> Result<std::collections::HashMap<String, Vec<UsageWindow>>> {
     let dir = tempfile::tempdir()?;
     let usage = output(dir.path(), &["-p", "/usage", "--output-format", "json"]).await?;

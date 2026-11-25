@@ -23,6 +23,22 @@ use anyhow::{Context, Result, bail, ensure};
 pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
 pub use catalog::{Catalog, Model as CatalogModel, load_models_and_usage, model_catalog};
+
+pub type AccountLimits = std::collections::HashMap<String, Vec<UsageWindow>>;
+
+pub async fn account_limits(provider: &str, project: &Path) -> Result<AccountLimits> {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let windows = match provider {
+            "codex" => catalog::codex_limits(project).await?,
+            "claude" => claude::account_limits().await?,
+            "antigravity" => return antigravity::account_limits_with_default(project).await,
+            _ => return Ok(AccountLimits::new()),
+        };
+        Ok(AccountLimits::from([(provider.to_owned(), windows)]))
+    })
+    .await
+    .context("Account usage lookup timed out")?
+}
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
 use std::{

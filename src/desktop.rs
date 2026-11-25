@@ -3,6 +3,7 @@ mod appearance;
 mod capture;
 mod desktop_studio;
 mod desktop_tasks;
+mod desktop_usage;
 mod inspector;
 mod notifications;
 mod preferences;
@@ -43,7 +44,7 @@ enum Update {
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
     AccountUsage(PathBuf, String, Vec<UsageWindow>),
-    AntigravityUsage(PathBuf, std::collections::HashMap<String, Vec<UsageWindow>>),
+    UsageSnapshot(&'static str, u64, Option<provider::AccountLimits>),
     Started(i64, bool),
     Delta(String),
     ReplyStored,
@@ -78,7 +79,7 @@ struct App {
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_rows: RefCell<Vec<preferences::Row>>,
-    account_limits: RefCell<std::collections::HashMap<String, Vec<UsageWindow>>>,
+    usage: RefCell<desktop_usage::AccountUsage>,
     catalog: RefCell<provider::Catalog>,
     ui: slint::Weak<Desk>,
     store: RefCell<Option<Arc<Store>>>,
@@ -114,12 +115,16 @@ fn context_meter(context: ContextUsage, fresh: bool) -> MeterData {
         (Some(used), Some(limit)) => format!("{} / {} tokens", tokens(used), tokens(limit)),
         (Some(used), None) => format!("{} tokens used", tokens(used)),
         (None, Some(limit)) => format!("{} token window", tokens(limit)),
-        _ if fresh => "After first response".into(),
+        _ if fresh => "0 tokens used".into(),
         _ => "Awaiting token count".into(),
     };
     MeterData {
         label: "Context".into(),
-        remaining: context.fraction_left().unwrap_or(-1.0) as f32,
+        remaining: if fresh {
+            1.0
+        } else {
+            context.fraction_left().unwrap_or(-1.0) as f32
+        },
         detail: detail.into(),
     }
 }
@@ -565,37 +570,21 @@ impl App {
                 (a.model.as_str(), a.effort.as_str())
             });
         ui.set_chat_choices(picker(&catalog, model, effort, chat.is_none()));
-        self.show_provider(&ui, model);
+        self.show_provider(&ui, model, &store.project);
         ui.set_parallel_workers(s.parallelism == 2);
         ui.set_auto_delegate(s.auto_delegate);
         Ok(())
     }
-    fn show_provider(&self, ui: &Desk, model: &str) {
+    fn show_provider(&self, ui: &Desk, model: &str, project: &std::path::Path) {
         let provider = provider::provider_for(model);
         ui.set_chat_provider(capitalized(provider).into());
-        let resolved = (model == "antigravity:default")
-            .then(|| {
-                self.catalog
-                    .borrow()
-                    .models
-                    .iter()
-                    .find(|m| m.model == model)
-                    .and_then(|m| m.resolved_model.as_ref())
-                    .map(|id| format!("antigravity:{id}"))
-            })
-            .flatten();
         let key = if provider == "antigravity" {
-            provider::antigravity::usage_key(resolved.as_deref().unwrap_or(model))
+            provider::antigravity::usage_key(model)
         } else {
             provider
         };
-        ui.set_usage_meters(usage_meters(
-            self.account_limits
-                .borrow()
-                .get(key)
-                .cloned()
-                .unwrap_or_default(),
-        ));
+        self.usage.borrow_mut().select(provider, key);
+        self.refresh_usage(ui, project);
     }
     fn selected_policy(&self, store: &Store) -> Result<Option<WorkerPolicy>> {
         match self.id.get() {
@@ -667,40 +656,14 @@ impl App {
         self.session.take();
         self.render_worker_policy(store, &self.catalog.borrow())
     }
-    fn load_antigravity_usage(&self, project: PathBuf) {
-        if provider::antigravity::program().is_err() {
-            return;
-        }
-        let updates = self.updates.clone();
-        std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                let limits = rt
-                    .block_on(provider::antigravity::account_limits())
-                    .unwrap_or_default();
-                let _ = updates.send(Update::AntigravityUsage(project, limits));
-            }
-        });
-    }
     fn load_models(&self, project: PathBuf) {
-        self.load_antigravity_usage(project.clone());
-        let ui = self.ui.unwrap();
-        ui.set_catalog_status("Loading models…".into());
+        self.ui
+            .unwrap()
+            .set_catalog_status("Loading models…".into());
         let updates = self.updates.clone();
         std::thread::spawn(move || {
-            match provider::load_models_and_usage(&project, |catalog| {
-                let _ = updates.send(Update::Models(project.clone(), Ok(catalog)));
-            }) {
-                Ok(Some(windows)) => {
-                    let _ = updates.send(Update::AccountUsage(project, "codex".into(), windows));
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = updates.send(Update::Models(project, Err(error)));
-                }
-            }
+            let catalog = provider::model_catalog(&project);
+            let _ = updates.send(Update::Models(project, catalog));
         });
     }
     fn filter_preferences(&self, query: &str) {
@@ -875,7 +838,7 @@ impl App {
             settings.lead_effort = effort;
             store.configure_team(&settings)?;
         }
-        self.show_provider(&ui, &selected_model);
+        self.show_provider(&ui, &selected_model, &store.project);
         ui.set_chat_choices(choices);
         Ok(())
     }
@@ -1087,8 +1050,9 @@ impl App {
                         Ok(note) => {
                             self.session.take();
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
-                                self.account_limits.borrow_mut().clear();
+                                self.usage.borrow_mut().clear();
                                 ui.set_usage_meters(usage_meters(Vec::new()));
+                                self.render_settings(s)?;
                                 self.load_models(s.project.clone());
                             }
                             self.load_preferences(note);
@@ -1125,7 +1089,7 @@ impl App {
                             .as_ref()
                             .into(),
                     );
-                    self.account_limits.borrow_mut().clear();
+                    self.usage.borrow_mut().clear();
                     ui.set_usage_meters(usage_meters(Vec::new()));
                     self.id.set(None);
                     self.chat_offset.set(0);
@@ -1176,19 +1140,10 @@ impl App {
                         ui.set_context_meter(context_meter(context, false));
                     }
                 }
-                Update::AntigravityUsage(project, groups) => {
-                    if let Some(store) = self
-                        .store
-                        .borrow()
-                        .as_ref()
-                        .filter(|s| s.project == project)
-                    {
-                        let mut limits = self.account_limits.borrow_mut();
-                        limits.retain(|k, _| !k.starts_with("antigravity:"));
-                        limits.extend(groups);
-                        drop(limits);
-                        self.render_settings(store)?;
-                    }
+                Update::UsageSnapshot(source, id, limits) => {
+                    let mut usage = self.usage.borrow_mut();
+                    usage.finish(source, id, limits);
+                    usage.display(&ui);
                 }
                 Update::AccountUsage(project, provider, windows) => {
                     if self
@@ -1197,20 +1152,9 @@ impl App {
                         .as_ref()
                         .is_some_and(|s| s.project == project)
                     {
-                        let mut limits = self.account_limits.borrow_mut();
-                        if provider == "claude" {
-                            let saved = limits.entry(provider.clone()).or_default();
-                            for window in windows {
-                                saved.retain(|w| w.minutes != window.minutes);
-                                saved.push(window);
-                            }
-                            saved.sort_by_key(|w| w.minutes);
-                        } else {
-                            limits.insert(provider.clone(), windows);
-                        }
-                        if provider.eq_ignore_ascii_case(ui.get_chat_provider().as_str()) {
-                            ui.set_usage_meters(usage_meters(limits[&provider].clone()));
-                        }
+                        let mut usage = self.usage.borrow_mut();
+                        usage.observe(&provider, windows);
+                        usage.display(&ui);
                     }
                 }
                 Update::Started(id, clear_draft) => {
@@ -1248,7 +1192,9 @@ impl App {
                 }
                 Update::Finished(result) => {
                     partial = Some(String::new());
-                    self.control.take();
+                    if self.control.take().is_some() && ui.get_chat_provider() == "Antigravity" {
+                        self.usage.borrow_mut().expire("antigravity");
+                    }
                     ui.set_busy(false);
                     ui.invoke_close_delivery();
                     ui.set_notice(
@@ -1260,11 +1206,6 @@ impl App {
                     );
                     self.render()?;
                     self.open_notification()?;
-                    if ui.get_chat_provider() == "Antigravity"
-                        && let Some(store) = self.store.borrow().as_ref()
-                    {
-                        self.load_antigravity_usage(store.project.clone());
-                    }
                 }
             }
         }
@@ -1564,7 +1505,7 @@ fn main() -> Result<()> {
         settings_generation: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
-        account_limits: Default::default(),
+        usage: Default::default(),
         catalog: Default::default(),
         ui: ui.as_weak(),
         store: Default::default(),
@@ -1680,6 +1621,12 @@ fn main() -> Result<()> {
     ui.on_change_policy(move |field, value| {
         if let Err(e) = a.change_policy(&field, &value) {
             a.ui.unwrap().set_notice(format!("{e:#}").into());
+        }
+    });
+    let a = app.clone();
+    ui.on_refresh_usage(move || {
+        if let Some(store) = a.store.borrow().as_ref() {
+            a.refresh_usage(&a.ui.unwrap(), &store.project);
         }
     });
     let a = app.clone();

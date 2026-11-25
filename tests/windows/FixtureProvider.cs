@@ -101,6 +101,11 @@ class FixtureProvider {
             var frame = Json.Deserialize<Dictionary<string,object>>(line);
             switch ((string)frame["type"]) {
                 case "control_request":
+                    if (Convert.ToString(frame["request_id"]) == "workshop-usage") {
+                        Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {
+                            rate_limits_available=true,rate_limits=new {five_hour=new {utilization=25},seven_day=new {utilization=48}}}}});
+                        break;
+                    }
                     if (Convert.ToString(frame["request_id"]) == "workshop-steer" && Mode("delivery-mode")) {
                         Send(new {type="result",subtype="error_during_execution",is_error=true,terminal_reason="aborted_by_interrupt"});
                         break;
@@ -117,6 +122,7 @@ class FixtureProvider {
                     var msg=(Dictionary<string,object>)frame["message"];
                     var blocks=(System.Collections.ArrayList)msg["content"];
                     var first=(Dictionary<string,object>)blocks[0];
+                    if (((string)first["text"]).Contains("Usage fixture greeting")) { Done("Hello."); break; }
                     if (Delivery((string)first["text"])) break;
                     if (worker) { Worker((string)first["text"]); break; }
                     var tasks = new[]{Assignment("left"),Assignment("right")};
@@ -137,7 +143,10 @@ class FixtureProvider {
             return;
         }
         if (args.Length == 4 && args[0] == "-p" && args[1] == "/usage") {
-            Send(new { command=new {data=new {groups=new object[0]}} }); return;
+            Send(new { command=new {data=new {groups=new[] {new {buckets=new[] {
+                new {id="gemini-5h",window="5h",remaining_fraction=0.67},
+                new {id="gemini-weekly",window="weekly",remaining_fraction=0.42}
+            }}}}} }); return;
         }
         if (args.Length == 4 && args[0] == "-p" && args[1] == "/model") {
             Send(new { command=new {data=new {id="gemini-test-high"}} }); return;
@@ -200,6 +209,8 @@ class FixtureProvider {
             var id=msg["id"];
             if(method=="initialize") Send(new {id=id,result=new {}});
             if(method=="config/read") Send(new {id=id,result=new {config=new {model="fixture-fast",model_reasoning_effort="low"}}});
+            if(method=="account/rateLimits/read") Send(new {id=id,result=new {rateLimits=new {limitId="codex",
+                primary=new {windowDurationMins=300,usedPercent=12},secondary=new {windowDurationMins=10080,usedPercent=69}}}});
             if(method=="model/list"){
                 if (Mode("catalog.hold")) {
                     File.WriteAllText(Path.Combine(Dir, "catalog.ready"), "ready");

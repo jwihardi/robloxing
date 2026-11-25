@@ -45,12 +45,12 @@ component RemainingValue inherits Text {
     color: fraction < 0 ? Theme.muted : fraction < 0.5
         ? Theme.halfway.mix(Theme.scarce, fraction * 2)
         : Theme.ample.mix(Theme.halfway, (fraction - 0.5) * 2);
-    vertical-alignment: center; font-size: 13px; font-family: Theme.mono;
+    vertical-alignment: center; horizontal-alignment: right; font-size: 13px; font-weight: 600;
 }
 
 component InlineReading inherits HorizontalLayout {
     in property <MeterData> reading;
-    spacing: 4px;
+    spacing: 4px; alignment: start; horizontal-stretch: 0;
     Text { text: root.reading.label; color: Theme.muted; vertical-alignment: center; font-size: 13px; }
     RemainingValue { fraction: root.reading.remaining; }
 }
@@ -58,14 +58,18 @@ component InlineReading inherits HorizontalLayout {
 component UsageSummary inherits Action {
     in property <MeterData> context;
     in property <[MeterData]> windows;
+    in property <bool> loading;
     label: "Context and usage"; icon-only: true;
-    width: line.preferred-width; height: 30px;
+    width: line.preferred-width;
     callback open();
     activate => { root.open(); }
     line := HorizontalLayout {
-        padding-left: 8px; padding-right: 8px; spacing: 10px; alignment: center;
-        InlineReading { reading: root.context; }
-        for window in root.windows: InlineReading { reading: window; }
+        height: root.height; padding-left: 8px; padding-right: 8px; spacing: 12px; alignment: start;
+        InlineReading { height: root.height; reading: root.context; }
+        for window in root.windows: InlineReading { height: root.height; reading: window; }
+        if root.windows.length == 0: Text {
+            text: root.loading ? "Usage …" : "Usage —"; color: Theme.muted; vertical-alignment: center; font-size: 13px;
+        }
     }
 
 }
@@ -483,6 +487,8 @@ export component Desk inherits Window {
     in property <[ChatTurn]> turns;
     in property <MeterData> context-meter;
     in property <[MeterData]> usage-meters;
+    in property <bool> usage-loading;
+    callback refresh-usage();
     in property <[WorkerRow]> workers;
     in property <PickerData> chat-choices;
     in-out property <bool> editing-chat-policy;
@@ -664,23 +670,23 @@ export component Desk inherits Window {
         x: rail.width; width: root.width - self.x; height: root.height;
         private property <length> measure: min(760px, self.width - (self.width < 610px ? 32px : 72px));
         Rectangle { y:55px; width:parent.width; height:1px; background: Theme.line; visible:root.project!=""; }
-        HorizontalLayout {
+        toolbar := HorizontalLayout {
             visible: root.project != ""; x: 24px; y: 10px; width: parent.width - 48px; height: 40px; spacing: 14px;
             Text { text: root.selection >= 0 ? root.rows[root.selection] : "New conversation";
                 color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; min-width: 0px; horizontal-stretch: 1; vertical-alignment: center; }
             if !root.writable && root.model-name != "" && pane.width > 720px: Text { text: root.model-name; color: Theme.muted;
                 font-size: 13px; vertical-alignment: center; }
-            usage-button := UsageSummary { context: root.context-meter; windows: root.usage-meters;
-                open => { root.show-panel(OpenPanel.usage, self.absolute-position.x, self.absolute-position.y, self.width, self.height); } }
-            activity-button := Action { visible:!root.home; label:"Activity"; glyph:"\u{e9d9}"; glyph-color: Theme.keyword; icon-only:pane.width < 720px;
+            usage-button := UsageSummary { height: toolbar.height; context: root.context-meter; windows: root.usage-meters; loading: root.usage-loading;
+                open => { root.refresh-usage(); root.show-panel(OpenPanel.usage, self.absolute-position.x, self.absolute-position.y, self.width, self.height); } }
+            activity-button := Action { height: toolbar.height; visible:!root.home; label:"Activity"; glyph:"\u{e9d9}"; glyph-color: Theme.keyword; icon-only:pane.width < 720px;
                 width: !self.visible ? 0px : self.icon-only ? 34px : 96px; selected:root.open-panel == OpenPanel.activity;
                 activate=>{if root.open-panel == OpenPanel.activity {root.dismiss-panel();} else {root.show-panel(OpenPanel.activity,self.absolute-position.x,self.absolute-position.y,self.width,self.height);}} }
             options := Action {
-                visible: !root.home && !root.busy; width: self.visible ? 36px : 0px; label: "Chat options"; glyph: "\u{e712}"; icon-only: true;
+                height: toolbar.height; visible: !root.home && !root.busy; width: self.visible ? 36px : 0px; label: "Chat options"; glyph: "\u{e712}"; icon-only: true;
                 activate => {root.show-panel(OpenPanel.options, self.absolute-position.x, self.absolute-position.y, self.width, self.height);}
             }
             outputs-button := Action {
-                label: "Outputs"; glyph: "\u{e8b9}"; glyph-color: Theme.symbol; icon-only: pane.width < 600px;
+                height: toolbar.height; label: "Outputs"; glyph: "\u{e8b9}"; glyph-color: Theme.symbol; icon-only: pane.width < 600px;
                 width: self.icon-only ? 36px : 108px; selected: root.open-panel == OpenPanel.outputs;
                 activate => {if root.open-panel == OpenPanel.outputs { root.dismiss-panel(); } else { root.show-outputs(); }}
             }
@@ -1130,22 +1136,22 @@ export component Desk inherits Window {
         }
     }
     if root.open-panel == OpenPanel.usage: Flyout {
-        x: root.anchor-right - self.width; y: root.anchor-bottom + 4px;
+        x: clamp(root.anchor-right - self.width, 8px, root.width - self.width - 8px); y: root.anchor-bottom + 4px;
         width: 236px; height: usage-rows.preferred-height; escape => {root.dismiss-panel();} init => {self.focus();}
         Rectangle { background: Theme.popup; border-radius: 15px; border-width: 1px; border-color: Theme.line; }
         usage-rows := VerticalLayout {
             padding: 14px; spacing: 9px;
-            HorizontalLayout {
-                Text { text: "Context window"; color: Theme.text; font-size: 14px; horizontal-stretch: 1; }
-                RemainingValue { fraction: root.context-meter.remaining; }
+            HorizontalLayout { height: 22px;
+                Text { text: "Context window"; color: Theme.text; font-size: 14px; horizontal-stretch: 1; vertical-alignment: center; }
+                RemainingValue { fraction: root.context-meter.remaining; width: 45px; font-size: 14px; }
             }
             Text { text: root.context-meter.detail; color: Theme.muted; font-size: 12px; }
             Rectangle { height: 1px; background: Theme.line; }
-            for window in root.usage-meters: HorizontalLayout {
-                Text { text: window.detail; color: Theme.text; font-size: 14px; horizontal-stretch: 1; }
-                RemainingValue { fraction: window.remaining; }
+            for window in root.usage-meters: HorizontalLayout { height: 22px;
+                Text { text: window.detail; color: Theme.text; font-size: 14px; horizontal-stretch: 1; vertical-alignment: center; }
+                RemainingValue { fraction: window.remaining; width: 45px; font-size: 14px; }
             }
-            if root.usage-meters.length == 0: Text { text: "Account limits unavailable"; color: Theme.muted; font-size: 13px; }
+            if root.usage-meters.length == 0: Text { text: root.usage-loading ? "Checking account limits…" : "Account limits unavailable"; color: Theme.muted; font-size: 13px; }
         }
     }
     if root.open-panel == OpenPanel.options: Flyout {

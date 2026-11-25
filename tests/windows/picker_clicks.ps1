@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -8,6 +8,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
     if ($DeliveryOnly) { $parameters.DeliveryOnly = $true }
     if ($TranscriptOnly) { $parameters.TranscriptOnly = $true }
+    if ($UsageOnly) { $parameters.UsageOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
     return
 }
@@ -550,14 +551,53 @@ try {
     if (!$headless.WaitForExit(10000)) { $headless.Kill(); throw 'Automation mode opened the desktop app' }
     if ($headless.ExitCode -ne 0) { throw $headless.StandardError.ReadToEnd() }
 } finally { $headless.Dispose() }
+if ($UsageOnly) { [void](New-Item -ItemType File -Path (Join-Path $root 'catalog.hold')) }
 $proc = [TestDesktop]::StartApp($fixtureApp, $project)
 try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
+    if ($UsageOnly) {
+        Wait-For { (Named '100%') -and (Named '88%') -and (Named '31%') } 'empty-chat context and account usage before model discovery finishes'
+        Remove-Item -LiteralPath (Join-Path $root 'catalog.hold')
+    }
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
     $rail = (Named 'Game studio').Current.BoundingRectangle
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($UsageOnly) {
+        $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+        foreach ($width in @(1060,800)) {
+            [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]($width*$scale),[int](680*$scale),0x16)
+            Wait-For { $l = Named '7d'; $v = Named '31%'; $l -and $v -and $v.Current.BoundingRectangle.X -ge $l.Current.BoundingRectangle.Right } 'account readings in the header'
+            foreach ($pair in @(@('Context','100%'),@('5h','88%'),@('7d','31%'))) {
+                $label = (Named $pair[0]).Current.BoundingRectangle
+                $value = (Named $pair[1]).Current.BoundingRectangle
+                $gap = ($value.Left - $label.Right) / $scale
+                if ($gap -lt -1 -or $gap -gt 7 -or [math]::Abs(($value.Top+$value.Height/2) - ($label.Top+$label.Height/2)) -gt $scale) {
+                    throw "Misaligned $($pair[0]) and $($pair[1]) at width $width"
+                }
+            }
+            Click 'Context and usage'
+            Wait-For { (Named '0 tokens used') -and (Named '5-hour limit') -and (Named 'Weekly limit') } 'new-chat quota details'
+            Save-PrivateWindow (Join-Path $root "usage-$width.png")
+            [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+            [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+            Wait-For { !(Named 'Context window') } 'closed usage details'
+        }
+        Click 'Chat model and effort'
+        Click 'Chat model'
+        Click 'Claude Sonnet 5.5'
+        Wait-For { (Named '100%') -and (Named '75%') -and (Named '52%') -and !(Named '88%') } 'Claude quota before sending a message'
+        [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+        [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+        (Named 'Message Claude').GetCurrentPattern($valuePattern).SetValue('Usage fixture greeting')
+        Click 'Send message'
+        Wait-For { (Named 'New chat').Current.IsEnabled -and (Named '73%') } 'context after a Claude turn'
+        Click 'New chat'
+        Wait-For { (Named '100%') -and (Named '75%') -and (Named '52%') } 'fresh context with the same account usage'
+        "Header alignment and new-chat usage passed. Screenshots in $root"
+        return
+    }
     if ($DeliveryOnly) { Test-Delivery; return }
     if ($TranscriptOnly) {
         Save-PrivateWindow (Join-Path $root 'welcome.png')
@@ -632,6 +672,7 @@ try {
     Wait-For { Named 'Gemini Fixture' } 'last model visible'
     Click 'Gemini Test (Antigravity)'
     Wait-For { (Named 'Message Antigravity') -and (Named 'Chat reasoning effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Maximum -eq 1 } 'Antigravity model and effort'
+    Wait-For { (Named '100%') -and (Named '67%') -and (Named '42%') -and !(Named '88%') } 'Google quota on a new chat'
     Click 'Chat reasoning effort' 0.05
     Wait-For { (Named 'Chat reasoning effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Value -eq 0 } 'Antigravity low effort'
     Click 'Chat model'
