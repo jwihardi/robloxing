@@ -805,7 +805,10 @@ impl App {
         ui.set_outputs(Self::screenshot_items(
             store.chat_screenshots(selected.map(|i| rows[i].id))?,
         ));
-        ui.set_running(false);
+        // Keep the live Stop control mounted when an activity update refreshes this chat.
+        ui.set_running(
+            selected.is_some_and(|i| rows[i].state == "running") && self.control.borrow().is_some(),
+        );
         if selected.is_none() {
             self.turns.set_vec(self.preceding_shots(store, None)?);
             ui.set_context_meter(context_meter(ContextUsage::default(), true));
@@ -816,7 +819,6 @@ impl App {
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
             ui.set_model_name(a.model.as_str().into());
-            ui.set_running(a.state == "running" && self.control.borrow().is_some());
             let done = matches!(
                 a.state.as_str(),
                 "review" | "failed" | "interrupted" | "cancelled"
