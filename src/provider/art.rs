@@ -16,6 +16,13 @@ async fn art_turn(
     item_type: &str,
     inference: &(String, String),
 ) -> Result<Value> {
+    if super::provider_for(&inference.0) == "gemini" {
+        ensure!(
+            item_type != "imageGeneration",
+            "Choose a Codex model for native image generation."
+        );
+        return super::gemini::studio(dir, instructions, prompt, schema, inference).await;
+    }
     if super::provider_for(&inference.0) == "claude" {
         ensure!(
             item_type != "imageGeneration",

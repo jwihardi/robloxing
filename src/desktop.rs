@@ -150,7 +150,16 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
 }
 
 fn model_label(id: &str) -> String {
-    if let Some(name) = id.strip_prefix("claude:") {
+    if let Some(name) = id.strip_prefix("gemini:") {
+        format!(
+            "Gemini {}",
+            name.trim_start_matches("gemini-")
+                .split('-')
+                .map(capitalized)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    } else if let Some(name) = id.strip_prefix("claude:") {
         let name = name.strip_prefix("claude-").unwrap_or(name);
         format!(
             "Claude {}",
@@ -712,6 +721,7 @@ impl App {
         }
         let p = preferences::Provider::from_label(&ui.get_settings_provider());
         let section = ui.get_plugin_section();
+        let store = self.store.borrow().clone();
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         self.settings_read.replace(Some(cancel));
         ui.set_settings_status(if message.is_empty() {
@@ -728,7 +738,7 @@ impl App {
                 .and_then(|rt| {
                     rt.block_on(async {
                         tokio::select! {
-                            rows = preferences::list(&tab, p, section) => rows,
+                            rows = preferences::list(&tab, p, section, store.as_deref()) => rows,
                             _ = cancelled => Ok(Vec::new()),
                         }
                     })
@@ -737,6 +747,7 @@ impl App {
         });
     }
     fn preference_action(&self, action: String, mut arg: String) {
+        let store = self.store.borrow().clone();
         let ui = self.ui.unwrap();
         if ui.get_settings_working() {
             return;
@@ -772,7 +783,15 @@ impl App {
                 .enable_all()
                 .build()
                 .map_err(anyhow::Error::from)
-                .and_then(|rt| rt.block_on(preferences::change(&tab, p, &action, &arg)));
+                .and_then(|rt| {
+                    rt.block_on(preferences::change(
+                        &tab,
+                        p,
+                        &action,
+                        &arg,
+                        store.as_deref(),
+                    ))
+                });
             let _ = tx.send(Update::PreferenceChanged(result, tab == "Providers"));
         });
     }
@@ -1464,6 +1483,9 @@ impl App {
     }
 }
 fn main() -> Result<()> {
+    if workshop::provider::gemini::is_bridge_process() {
+        return workshop::provider::gemini::serve_stdio();
+    }
     let mut args = std::env::args_os().skip(1);
     let project = args.next();
     if project.as_deref() == Some(std::ffi::OsStr::new("--headless")) {

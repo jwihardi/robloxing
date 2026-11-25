@@ -77,41 +77,37 @@ async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
     Ok((io, catalog))
 }
 
-async fn both_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
-    let (codex, claude) = tokio::join!(
+async fn all_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
+    let (codex, claude, gemini) = tokio::join!(
         catalog_connection(project),
-        tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))
+        tokio::time::timeout(Duration::from_secs(8), super::claude::models(project)),
+        super::gemini::models(project),
     );
     let claude = claude
         .context("Claude model discovery timed out")
         .and_then(|r| r);
-    match (codex, claude) {
-        (Ok((io, mut catalog)), additional) => {
-            if let Ok(models) = additional {
-                catalog.models.extend(models);
-            }
-            Ok((Some(io), catalog))
-        }
-        (Err(_), Ok(models)) if !models.is_empty() => Ok((
-            None,
-            Catalog {
-                models,
-                ..Default::default()
-            },
-        )),
-        (Err(error), other) => anyhow::bail!(
-            "Model discovery failed. Codex: {error:#}. Claude: {}",
-            other
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "No models returned".into())
+    let (io, mut catalog) = match codex {
+        Ok((io, catalog)) => (Some(io), catalog),
+        Err(e) if claude.is_err() && gemini.is_err() => anyhow::bail!(
+            "Model discovery failed. Codex: {e:#}. Claude: {}. Gemini: {}",
+            claude.err().unwrap(),
+            gemini.err().unwrap()
         ),
+        Err(_) => (None, Catalog::default()),
+    };
+    if let Ok(models) = claude {
+        catalog.models.extend(models);
     }
+    if let Ok(other) = gemini {
+        catalog.models.extend(other.models);
+    }
+    Ok((io, catalog))
 }
 
 pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result<Catalog> {
     match only {
         Some("codex") => Ok(catalog_connection(project).await?.1),
+        Some("gemini") => super::gemini::models(project).await,
         Some("claude") => Ok(Catalog {
             models: tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))
                 .await
@@ -119,7 +115,7 @@ pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result
             default_model: "claude:default".into(),
             default_effort: String::new(),
         }),
-        _ => Ok(both_providers(project).await?.1),
+        _ => Ok(all_providers(project).await?.1),
     }
 }
 
@@ -127,7 +123,7 @@ pub fn model_catalog(project: &Path) -> Result<Catalog> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(both_providers(project))
+        .block_on(all_providers(project))
         .map(|(_, catalog)| catalog)
 }
 
@@ -139,7 +135,7 @@ pub fn load_models_and_usage(
         .enable_all()
         .build()?
         .block_on(async {
-            let (io, catalog) = both_providers(project).await?;
+            let (io, catalog) = all_providers(project).await?;
             loaded(catalog);
             let Some(mut io) = io else {
                 return Ok(None);

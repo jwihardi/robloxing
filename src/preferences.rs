@@ -124,16 +124,80 @@ async fn account(p: Provider) -> Row {
     }
 }
 
-pub async fn list(tab: &str, p: Provider, section: PluginSection) -> Result<Vec<Row>> {
+pub async fn list(
+    tab: &str,
+    p: Provider,
+    section: PluginSection,
+    project: Option<&workshop::Store>,
+) -> Result<Vec<Row>> {
     match tab {
         "Providers" => {
             let (codex, claude) = tokio::join!(account(Provider::Codex), account(Provider::Claude));
-            Ok(vec![codex, claude])
+            let mut rows = vec![codex, claude, gemini_account()];
+            if let Some(store) = project
+                && workshop::provider::gemini::installed()
+            {
+                let trusted = store.gemini_project_trusted();
+                let (detail, action, button) = if trusted {
+                    (
+                        "Gemini can use this project’s configuration and worker tools.",
+                        "reset-trust",
+                        "Reset trust",
+                    )
+                } else {
+                    (
+                        "Trust this project’s Gemini configuration to enable tools and workers in its copies.",
+                        "trust",
+                        "Trust project",
+                    )
+                };
+                rows.push(Row {
+                    id: "gemini-project".into(),
+                    label: "Gemini project tools".into(),
+                    detail: detail.into(),
+                    action,
+                    button,
+                });
+            }
+            Ok(rows)
         }
         "Plugins" if section == PluginSection::Recommended => recommended::list(p).await,
         "Plugins" => plugins(p, section == PluginSection::Marketplace).await,
         "Skills" => skills(p),
         _ => bail!("Unknown settings page"),
+    }
+}
+
+fn gemini_account() -> Row {
+    let installed = workshop::provider::gemini::installed();
+    let settings = env::home_dir()
+        .and_then(|p| fs::read(p.join(".gemini/settings.json")).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let method = settings
+        .as_ref()
+        .and_then(|s| s.pointer("/security/auth/selectedType"))
+        .and_then(Value::as_str);
+    let key = env::var_os("GEMINI_API_KEY").is_some_and(|v| !v.is_empty());
+    let detail = match (installed, method, key) {
+        (false, _, _) => "Install @google/gemini-cli with npm, then refresh",
+        (true, Some("oauth-personal"), _) => "Google sign-in configured",
+        (true, Some("vertex-ai"), _) => "Vertex AI configured",
+        (true, Some("gemini-api-key"), _) | (true, None, true) => "Gemini API key configured",
+        (true, Some(_), _) => "Authentication configured in Gemini CLI",
+        _ => "Sign in with your Google account",
+    };
+    Row {
+        id: "Gemini CLI".into(),
+        label: "Gemini CLI".into(),
+        detail: detail.into(),
+        action: if installed { "login" } else { "" },
+        button: if !installed {
+            ""
+        } else if method == Some("oauth-personal") {
+            "Reconnect"
+        } else {
+            "Sign in"
+        },
     }
 }
 
@@ -374,9 +438,30 @@ async fn install_skill(p: Provider, source: &str) -> Result<()> {
     install_folder(&src, &roots[0])
 }
 
-pub async fn change(tab: &str, p: Provider, act: &str, arg: &str) -> Result<String> {
+pub async fn change(
+    tab: &str,
+    p: Provider,
+    act: &str,
+    arg: &str,
+    project: Option<&workshop::Store>,
+) -> Result<String> {
     let arg = arg.trim();
     if tab == "Providers" {
+        if arg == "gemini-project" {
+            ensure!(
+                matches!(act, "trust" | "reset-trust"),
+                "Unknown project trust action"
+            );
+            project
+                .context("Open a project first")?
+                .set_gemini_project_trusted(act == "trust")?;
+            return Ok("Updated Gemini project trust.".into());
+        }
+        if arg == "Gemini CLI" {
+            ensure!(act == "login", "Unknown Gemini account action");
+            workshop::provider::gemini::sign_in().await?;
+            return Ok("Connected to Gemini CLI.".into());
+        }
         let provider = Provider::from_label(arg);
         let mut cmd = command(provider.program());
         if provider == Provider::Claude {

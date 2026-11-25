@@ -954,7 +954,8 @@ export component Desk inherits Window {
                         VerticalLayout { alignment: center; width: root.recommendations ? 115px : 100px;
                             if root.recommendations && row.action == "": Text { text: row.button; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
                             if row.action != "": Action { label: root.confirm-id == row.id ? "Confirm" : row.button;
-                                accessible-label: root.recommendations ? row.button + " " + row.label : self.label;
+                                accessible-label: root.recommendations ? row.button + " " + row.label
+                                    : row.id == "Gemini CLI" ? row.button + " to Gemini" : self.label;
                                 accessible-description: row.button + " " + row.label; width: root.recommendations ? 112px : 98px; height: root.recommendations ? 36px : 32px; selected: true;
                                 enabled: !root.settings-working; activate => {
                                     if (row.action == "remove" || row.action == "logout") && root.confirm-id != row.id {root.confirm-id = row.id;}

@@ -529,9 +529,10 @@ impl Store {
         let mut assignment = w.assignment.clone();
         if assignment.model.is_empty()
             && policy.models.is_empty()
-            && self.attempt(lead)?.provider == "claude"
+            && let source = self.attempt(lead)?.provider
+            && source != "codex"
         {
-            assignment.model = "claude:default".into();
+            assignment.model = format!("{source}:default");
         }
         let mut directions = String::new();
         let mut files = std::collections::BTreeSet::new();

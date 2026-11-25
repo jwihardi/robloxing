@@ -22,9 +22,14 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Open,
+    /// Trust this project's Gemini configuration in Workshop copies, or restore the CLI's default trust.
+    GeminiTrust {
+        #[arg(action=clap::ArgAction::Set)]
+        enabled: bool,
+    },
     /// List the installed provider's model IDs and supported effort levels.
     Models {
-        #[arg(long,value_parser=["claude","codex"])]
+        #[arg(long,value_parser=["claude","codex","gemini"])]
         provider: Option<String>,
     },
     /// Create game assets or inspect a local binary.
@@ -57,8 +62,8 @@ enum Action {
     },
     /// Stream provider JSON. Type /cancel or a steering message on stdin.
     Run {
-        /// Choose codex or claude. Claude defaults to the configured Claude Code model.
-        #[arg(long,value_parser=["codex","claude"])]
+        /// Use the selected CLI and its configured model unless --model is supplied.
+        #[arg(long,value_parser=["codex","claude","gemini"])]
         provider: Option<String>,
         prompt: String,
         #[arg(long, default_value = "")]
@@ -344,6 +349,10 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
         Action::Studio { .. } | Action::Models { .. } => unreachable!(),
+        Action::GeminiTrust { enabled } => {
+            store.set_gemini_project_trusted(enabled)?;
+            println!("Gemini project trust override: {enabled}");
+        }
         Action::Agents { id } => {
             println!("{}", serde_json::to_string_pretty(&store.workers(id)?)?);
             println!("{}", store.handoff(id)?);
@@ -398,14 +407,19 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             provider,
         } => {
             let model = match provider.as_deref() {
-                Some("claude") if model.is_empty() => "claude:default".into(),
-                Some("claude") if !model.starts_with("claude:") => format!("claude:{model}"),
-                Some("codex") if model.starts_with("claude:") => {
-                    anyhow::bail!("Choose a Codex model for --provider codex")
+                Some(source) if model.contains(':') && provider::provider_for(&model) != source => {
+                    anyhow::bail!("Choose a {source} model for --provider {source}")
+                }
+                Some(source @ ("claude" | "gemini")) if model.is_empty() => {
+                    format!("{source}:default")
+                }
+                Some(source @ ("claude" | "gemini")) if !model.contains(':') => {
+                    format!("{source}:{model}")
                 }
                 Some("codex")
                     if model.is_empty()
-                        && store.team_settings()?.lead_model.starts_with("claude:") =>
+                        && provider::provider_for(&store.team_settings()?.lead_model)
+                            != "codex" =>
                 {
                     let a = store.prepare_inference(&prompt, "", "", None, None, &[])?;
                     return run(&store, a, prompt.as_str().into());

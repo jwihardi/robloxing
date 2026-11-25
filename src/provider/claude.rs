@@ -27,7 +27,8 @@ fn spawn(cwd: &Path, args: &[&str], stderr: File) -> Result<Connection> {
         cwd: cwd.to_owned(),
         session: String::new(),
         used_tools: false,
-        claude_inference: None,
+        pinned_inference: None,
+        gemini_bridge: None,
     })
 }
 
@@ -52,7 +53,7 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
         args.extend(["--resume", &a.session]);
     }
     let mut io = spawn(&store.work(a.id), &args, stderr)?;
-    io.claude_inference = Some((a.model.clone(), a.effort.clone()));
+    io.pinned_inference = Some((a.model.clone(), a.effort.clone()));
     Ok(io)
 }
 

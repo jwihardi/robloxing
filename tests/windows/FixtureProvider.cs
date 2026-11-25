@@ -126,6 +126,10 @@ class FixtureProvider {
         }
     }
     static void Main(string[] args) {
+        if (args.Length == 3 && args[0] == "models" && args[1] == "-o" && args[2] == "json") {
+            Send(new[] {new {modelId="gemini-fixture"}});
+            return;
+        }
         if (Environment.GetEnvironmentVariable("GIT_DIR") != null && Mode("check-git-context"))
             throw new InvalidDataException("Provider or check inherited the caller's repository");
         if(args.Length>0 && args[0]=="-p") { Claude(args); return; }

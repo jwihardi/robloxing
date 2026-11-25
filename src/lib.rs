@@ -511,7 +511,7 @@ impl Store {
         };
         match git::isolate(&self.project, &self.work(id), &head) {
             Ok(base) => {
-                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action=CASE provider WHEN 'claude' THEN 'Connecting to Claude' ELSE 'Connecting to Codex' END WHERE id=?1",params![id,base])?;
+                self.db.lock().unwrap().execute("UPDATE attempts SET base=?2,state='running',action=CASE provider WHEN 'claude' THEN 'Connecting to Claude' WHEN 'gemini' THEN 'Connecting to Gemini' ELSE 'Connecting to Codex' END WHERE id=?1",params![id,base])?;
             }
             Err(e) => {
                 self.status(id, "failed", &format!("{e:#}"))?;

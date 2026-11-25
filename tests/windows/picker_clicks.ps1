@@ -66,6 +66,7 @@ $env:WORKSHOP_PROBE_DIR = $root
 $env:WORKSHOP_TEST_NOTICE_DIR = (New-Item -ItemType Directory -Path (Join-Path $root 'notifications')).FullName
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
 $env:WORKSHOP_CLAUDE = $env:WORKSHOP_CODEX
+$env:WORKSHOP_GEMINI = $env:WORKSHOP_CODEX
 $env:CODEX_HOME = Join-Path $root 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $root 'claude'
 # Route only this public skill URL to a temporary fixture. The normal Git installer runs offline.
@@ -81,7 +82,8 @@ $idx = [int]$env:GIT_CONFIG_COUNT
 [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$idx", "url.$(([uri]$upstream).AbsoluteUri).insteadOf")
 [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$idx", 'https://github.com/gokayfem/image-to-sculpt.git')
 $env:GIT_CONFIG_COUNT = $idx + 1
-& "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /r:System.Web.Extensions.dll "/out:$env:WORKSHOP_CODEX" (Join-Path $PSScriptRoot 'FixtureProvider.cs')
+# Simulated interactive sign-in must never allocate a terminal on the user's desktop.
+& "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe /r:System.Web.Extensions.dll "/out:$env:WORKSHOP_CODEX" (Join-Path $PSScriptRoot 'FixtureProvider.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 
 function Named($name) {
@@ -640,6 +642,11 @@ try {
     Wait-For { (Named 'Workshop Dark') -and !(Named 'Sea glass') -and !(Named 'Edit theme') } 'removed theme and restored default'
     Click 'Providers'
     Wait-For { Named 'Sign in' } 'back to provider accounts'
+    Wait-For { Named 'Gemini CLI' } 'Gemini provider row'
+    Click 'Trust project'
+    Wait-For { Named 'Reset trust' } 'Gemini project tools enabled'
+    Click 'Reset trust'
+    Wait-For { Named 'Trust project' } 'Gemini project trust reset'
     Click 'Sign in'
     Wait-For { Named 'Sign out' } 'provider login result'
     Click 'Sign out'
