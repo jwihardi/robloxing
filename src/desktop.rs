@@ -43,6 +43,7 @@ enum Update {
     Models(PathBuf, Result<provider::Catalog>),
     Context(i64, ContextUsage),
     AccountUsage(PathBuf, String, Vec<UsageWindow>),
+    AntigravityUsage(PathBuf, std::collections::HashMap<String, Vec<UsageWindow>>),
     Started(i64, bool),
     Delta(String),
     ReplyStored,
@@ -151,7 +152,12 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
 }
 
 fn model_label(catalog: &provider::Catalog, id: &str) -> String {
-    if let Some(name) = id.strip_prefix("gemini:") {
+    if let Some(name) = id.strip_prefix("antigravity:") {
+        catalog
+            .display_name(id)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{name} (Antigravity)"))
+    } else if let Some(name) = id.strip_prefix("gemini:") {
         format!(
             "Gemini {}",
             name.trim_start_matches("gemini-")
@@ -567,10 +573,26 @@ impl App {
     fn show_provider(&self, ui: &Desk, model: &str) {
         let provider = provider::provider_for(model);
         ui.set_chat_provider(capitalized(provider).into());
+        let resolved = (model == "antigravity:default")
+            .then(|| {
+                self.catalog
+                    .borrow()
+                    .models
+                    .iter()
+                    .find(|m| m.model == model)
+                    .and_then(|m| m.resolved_model.as_ref())
+                    .map(|id| format!("antigravity:{id}"))
+            })
+            .flatten();
+        let key = if provider == "antigravity" {
+            provider::antigravity::usage_key(resolved.as_deref().unwrap_or(model))
+        } else {
+            provider
+        };
         ui.set_usage_meters(usage_meters(
             self.account_limits
                 .borrow()
-                .get(provider)
+                .get(key)
                 .cloned()
                 .unwrap_or_default(),
         ));
@@ -645,7 +667,25 @@ impl App {
         self.session.take();
         self.render_worker_policy(store, &self.catalog.borrow())
     }
+    fn load_antigravity_usage(&self, project: PathBuf) {
+        if provider::antigravity::program().is_err() {
+            return;
+        }
+        let updates = self.updates.clone();
+        std::thread::spawn(move || {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let limits = rt
+                    .block_on(provider::antigravity::account_limits())
+                    .unwrap_or_default();
+                let _ = updates.send(Update::AntigravityUsage(project, limits));
+            }
+        });
+    }
     fn load_models(&self, project: PathBuf) {
+        self.load_antigravity_usage(project.clone());
         let ui = self.ui.unwrap();
         ui.set_catalog_status("Loading models…".into());
         let updates = self.updates.clone();
@@ -1136,6 +1176,20 @@ impl App {
                         ui.set_context_meter(context_meter(context, false));
                     }
                 }
+                Update::AntigravityUsage(project, groups) => {
+                    if let Some(store) = self
+                        .store
+                        .borrow()
+                        .as_ref()
+                        .filter(|s| s.project == project)
+                    {
+                        let mut limits = self.account_limits.borrow_mut();
+                        limits.retain(|k, _| !k.starts_with("antigravity:"));
+                        limits.extend(groups);
+                        drop(limits);
+                        self.render_settings(store)?;
+                    }
+                }
                 Update::AccountUsage(project, provider, windows) => {
                     if self
                         .store
@@ -1206,6 +1260,11 @@ impl App {
                     );
                     self.render()?;
                     self.open_notification()?;
+                    if ui.get_chat_provider() == "Antigravity"
+                        && let Some(store) = self.store.borrow().as_ref()
+                    {
+                        self.load_antigravity_usage(store.project.clone());
+                    }
                 }
             }
         }

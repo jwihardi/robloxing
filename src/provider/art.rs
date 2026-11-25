@@ -16,17 +16,27 @@ async fn art_turn(
     item_type: &str,
     inference: &(String, String),
 ) -> Result<Value> {
+    if super::provider_for(&inference.0) == "antigravity" {
+        return super::antigravity::studio(
+            instructions,
+            prompt,
+            schema,
+            inference,
+            item_type == "imageGeneration",
+        )
+        .await;
+    }
     if super::provider_for(&inference.0) == "gemini" {
         ensure!(
             item_type != "imageGeneration",
-            "Choose a Codex model for native image generation."
+            "Choose a Codex or Antigravity model for native image generation."
         );
         return super::gemini::studio(dir, instructions, prompt, schema, inference).await;
     }
     if super::provider_for(&inference.0) == "claude" {
         ensure!(
             item_type != "imageGeneration",
-            "Claude Code does not provide native image generation. Choose a Codex image model."
+            "Claude Code does not provide native image generation. Choose a Codex or Antigravity model."
         );
         return super::claude::studio(dir, instructions, prompt, schema, inference).await;
     }

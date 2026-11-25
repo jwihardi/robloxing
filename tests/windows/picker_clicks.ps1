@@ -70,6 +70,7 @@ $env:WORKSHOP_TEST_NOTICE_DIR = (New-Item -ItemType Directory -Path (Join-Path $
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
 $env:WORKSHOP_CLAUDE = $env:WORKSHOP_CODEX
 $env:WORKSHOP_GEMINI = $env:WORKSHOP_CODEX
+$env:WORKSHOP_ANTIGRAVITY = $env:WORKSHOP_CODEX
 $env:CODEX_HOME = Join-Path $root 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $root 'claude'
 # Route only this public skill URL to a temporary fixture. The normal Git installer runs offline.
@@ -626,6 +627,14 @@ try {
     Wait-For { Named 'Select model' } 'model menu'
     Wait-For { (Named 'Claude Default · Sonnet 5.5') -and (Named 'Claude Sonnet 5.5') -and (Named 'Claude Haiku 4.5') } 'resolved Claude models'
     Save-PrivateWindow (Join-Path $root 'claude-models.png')
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,0x23,1) # End scrolls the menu to the Google providers.
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,0x23,1)
+    Wait-For { Named 'Gemini Fixture' } 'last model visible'
+    Click 'Gemini Test (Antigravity)'
+    Wait-For { (Named 'Message Antigravity') -and (Named 'Chat reasoning effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Maximum -eq 1 } 'Antigravity model and effort'
+    Click 'Chat reasoning effort' 0.05
+    Wait-For { (Named 'Chat reasoning effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Value -eq 0 } 'Antigravity low effort'
+    Click 'Chat model'
     Click 'Claude Sonnet 5.5'
     Wait-For { Named 'Message Claude' } 'Claude composer'
     Click 'Chat model'
@@ -699,11 +708,11 @@ try {
     Click 'Reset trust'
     Wait-For { Named 'Trust project' } 'Gemini project trust reset'
     Click 'Sign in'
-    Wait-For { Named 'Sign out' } 'provider login result'
+    Wait-For { (Named 'Sign-in finished.') -and (Named 'Signed in') -and (Named 'Sign out') } 'Codex provider login result'
     Click 'Sign out'
     Wait-For { Named 'Confirm' } 'sign-out confirmation'
     Click 'Confirm'
-    Wait-For { (Named 'Signed out.') -and !(Named 'Sign out') } 'provider logout result'
+    Wait-For { (Named 'Signed out.') -and !(Test-Path (Join-Path $root 'codex.session')) } 'provider logout result'
     Click 'Plugins'
     Test-Recommendations
     Click 'Installed plugins'

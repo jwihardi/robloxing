@@ -904,7 +904,7 @@ export component Desk inherits Window {
             }
             Rectangle { height: 1px; background: Theme.line; }
             if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 36px; spacing: 4px;
-                for provider in ["Codex", "Claude Code"]: Action { label: provider; width: provider == "Codex" ? 70px : 109px;
+                for provider in ["Codex", "Claude Code", "Antigravity"]: Action { label: provider; width: provider == "Codex" ? 70px : 109px;
                     selected: provider == root.settings-provider; enabled: !root.settings-working;
                     activate => {root.visit-settings(root.settings-tab,provider);} }
                 Rectangle { horizontal-stretch: 1; }
@@ -923,10 +923,10 @@ export component Desk inherits Window {
             if root.settings-tab == "Providers": Text { text: "Sign in through your provider, then choose its model in the chat composer."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
             if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
                 LineEdit { horizontal-stretch: 1; text <=> root.source-input; accessible-label: root.settings-tab == "Skills" ? "Skill source" : "Plugin source";
-                    placeholder-text: root.settings-tab == "Skills" ? "GitHub skill folder URL" : "Plugin ID or marketplace source"; }
+                    placeholder-text: root.settings-tab == "Skills" ? "GitHub skill folder URL" : root.settings-provider == "Antigravity" ? "Plugin name, GitHub URL or local path" : "Plugin ID or marketplace source"; }
                 Action { label: "Install"; selected: true; width: 66px; enabled: root.source-input != "" && !root.settings-working;
                     activate => {root.settings-action("install",root.source-input);} }
-                Action { label: root.settings-tab == "Skills" ? "Folder…" : "Add marketplace"; width: root.settings-tab == "Skills" ? 81px : 139px;
+                if root.settings-tab == "Skills" || root.settings-provider != "Antigravity": Action { label: root.settings-tab == "Skills" ? "Folder…" : "Add marketplace"; width: root.settings-tab == "Skills" ? 81px : 139px;
                     enabled: !root.settings-working && (root.settings-tab == "Skills" || root.source-input != "");
                     activate => {root.settings-action(root.settings-tab == "Skills" ? "folder" : "marketplace",root.source-input);} }
             }

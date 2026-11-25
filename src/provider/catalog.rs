@@ -32,6 +32,13 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn display_name(&self, selection: &str) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|m| m.model == selection)?
+            .display_name
+            .as_deref()
+    }
     pub fn claude_label(&self, selection: &str) -> Option<String> {
         let value = selection.strip_prefix("claude:")?;
         let model = self.models.iter().find(|entry| entry.model == selection);
@@ -94,25 +101,30 @@ async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
 }
 
 async fn all_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
-    let (codex, claude, gemini) = tokio::join!(
+    let (codex, claude, gemini, antigravity) = tokio::join!(
         catalog_connection(project),
         tokio::time::timeout(Duration::from_secs(8), super::claude::models(project)),
         super::gemini::models(project),
+        super::antigravity::models(project),
     );
     let claude = claude
         .context("Claude model discovery timed out")
         .and_then(|r| r);
     let (io, mut catalog) = match codex {
         Ok((io, catalog)) => (Some(io), catalog),
-        Err(e) if claude.is_err() && gemini.is_err() => anyhow::bail!(
-            "Model discovery failed. Codex: {e:#}. Claude: {}. Gemini: {}",
+        Err(e) if claude.is_err() && gemini.is_err() && antigravity.is_err() => anyhow::bail!(
+            "Model discovery failed. Codex: {e:#}. Claude: {}. Gemini: {}. Antigravity: {}",
             claude.err().unwrap(),
-            gemini.err().unwrap()
+            gemini.err().unwrap(),
+            antigravity.err().unwrap()
         ),
         Err(_) => (None, Catalog::default()),
     };
     if let Ok(models) = claude {
         catalog.models.extend(models);
+    }
+    if let Ok(other) = antigravity {
+        catalog.models.extend(other.models);
     }
     if let Ok(other) = gemini {
         catalog.models.extend(other.models);
@@ -123,6 +135,7 @@ async fn all_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> 
 pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result<Catalog> {
     match only {
         Some("codex") => Ok(catalog_connection(project).await?.1),
+        Some("antigravity") => super::antigravity::models(project).await,
         Some("gemini") => super::gemini::models(project).await,
         Some("claude") => Ok(Catalog {
             models: tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))

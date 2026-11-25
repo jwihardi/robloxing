@@ -131,6 +131,17 @@ class FixtureProvider {
         }
     }
     static void Main(string[] args) {
+        if (args.Length == 1 && args[0] == "models") {
+            Console.WriteLine("gemini-test-high    Gemini Test (High)");
+            Console.WriteLine("gemini-test-low     Gemini Test (Low)");
+            return;
+        }
+        if (args.Length == 4 && args[0] == "-p" && args[1] == "/usage") {
+            Send(new { command=new {data=new {groups=new object[0]}} }); return;
+        }
+        if (args.Length == 4 && args[0] == "-p" && args[1] == "/model") {
+            Send(new { command=new {data=new {id="gemini-test-high"}} }); return;
+        }
         if (args.Length == 3 && args[0] == "models" && args[1] == "-o" && args[2] == "json") {
             Send(new[] {new {modelId="gemini-fixture"}});
             return;

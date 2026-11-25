@@ -57,9 +57,12 @@ impl App {
         controls.set_inherited(run && !drafts.contains_key(&area));
         let mut catalog = self.catalog.borrow().clone();
         if area == "Images" {
-            catalog
-                .models
-                .retain(|m| workshop::provider::provider_for(&m.model) == "codex");
+            catalog.models.retain(|m| {
+                matches!(
+                    workshop::provider::provider_for(&m.model),
+                    "codex" | "antigravity"
+                )
+            });
         }
         controls.set_choices(policy_choices(&setting.agent, &catalog));
         controls.set_function_limit(i32::from(setting.function_limit));

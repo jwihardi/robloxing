@@ -2,6 +2,7 @@ use crate::{
     Attempt, Store, team,
     usage::{ContextUsage, UsageWindow, account_windows},
 };
+pub mod antigravity;
 mod art;
 mod catalog;
 mod claude;
@@ -10,6 +11,8 @@ pub mod gemini;
 pub fn provider_for(model: &str) -> &'static str {
     if model.starts_with("claude:") {
         "claude"
+    } else if model.starts_with("antigravity:") {
+        "antigravity"
     } else if model.starts_with("gemini:") {
         "gemini"
     } else {
@@ -204,7 +207,7 @@ fn instructions(store: &Store, a: &Attempt) -> Result<String> {
         let policy = store.effective_worker_policy(a.id)?;
         let policy = serde_json::to_string(&policy)?;
         format!(
-            "You are the lead agent in Workshop. Work inside this isolated project. Follow the project’s delegation setting attached to the current request. When the creator specifically requests workers in the task itself, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Answer greetings and small, indivisible requests directly. When automatic delegation is enabled, or the creator asks for workers, manage the task from intake through verification without waiting for the user to divide it up or request workers. Inspect just enough to decide scope, then dispatch independent deliverables together. You own the acceptance criteria, interfaces and integrated result. Use a sequential or mixed plan where one assignment needs another's output. Include a scoped test or read-only acceptance review when it adds independent coverage. Honor explicit limits and requests to work alone. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model and an empty max_effort means uncapped. Claude and Gemini model IDs use the claude: and gemini: prefixes respectively. Omit the model to use the configured worker default. Choose a suitable allowed model and effort for each assignment or omit them for defaults. Give each worker a stable key, a short title, exact relative edit paths ([] for read-only), a concrete deliverable and observable acceptance criteria. Use depends_on for prerequisites. You can dispatch additional work as findings arrive. When a worker or check finds a problem, inspect the evidence, repair it or retry its owning key, and continue pending work. Respect a user-stopped worker. Inspect the integrated result against the original request and run relevant behavioral checks using the project’s own tools before finishing. A clean diff alone does not establish functional correctness. Report what passed. If your local tools fail, use the available worker checkouts when feasible without asking for delegation permission. When no authorized route remains, call workshop_blocked with the external blocker before ending. Use workshop_checkpoint for lasting decisions or unfinished work. Project handoff:\n{context}"
+            "You are the lead agent in Workshop. Work inside this isolated project. Follow the project’s delegation setting attached to the current request. When the creator specifically requests workers in the task itself, call workshop_delegate even for simple work. Honor the requested number of assignments when feasible. Report only the workers actually dispatched and their returned outcomes. If delegation fails, explain what happened. Answer greetings and small, indivisible requests directly. When automatic delegation is enabled, or the creator asks for workers, manage the task from intake through verification without waiting for the user to divide it up or request workers. Inspect just enough to decide scope, then dispatch independent deliverables together. You own the acceptance criteria, interfaces and integrated result. Use a sequential or mixed plan where one assignment needs another's output. Include a scoped test or read-only acceptance review when it adds independent coverage. Honor explicit limits and requests to work alone. The project allows up to {limit} concurrent workers. Worker policy: {policy}. An empty models list allows any available model and an empty max_effort means uncapped. Use the provider prefixes claude:, antigravity: and gemini: for models served by those CLIs. Use Workshop tools for all delegation so workers appear in the chat. Omit the model to use the configured worker default. Choose a suitable allowed model and effort for each assignment or omit them for defaults. Give each worker a stable key, a short title, exact relative edit paths ([] for read-only), a concrete deliverable and observable acceptance criteria. Use depends_on for prerequisites. You can dispatch additional work as findings arrive. When a worker or check finds a problem, inspect the evidence, repair it or retry its owning key, and continue pending work. Respect a user-stopped worker. Inspect the integrated result against the original request and run relevant behavioral checks using the project’s own tools before finishing. A clean diff alone does not establish functional correctness. Report what passed. If your local tools fail, use the available worker checkouts when feasible without asking for delegation permission. When no authorized route remains, call workshop_blocked with the external blocker before ending. Use workshop_checkpoint for lasting decisions or unfinished work. Project handoff:\n{context}"
         )
     } else {
         String::from(
@@ -341,7 +344,7 @@ impl Connection {
         if a.provider == "claude" {
             return claude::connection(store, a, stderr);
         }
-        if a.provider == "gemini" {
+        if matches!(a.provider.as_str(), "gemini" | "antigravity") {
             return gemini::connection(store, a, stderr);
         }
         Self::spawn(store.work(a.id), stderr)
@@ -521,7 +524,7 @@ async fn exchange(
     if a.provider == "claude" {
         return claude::exchange(io, store, a, prompt, controls, stream, notify).await;
     }
-    if a.provider == "gemini" {
+    if matches!(a.provider.as_str(), "gemini" | "antigravity") {
         return gemini::exchange(io, store, a, prompt, controls, stream, notify).await;
     }
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
@@ -1074,11 +1077,10 @@ fn run_one_turn(
                 if !a.session.is_empty()
                     && live.io.session == a.session
                     && live.io.cwd == store.work(a.id)
-                    && live
-                        .io
-                        .gemini_bridge
-                        .as_ref()
-                        .is_none_or(|b| b.project_trusted == store.gemini_project_trusted())
+                    && live.io.gemini_bridge.as_ref().is_none_or(|b| {
+                        a.provider != "gemini"
+                            || b.project_trusted == store.gemini_project_trusted()
+                    })
                     && live
                         .io
                         .pinned_inference
@@ -1124,6 +1126,8 @@ fn run_one_turn(
             "review",
             if a.provider == "claude" {
                 "Claude finished. Review the change."
+            } else if a.provider == "antigravity" {
+                "Antigravity finished. Review the change."
             } else if a.provider == "gemini" {
                 "Gemini finished. Review the change."
             } else {

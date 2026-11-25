@@ -89,7 +89,16 @@ impl Store {
 }
 
 fn spawn(dir: &Path, args: &[&str], stderr: File) -> Result<Connection> {
-    let (program, entry) = launcher()?;
+    spawn_cli(dir, args, stderr, launcher()?, "Gemini CLI")
+}
+
+pub(super) fn spawn_cli(
+    dir: &Path,
+    args: &[&str],
+    stderr: File,
+    (program, entry): (PathBuf, Option<PathBuf>),
+    provider: &str,
+) -> Result<Connection> {
     let cmd = CommandWrap::with_new(&program, |cmd| {
         cmd.args(entry)
             .args(args)
@@ -98,9 +107,9 @@ fn spawn(dir: &Path, args: &[&str], stderr: File) -> Result<Connection> {
             .stdout(Stdio::piped())
             .stderr(stderr);
     });
-    let mut child = spawn_managed(cmd, "Gemini CLI")?;
-    let stdin = child.stdin().take().context("Missing Gemini stdin")?;
-    let stdout = child.stdout().take().context("Missing Gemini stdout")?;
+    let mut child = spawn_managed(cmd, provider)?;
+    let stdin = child.stdin().take().context("Missing provider stdin")?;
+    let stdout = child.stdout().take().context("Missing provider stdout")?;
     Ok(Connection {
         child,
         stdin,
@@ -174,6 +183,18 @@ fn model_name<'a>(inference: (&'a str, &str)) -> Result<&'a str> {
 }
 
 pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Connection> {
+    if a.provider == "antigravity" {
+        let mut io = spawn_cli(
+            &store.work(a.id),
+            &["acp", "--stdio"],
+            stderr,
+            (antigravity::program()?, None),
+            "Antigravity CLI",
+        )?;
+        io.gemini_bridge = Some(Bridge::new(store.worker, false)?);
+        io.pinned_inference = Some((a.model.clone(), a.effort.clone()));
+        return Ok(io);
+    }
     let model = model_name((&a.model, &a.effort))?;
     let mut args = vec!["--acp", "--approval-mode", "auto_edit"];
     let bridge = Bridge::new(store.worker, store.gemini_project_trusted())?;
@@ -211,7 +232,7 @@ fn content(message: &Message) -> Result<Vec<Value>> {
                 .read_to_end(&mut bytes)?;
             ensure!(
                 bytes.len() <= 10 * 1024 * 1024,
-                "Gemini image attachments must be 10 MiB or smaller"
+                "ACP image attachments must be 10 MiB or smaller"
             );
             let mime = image::guess_format(&bytes)?.to_mime_type();
             item = json!({"type":"image","mimeType":mime,"data":STANDARD.encode(bytes)});
@@ -221,7 +242,12 @@ fn content(message: &Message) -> Result<Vec<Value>> {
     Ok(blocks)
 }
 
-async fn rpc(stdin: &mut ChildStdin, id: u32, method: &str, params: Value) -> Result<()> {
+pub(super) async fn rpc(
+    stdin: &mut ChildStdin,
+    id: u32,
+    method: &str,
+    params: Value,
+) -> Result<()> {
     send(
         stdin,
         json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
@@ -229,7 +255,7 @@ async fn rpc(stdin: &mut ChildStdin, id: u32, method: &str, params: Value) -> Re
     .await
 }
 
-async fn initialize(stdin: &mut ChildStdin) -> Result<()> {
+pub(super) async fn initialize(stdin: &mut ChildStdin) -> Result<()> {
     rpc(
         stdin,
         1,
@@ -240,27 +266,27 @@ async fn initialize(stdin: &mut ChildStdin) -> Result<()> {
     .await
 }
 
-async fn next(lines: &mut Frames) -> Result<Value> {
+pub(super) async fn next(lines: &mut Frames) -> Result<Value> {
     let line = lines
         .next_line()
         .await?
-        .context("Gemini CLI closed before replying. Check provider.stderr.log.")?;
-    serde_json::from_str(&line).context("Invalid Gemini ACP event")
+        .context("Provider closed before replying. Check provider.stderr.log.")?;
+    serde_json::from_str(&line).context("Invalid provider ACP event")
 }
 
-fn result(msg: &Value) -> Result<&Value> {
+pub(super) fn result<'a>(msg: &'a Value, provider: &str) -> Result<&'a Value> {
     if let Some(e) = msg.get("error") {
         if e["code"] == -32000 {
             bail!(
-                "Gemini needs authentication. Open Settings → Providers → Gemini CLI to sign in."
+                "{provider} needs authentication. Open Settings → Providers → {provider} to sign in."
             );
         }
         bail!(
-            "Gemini CLI: {}",
+            "{provider}: {}",
             e["message"].as_str().unwrap_or("Request failed")
         );
     }
-    msg.get("result").context("Missing Gemini result")
+    msg.get("result").context("Missing ACP result")
 }
 
 pub async fn sign_in() -> Result<()> {
@@ -272,7 +298,7 @@ pub async fn sign_in() -> Result<()> {
             let msg = next(&mut io.lines).await?;
             match msg["id"].as_u64() {
                 Some(1) => {
-                    let init = result(&msg)?;
+                    let init = result(&msg, "Gemini CLI")?;
                     ensure!(
                         init["authMethods"]
                             .as_array()
@@ -393,13 +419,28 @@ fn save_text(
     Ok(())
 }
 
-async fn permission(stdin: &mut ChildStdin, msg: &Value, tools: &Value) -> Result<()> {
+async fn permission(
+    stdin: &mut ChildStdin,
+    msg: &Value,
+    tools: &Value,
+    antigravity: bool,
+) -> Result<()> {
     let params = &msg["params"];
     let source = &params["toolCall"]["_meta"]["gemini-cli"]["mcp"];
-    let workshop = source["server_name"] == "workshop"
-        && tools
+    let tool = if antigravity {
+        params["toolCall"]["name"]
+            .as_str()
+            .and_then(|n| n.strip_prefix("mcp_workshop_"))
+    } else if source["server_name"] == "workshop" {
+        source["tool_name"].as_str()
+    } else {
+        None
+    };
+    let workshop = tool.is_some_and(|name| {
+        tools
             .as_array()
-            .is_some_and(|ts| ts.iter().any(|t| t["name"] == source["tool_name"]));
+            .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
+    });
     let option = params["options"]
         .as_array()
         .into_iter()
@@ -439,6 +480,9 @@ pub(super) async fn exchange(
         .gemini_bridge
         .as_ref()
         .context("Missing Workshop bridge")?;
+    let agy = a.provider == "antigravity";
+    let provider = if agy { "Antigravity" } else { "Gemini CLI" };
+    let mut set_edit_mode = false;
     let mut first = content(prompt)?;
     first.insert(0, json!({"type":"text","text":instructions(store,a)?}));
     if let Some(pref) = team_preference(store)? {
@@ -513,7 +557,7 @@ pub(super) async fn exchange(
                 notify(ReplyUpdate::TranscriptChanged);
                 continue;
             }
-            _ = &mut startup, if waiting => bail!("Gemini did not open its session within 90 seconds. Check provider.stderr.log."),
+            _ = &mut startup, if waiting => bail!("{provider} did not open its session within 90 seconds. Check provider.stderr.log."),
             result = async { dispatch.as_mut().expect("active dispatch").await }, if dispatch.is_some() => {
                 dispatch = None;
                 bridge.reply(result)?;
@@ -545,7 +589,7 @@ pub(super) async fn exchange(
                 if method == "session/request_permission"
                     && msg["params"]["sessionId"] == io.session
                 {
-                    permission(&mut io.stdin, &msg, &bridge.tools).await?;
+                    permission(&mut io.stdin, &msg, &bridge.tools, agy).await?;
                 } else {
                     send(&mut io.stdin,json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32601,"message":"Unsupported client request"}})).await?;
                 }
@@ -567,7 +611,7 @@ pub(super) async fn exchange(
                     Some("tool_call") => {
                         save_text(store, a.id, &mut text, notify)?;
                         io.used_tools = true;
-                        let title = u["title"].as_str().unwrap_or("Gemini tool");
+                        let title = u["title"].as_str().unwrap_or("Provider tool");
                         store.event(a.id, "item/started", Some(title))?;
                         notify(ReplyUpdate::Activity(title));
                     }
@@ -587,12 +631,12 @@ pub(super) async fn exchange(
             }
             continue;
         }
-        let reply = result(&msg)?;
+        let reply = result(&msg, provider)?;
         match msg["id"].as_u64() {
             Some(1) => {
                 ensure!(
                     reply["protocolVersion"] == 1,
-                    "Unsupported Gemini ACP protocol"
+                    "Unsupported {provider} ACP protocol"
                 );
                 let mut params = json!({"cwd":io.cwd,"mcpServers":[bridge.config()?]});
                 let method = if a.session.is_empty() {
@@ -605,7 +649,11 @@ pub(super) async fn exchange(
             }
             Some(2) => {
                 if !bridge.discovered() {
-                    let notice = "Gemini has disabled Workshop tools in this checkout. To use workers, trust this project in Settings → Providers → Gemini project tools. If it is already trusted, check the Gemini MCP policy.";
+                    let notice = if agy {
+                        "Antigravity could not connect to Workshop tools in this checkout. Check provider.stderr.log before dispatching workers."
+                    } else {
+                        "Gemini has disabled Workshop tools in this checkout. To use workers, trust this project in Settings → Providers → Gemini project tools. If it is already trusted, check the Gemini MCP policy."
+                    };
                     if let Some(first) = queued.front_mut() {
                         first.push(json!({"type":"text","text":format!("{notice} If asked to delegate, explain how to enable Workshop tools.")}));
                     }
@@ -616,14 +664,21 @@ pub(super) async fn exchange(
                 io.session = if a.session.is_empty() {
                     reply["sessionId"]
                         .as_str()
-                        .context("Missing Gemini session ID")?
+                        .context("Missing ACP session ID")?
                         .into()
                 } else {
                     a.session.clone()
                 };
                 store.session(a.id, &io.session)?;
-                let model = model_name((&a.model, &a.effort))?;
-                if model != "default" && reply["models"]["currentModelId"] != model {
+                let model = if agy {
+                    set_edit_mode = reply["modes"]["currentModeId"] != "accept-edits";
+                    antigravity::session_model(&reply["models"], &a.model, &a.effort)?
+                } else {
+                    Some(model_name((&a.model, &a.effort))?).filter(|&m| m != "default")
+                };
+                if let Some(model) = model
+                    && reply["models"]["currentModelId"] != model
+                {
                     rpc(
                         &mut io.stdin,
                         3,
@@ -635,17 +690,17 @@ pub(super) async fn exchange(
                     waiting = false;
                 }
             }
-            Some(3) => waiting = false,
+            Some(3 | 5) => waiting = false,
             Some(4) => {
                 save_text(store, a.id, &mut text, notify)?;
                 let reason = reply["stopReason"].as_str().unwrap_or("unknown");
                 ensure!(
                     reason == "end_turn" || (cancelling && reason == "cancelled"),
-                    "Gemini ended the turn: {reason}"
+                    "{provider} ended the turn: {reason}"
                 );
                 ensure!(
                     dispatch.is_none(),
-                    "Gemini ended during a Workshop tool call"
+                    "{provider} ended during a Workshop tool call"
                 );
                 if let Some(tokens) = reply["usage"]["totalTokens"].as_i64() {
                     cumulative += tokens;
@@ -678,6 +733,17 @@ pub(super) async fn exchange(
                 }
             }
             _ => {}
+        }
+        if !waiting && set_edit_mode {
+            rpc(
+                &mut io.stdin,
+                5,
+                "session/set_mode",
+                json!({"sessionId":io.session,"modeId":"accept-edits"}),
+            )
+            .await?;
+            waiting = true;
+            set_edit_mode = false;
         }
     }
 }

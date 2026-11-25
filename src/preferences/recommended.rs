@@ -130,7 +130,8 @@ pub(super) async fn install(p: Provider, key: &str) -> Result<String> {
         .context("Unknown recommendation")?;
     if let Some(market) = pick.marketplace(p) {
         let configured =
-            checked(command(p.program()).args(["plugin", "marketplace", "list", "--json"])).await?;
+            checked(command(p.program()?).args(["plugin", "marketplace", "list", "--json"]))
+                .await?;
         let markets: Vec<Value> = serde_json::from_slice(&configured.stdout)
             .context("Could not read Claude marketplaces")?;
         if let Some(entry) = markets.iter().find(|m| m["name"] == market.name) {
@@ -141,10 +142,10 @@ pub(super) async fn install(p: Provider, key: &str) -> Result<String> {
                 market.repo
             );
         } else {
-            checked(command(p.program()).args(["plugin", "marketplace", "add", market.repo]))
+            checked(command(p.program()?).args(["plugin", "marketplace", "add", market.repo]))
                 .await?;
         }
-        checked(command(p.program()).args(["plugin", "install", market.plugin])).await?;
+        checked(command(p.program()?).args(["plugin", "install", market.plugin])).await?;
     } else {
         install_skill(p, pick.skill_url).await?;
     }

@@ -16,6 +16,7 @@ Copy-Item -LiteralPath $exe -Destination $fixtureApp
 $env:WORKSHOP_HOME = Join-Path $root 'data'
 $env:WORKSHOP_PROBE_DIR = $root
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'
+$env:WORKSHOP_ANTIGRAVITY = $env:WORKSHOP_CODEX
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /r:System.Web.Extensions.dll "/out:$env:WORKSHOP_CODEX" (Join-Path $PSScriptRoot 'FixtureProvider.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
 [void](New-Item -ItemType File -Path (Join-Path $root 'left.hold'))

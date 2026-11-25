@@ -25,12 +25,15 @@ pub struct Row {
 pub enum Provider {
     Codex,
     Claude,
+    Antigravity,
 }
 
 impl Provider {
     pub fn from_label(label: &str) -> Self {
         if label == "Claude Code" {
             Self::Claude
+        } else if label == "Antigravity" {
+            Self::Antigravity
         } else {
             Self::Codex
         }
@@ -39,13 +42,15 @@ impl Provider {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
+            Self::Antigravity => "Antigravity",
         }
     }
-    fn program(self) -> OsString {
-        match self {
+    fn program(self) -> Result<OsString> {
+        Ok(match self {
+            Self::Antigravity => workshop::provider::antigravity::program()?.into_os_string(),
             Self::Codex => workshop::provider::codex_program().into(),
             Self::Claude => env::var_os("WORKSHOP_CLAUDE").unwrap_or_else(|| "claude".into()),
-        }
+        })
     }
 }
 
@@ -76,12 +81,32 @@ async fn checked(cmd: &mut Command) -> Result<Output> {
     Ok(out)
 }
 async fn account(p: Provider) -> Row {
+    if p == Provider::Antigravity {
+        let installed = workshop::provider::antigravity::program().is_ok();
+        let (detail, action, button) = if !installed {
+            ("Install Antigravity CLI, then refresh", "", "")
+        } else if workshop::provider::antigravity::connected().await {
+            ("Signed in with Google", "logout", "Sign out")
+        } else {
+            ("Could not verify Google sign-in", "login", "Sign in")
+        };
+        return Row {
+            id: p.label().into(),
+            label: p.label().into(),
+            detail: detail.into(),
+            action,
+            button,
+        };
+    }
     let args: &[&str] = if p == Provider::Codex {
         &["login", "status"]
     } else {
         &["auth", "status", "--json"]
     };
-    let status = output(command(p.program()).args(args)).await;
+    let status = match p.program() {
+        Ok(program) => output(command(program).args(args)).await,
+        Err(error) => Err(error),
+    };
     let (detail, action, button) = match status {
         Err(e)
             if e.downcast_ref::<std::io::Error>()
@@ -132,8 +157,12 @@ pub async fn list(
 ) -> Result<Vec<Row>> {
     match tab {
         "Providers" => {
-            let (codex, claude) = tokio::join!(account(Provider::Codex), account(Provider::Claude));
-            let mut rows = vec![codex, claude, gemini_account()];
+            let (codex, claude, agy) = tokio::join!(
+                account(Provider::Codex),
+                account(Provider::Claude),
+                account(Provider::Antigravity)
+            );
+            let mut rows = vec![codex, claude, agy, gemini_account()];
             if let Some(store) = project
                 && workshop::provider::gemini::installed()
             {
@@ -180,11 +209,11 @@ fn gemini_account() -> Row {
     let key = env::var_os("GEMINI_API_KEY").is_some_and(|v| !v.is_empty());
     let detail = match (installed, method, key) {
         (false, _, _) => "Install @google/gemini-cli with npm, then refresh",
-        (true, Some("oauth-personal"), _) => "Google sign-in configured",
+        (true, Some("oauth-personal"), _) => "For personal Google accounts, use Antigravity",
         (true, Some("vertex-ai"), _) => "Vertex AI configured",
         (true, Some("gemini-api-key"), _) | (true, None, true) => "Gemini API key configured",
         (true, Some(_), _) => "Authentication configured in Gemini CLI",
-        _ => "Sign in with your Google account",
+        _ => "For organizations and API keys. Personal accounts use Antigravity.",
     };
     Row {
         id: "Gemini CLI".into(),
@@ -202,14 +231,83 @@ fn gemini_account() -> Row {
 }
 
 async fn plugins(p: Provider, browse: bool) -> Result<Vec<Row>> {
-    let mut cmd = command(p.program());
+    let mut cmd = command(p.program()?);
     cmd.args(["plugin", "list", "--json"]);
-    if browse {
+    if browse && p != Provider::Antigravity {
         cmd.arg("--available");
     }
     let value: Value = serde_json::from_slice(&checked(&mut cmd).await?.stdout)
         .context("The provider returned an unreadable plugin list")?;
+    if p == Provider::Antigravity {
+        let mut installed = value
+            .as_array()
+            .cloned()
+            .context("Missing Antigravity plugin list")?;
+        for plugin in &mut installed {
+            plugin["id"] = plugin["name"].clone();
+        }
+        let available = if browse {
+            // agy exposes its installed list as JSON and publishes its browse catalog on the web.
+            let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+            let page = checked(command(curl.into()).args([
+                "--disable",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--max-time",
+                "15",
+                "--max-filesize",
+                "4194304",
+                "https://antigravity.google/docs/marketplace/",
+            ]))
+            .await?;
+            let mut available = antigravity_plugins(std::str::from_utf8(&page.stdout)?);
+            ensure!(
+                !available.is_empty(),
+                "Google's plugin catalog could not be read. You can still install by name."
+            );
+            available.retain(|p| !installed.iter().any(|i| i["name"] == p["name"]));
+            available
+        } else {
+            vec![]
+        };
+        return plugin_rows(
+            &serde_json::json!({"installed":installed,"available":available}),
+            browse,
+        );
+    }
     plugin_rows(&value, browse)
+}
+
+fn antigravity_plugins(page: &str) -> Vec<Value> {
+    fn attribute<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
+        tag.split_once(&format!(" {key}=\""))?
+            .1
+            .split_once('"')
+            .map(|(value, _)| value)
+    }
+    page.split("<article ")
+        .skip(1)
+        .filter_map(|card| {
+            let tag = card.split_once('>')?.0;
+            let name = attribute(tag, "data-plugin-id")?;
+            let marketplace = attribute(tag, "data-marketplace")?;
+            if !plain_component(name)
+                || !matches!(
+                    marketplace,
+                    "antigravity-plugins-official" | "antigravity-plugins-partners"
+                )
+            {
+                return None;
+            }
+            Some(
+                serde_json::json!({"id":format!("{name}@{marketplace}"),"name":name,
+            "description":attribute(tag, "data-shelf").unwrap_or_default().replace('-', " ")}),
+            )
+        })
+        .collect()
 }
 
 fn plugin_rows(value: &Value, browse: bool) -> Result<Vec<Row>> {
@@ -272,6 +370,7 @@ pub fn official_plugin(provider: &str, id: &str) -> bool {
             market,
             Some("openai-curated-remote" | "openai-bundled" | "openai-primary-runtime")
         ),
+        "Antigravity" => market == Some("antigravity-plugins-official"),
         "Claude Code" => market == Some("claude-plugins-official"),
         _ => false,
     }
@@ -286,6 +385,11 @@ fn skill_roots(p: Provider) -> Result<Vec<PathBuf>> {
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("skills"),
             home.join(".agents/skills"),
+        ],
+        Provider::Antigravity => vec![
+            home.join(".gemini/config/skills"),
+            home.join(".gemini/antigravity-cli/skills"),
+            home.join(".gemini/skills"),
         ],
         Provider::Claude => vec![
             env::var_os("CLAUDE_CONFIG_DIR")
@@ -463,16 +567,27 @@ pub async fn change(
             return Ok("Connected to Gemini CLI.".into());
         }
         let provider = Provider::from_label(arg);
-        let mut cmd = command(provider.program());
-        if provider == Provider::Claude {
+        let mut cmd = command(provider.program()?);
+        if provider == Provider::Antigravity {
+            if act == "logout" {
+                workshop::provider::antigravity::sign_out().await?;
+                return Ok("Signed out of Antigravity.".into());
+            }
+            ensure!(act == "login", "Unknown Antigravity account action");
+            cmd.arg("acp");
+        } else if provider == Provider::Claude {
             cmd.arg("auth");
         }
         match act {
             "login" => {
-                cmd.arg("login")
-                    .stdin(Stdio::inherit())
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit());
+                cmd.arg(if provider == Provider::Antigravity {
+                    "--login"
+                } else {
+                    "login"
+                })
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
                 #[cfg(windows)]
                 cmd.creation_flags(0x00000010); // The provider may prompt for a browser code.
                 let status = tokio::time::timeout(Duration::from_secs(600), cmd.status())
@@ -496,7 +611,7 @@ pub async fn change(
         if act == "recommend" {
             return recommended::install(p, arg).await;
         }
-        let mut cmd = command(p.program());
+        let mut cmd = command(p.program()?);
         cmd.arg("plugin");
         match act {
             "marketplace" => {
@@ -513,7 +628,9 @@ pub async fn change(
                 ]);
             }
             "remove" => {
-                if p == Provider::Claude {
+                if p == Provider::Antigravity {
+                    cmd.args(["uninstall", arg]);
+                } else if p == Provider::Claude {
                     cmd.args(["uninstall", "--keep-data", arg]);
                 } else {
                     cmd.args(["remove", arg]);

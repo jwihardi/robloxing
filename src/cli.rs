@@ -29,7 +29,7 @@ enum Action {
     },
     /// List the installed provider's model IDs and supported effort levels.
     Models {
-        #[arg(long,value_parser=["claude","codex","gemini"])]
+        #[arg(long,value_parser=["claude","codex","gemini","antigravity"])]
         provider: Option<String>,
     },
     /// Create game assets or inspect a local binary.
@@ -63,11 +63,14 @@ enum Action {
     /// Stream provider JSON. Type /cancel or a steering message on stdin.
     Run {
         /// Use the selected CLI and its configured model unless --model is supplied.
-        #[arg(long,value_parser=["codex","claude","gemini"])]
+        #[arg(long,value_parser=["codex","claude","gemini","antigravity"])]
         provider: Option<String>,
         prompt: String,
         #[arg(long, default_value = "")]
         model: String,
+        /// Reasoning effort for this turn (must be supported by the selected model).
+        #[arg(long)]
+        effort: Option<String>,
     },
     Retry {
         id: i64,
@@ -409,15 +412,16 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             prompt,
             model,
             provider,
+            effort,
         } => {
             let model = match provider.as_deref() {
                 Some(source) if model.contains(':') && provider::provider_for(&model) != source => {
                     anyhow::bail!("Choose a {source} model for --provider {source}")
                 }
-                Some(source @ ("claude" | "gemini")) if model.is_empty() => {
+                Some(source @ ("claude" | "gemini" | "antigravity")) if model.is_empty() => {
                     format!("{source}:default")
                 }
-                Some(source @ ("claude" | "gemini")) if !model.contains(':') => {
+                Some(source @ ("claude" | "gemini" | "antigravity")) if !model.contains(':') => {
                     format!("{source}:{model}")
                 }
                 Some("codex")
@@ -425,16 +429,29 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                         && provider::provider_for(&store.team_settings()?.lead_model)
                             != "codex" =>
                 {
-                    let a = store.prepare_inference(&prompt, "", "", None, None, &[])?;
+                    let a = store.prepare_inference(
+                        &prompt,
+                        "",
+                        effort.as_deref().unwrap_or_default(),
+                        None,
+                        None,
+                        &[],
+                    )?;
                     return run(&store, a, prompt.as_str().into());
                 }
                 _ => model,
             };
-            run(
-                &store,
-                store.prepare(&prompt, &model, None)?,
-                prompt.as_str().into(),
-            )?
+            let a = if let Some(effort) = effort {
+                let model = if model.is_empty() {
+                    store.team_settings()?.lead_model
+                } else {
+                    model
+                };
+                store.prepare_inference(&prompt, &model, &effort, None, None, &[])?
+            } else {
+                store.prepare(&prompt, &model, None)?
+            };
+            run(&store, a, prompt.as_str().into())?
         }
         Action::Retry { id } => {
             let a = store.attempt(id)?;
