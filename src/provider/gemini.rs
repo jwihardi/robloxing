@@ -143,6 +143,8 @@ pub(super) async fn models(dir: &Path) -> Result<Catalog> {
             if !models.iter().any(|m: &CatalogModel| m.model == model) {
                 models.push(CatalogModel {
                     model,
+                    display_name: None,
+                    resolved_model: None,
                     supported_reasoning_efforts: vec![],
                     default_reasoning_effort: String::new(),
                     is_default: false,

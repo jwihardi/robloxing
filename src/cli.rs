@@ -334,7 +334,11 @@ fn list_models(project: &Path, provider: Option<&str>) -> Result<()> {
             .map(|e| e.reasoning_effort.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        println!("{}  {}", model.model, efforts);
+        if let Some(resolved) = &model.resolved_model {
+            println!("{}  {}  {}", model.model, efforts, resolved);
+        } else {
+            println!("{}  {}", model.model, efforts);
+        }
     }
     Ok(())
 }

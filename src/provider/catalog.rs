@@ -9,6 +9,10 @@ use std::{path::Path, time::Duration};
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub model: String,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    #[serde(skip)]
+    pub resolved_model: Option<String>,
     pub supported_reasoning_efforts: Vec<Effort>,
     pub default_reasoning_effort: String,
     pub(super) is_default: bool,
@@ -25,6 +29,18 @@ pub struct Catalog {
     pub models: Vec<Model>,
     pub default_model: String,
     pub default_effort: String,
+}
+
+impl Catalog {
+    pub fn claude_label(&self, selection: &str) -> Option<String> {
+        let value = selection.strip_prefix("claude:")?;
+        let model = self.models.iter().find(|entry| entry.model == selection);
+        Some(super::claude::model_label(
+            value,
+            model.and_then(|m| m.display_name.as_deref()),
+            model.and_then(|m| m.resolved_model.as_deref()),
+        ))
+    }
 }
 
 pub(super) async fn request(

@@ -105,7 +105,12 @@ class FixtureProvider {
                         Send(new {type="result",subtype="error_during_execution",is_error=true,terminal_reason="aborted_by_interrupt"});
                         break;
                     }
-                    Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=new[]{new {value="default",supportedEffortLevels=new[]{"low","high"}}}}}});
+                    var models = new object[] {
+                        new {value="default", displayName="Default (recommended)", resolvedModel="claude-sonnet-5-5", supportedEffortLevels=new[]{"low","high"}},
+                        new {value="sonnet", displayName="Sonnet", resolvedModel="claude-sonnet-5-5", supportedEffortLevels=new[]{"low","high"}},
+                        new {value="haiku", displayName="Haiku", resolvedModel="claude-haiku-4-5-20251001"}
+                    };
+                    Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=models}}});
                     break;
                 case "user":
                     Send(new {type="system",subtype="init",session_id=session});

@@ -624,7 +624,9 @@ try {
     Wait-For { Named 'Chat reasoning effort' } 'first-click effort picker'
     Click 'Chat model'
     Wait-For { Named 'Select model' } 'model menu'
-    Click 'Claude Default'
+    Wait-For { (Named 'Claude Default · Sonnet 5.5') -and (Named 'Claude Sonnet 5.5') -and (Named 'Claude Haiku 4.5') } 'resolved Claude models'
+    Save-PrivateWindow (Join-Path $root 'claude-models.png')
+    Click 'Claude Sonnet 5.5'
     Wait-For { Named 'Message Claude' } 'Claude composer'
     Click 'Chat model'
     Click 'fixture-deep'
@@ -656,7 +658,7 @@ try {
     Click 'Back to chat settings'
     Wait-For { Named 'Edit global defaults' } 'chat settings restored'
     Click 'Edit global defaults'
-    Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
+    Wait-For { $control = Named $auto; $control -and $control.GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
     Click $auto
     Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'restore automatic delegation'
     Click 'Subagents'

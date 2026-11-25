@@ -150,7 +150,7 @@ fn usage_meters(windows: Vec<UsageWindow>) -> ModelRc<MeterData> {
     ModelRc::new(VecModel::from(meters))
 }
 
-fn model_label(id: &str) -> String {
+fn model_label(catalog: &provider::Catalog, id: &str) -> String {
     if let Some(name) = id.strip_prefix("gemini:") {
         format!(
             "Gemini {}",
@@ -160,15 +160,8 @@ fn model_label(id: &str) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")
         )
-    } else if let Some(name) = id.strip_prefix("claude:") {
-        let name = name.strip_prefix("claude-").unwrap_or(name);
-        format!(
-            "Claude {}",
-            name.split('-')
-                .map(capitalized)
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
+    } else if let Some(label) = catalog.claude_label(id) {
+        label
     } else if let Some(tail) = id.strip_prefix("gpt-") {
         let mut parts = tail.split('-');
         let mut label = format!("GPT-{}", parts.next().unwrap_or_default());
@@ -218,7 +211,7 @@ fn picker(
             .filter(|m| {
                 project_default || provider::provider_for(&m.model) == provider::provider_for(model)
             })
-            .map(|m| option(&m.model, model_label(&m.model))),
+            .map(|m| option(&m.model, model_label(catalog, &m.model))),
     );
     let selected = if project_default && model.is_empty() {
         DEFAULT_MODEL
@@ -226,7 +219,7 @@ fn picker(
         effective
     };
     if !selected.is_empty() && !models.iter().any(|m| m.value == selected) {
-        models.push(option(selected, model_label(selected)));
+        models.push(option(selected, model_label(catalog, selected)));
     }
     let model_index = models
         .iter()
@@ -265,7 +258,7 @@ fn picker(
         current_model: if effective.is_empty() {
             "Codex default".into()
         } else {
-            model_label(effective).into()
+            model_label(catalog, effective).into()
         },
         current_effort: if current.is_empty() {
             "Default".into()
@@ -293,7 +286,7 @@ fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyC
         policy
             .models
             .iter()
-            .map(|id| model_label(id))
+            .map(|id| model_label(catalog, id))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -302,7 +295,7 @@ fn policy_choices(policy: &WorkerPolicy, catalog: &provider::Catalog) -> PolicyC
             .into_iter()
             .map(|id| PolicyModel {
                 selected: policy.models.contains(&id),
-                label: model_label(&id).into(),
+                label: model_label(catalog, &id).into(),
                 value: id.into(),
             })
             .collect::<Vec<_>>(),
@@ -363,7 +356,7 @@ fn title(state: &str) -> &str {
         _ => state,
     }
 }
-fn worker_row(w: workshop::team::Worker) -> WorkerRow {
+fn worker_row(w: workshop::team::Worker, catalog: &provider::Catalog) -> WorkerRow {
     let scope = if w.assignment.files.is_empty() {
         "Read only".into()
     } else {
@@ -374,7 +367,7 @@ fn worker_row(w: workshop::team::Worker) -> WorkerRow {
         let mut label = if id.is_empty() {
             String::from("Codex default")
         } else {
-            model_label(id)
+            model_label(catalog, id)
         };
         if let Some(effort) = w.effort.as_deref().filter(|s| !s.is_empty()) {
             label.push_str(&format!(" ({effort})"));
@@ -492,7 +485,7 @@ impl App {
         let workers: Vec<_> = store
             .workers(attempt.id)?
             .into_iter()
-            .map(worker_row)
+            .map(|w| worker_row(w, &self.catalog.borrow()))
             .collect();
         let mut rows = Vec::new();
         if !more {
@@ -832,7 +825,7 @@ impl App {
         let ui = self.ui.unwrap();
         if let Some(id) = chat {
             store.set_chat_inference(id, &model, &effort)?;
-            ui.set_model_name(model_label(&model).into());
+            ui.set_model_name(model_label(&catalog, &model).into());
             if let Some(chat) = self.attempts.borrow_mut().iter_mut().find(|a| a.id == id) {
                 chat.model = model;
                 chat.effort = effort;
@@ -899,7 +892,7 @@ impl App {
             ui.set_context_meter(context_meter(store.context_usage(a)?, false));
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
-            ui.set_model_name(model_label(&a.model).into());
+            ui.set_model_name(model_label(&self.catalog.borrow(), &a.model).into());
             let done = matches!(
                 a.state.as_str(),
                 "review" | "failed" | "interrupted" | "cancelled"
@@ -1123,8 +1116,8 @@ impl App {
                                 self.catalog.replace(catalog);
                                 ui.set_catalog_ready(true);
                                 ui.set_catalog_status("".into());
-                                if let Some(store) = store {
-                                    self.render_settings(store)?;
+                                if store.is_some() {
+                                    self.render()?;
                                 }
                                 if ui.global::<Studio>().get_editing_run()
                                     || (ui.get_settings_open() && ui.get_settings_tab() == "Tasks")

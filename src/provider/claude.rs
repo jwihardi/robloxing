@@ -62,9 +62,8 @@ fn add_inference<'a>(args: &mut Vec<&'a str>, model: &'a str, effort: &'a str) -
         .strip_prefix("claude:")
         .filter(|m| !m.is_empty())
         .context("Choose a Claude model")?;
-    if model != "default" {
-        args.extend(["--model", model]);
-    }
+    // The catalog's "default" clears overrides. Omitting --model can pick ANTHROPIC_MODEL instead.
+    args.extend(["--model", model]);
     if !effort.is_empty() {
         args.extend(["--effort", effort]);
     }
@@ -75,6 +74,73 @@ fn init(servers: &[&str]) -> Value {
     json!({"type":"control_request","request_id":"workshop-init","request":{"subtype":"initialize","sdkMcpServers":servers}})
 }
 
+/// Human-readable family and version for Anthropic IDs such as claude-haiku-4-5-20251001.
+/// Gateway deployment names are opaque and should be shown as supplied.
+fn versioned_name(id: &str) -> Option<(&str, String)> {
+    let (family, version) = id.strip_prefix("claude-")?.split_once('-')?;
+    if family.is_empty() || !family.bytes().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let version = match version.rsplit_once('-') {
+        Some((version, date)) if date.len() == 8 && date.bytes().all(|c| c.is_ascii_digit()) => {
+            version
+        }
+        _ => version,
+    };
+    if !version
+        .split('-')
+        .all(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let mut title = format!("{family} {}", version.replace('-', "."));
+    title[..1].make_ascii_uppercase();
+    Some((family, title))
+}
+
+pub(super) fn model_label(value: &str, display: Option<&str>, resolved: Option<&str>) -> String {
+    let id = resolved.filter(|s| !s.is_empty()).unwrap_or(value);
+    let base = id.strip_suffix("[1m]").unwrap_or(id);
+    let short_value = value.strip_suffix("[1m]").unwrap_or(value);
+    let display = display.filter(|s| !s.is_empty());
+    let name = display.unwrap_or(short_value);
+    let name = name.strip_prefix("Claude ").unwrap_or(name);
+    let mut title = if let Some((family, title)) = versioned_name(base) {
+        if value == "default" {
+            format!("Default · {title}")
+        } else if name.eq_ignore_ascii_case(family) || name == base {
+            title
+        } else if name.starts_with(&title) {
+            name.to_owned()
+        } else {
+            format!("{name} · {title}")
+        }
+    } else if value == "default" {
+        if base == "default" {
+            "Default".into()
+        } else {
+            format!("Default · {base}")
+        }
+    } else if base != short_value && base != name {
+        format!("{name} · {base}")
+    } else if display.is_none()
+        && short_value.bytes().all(|c| c.is_ascii_lowercase())
+        && !short_value.is_empty()
+    {
+        let mut name = short_value.to_owned();
+        name[..1].make_ascii_uppercase();
+        name
+    } else {
+        name.to_owned()
+    };
+    if (value.ends_with("[1m]") || id.ends_with("[1m]"))
+        && !title.to_ascii_lowercase().contains("1m")
+    {
+        title.push_str(" (1M)");
+    }
+    format!("Claude {title}")
+}
+
 pub(super) async fn models(project: &Path) -> Result<Vec<CatalogModel>> {
     let mut args = STREAM.to_vec();
     args.extend(["--strict-mcp-config", "--no-session-persistence"]);
@@ -83,35 +149,45 @@ pub(super) async fn models(project: &Path) -> Result<Vec<CatalogModel>> {
     while let Some(line) = io.lines.next_line().await? {
         let event: Value = serde_json::from_str(&line)?;
         if event["response"]["request_id"] == "workshop-init" {
-            let entries = event["response"]["response"]["models"]
-                .as_array()
-                .context("Claude did not return a model catalog")?;
-            return entries
-                .iter()
-                .map(|entry| {
-                    let name = entry["value"]
-                        .as_str()
-                        .context("Missing Claude model name")?;
-                    let levels = entry["supportedEffortLevels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(|s| catalog::Effort {
-                            reasoning_effort: s.into(),
-                        })
-                        .collect();
-                    Ok(CatalogModel {
-                        model: format!("claude:{name}"),
-                        supported_reasoning_efforts: levels,
-                        default_reasoning_effort: String::new(),
-                        is_default: false,
-                    })
-                })
-                .collect();
+            return parse_models(&event["response"]["response"]["models"]);
         }
     }
     bail!("Claude closed during model discovery")
+}
+
+fn parse_models(models: &Value) -> Result<Vec<CatalogModel>> {
+    models
+        .as_array()
+        .context("Claude did not return a model catalog")?
+        .iter()
+        .map(|entry| {
+            let value = entry["value"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("Missing Claude model name")?;
+            let levels = entry["supportedEffortLevels"]
+                .as_array()
+                .filter(|_| entry["supportsEffort"].as_bool() != Some(false))
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|level| catalog::Effort {
+                    reasoning_effort: level.into(),
+                })
+                .collect();
+            Ok(CatalogModel {
+                model: format!("claude:{value}"),
+                display_name: entry["displayName"].as_str().map(str::to_owned),
+                resolved_model: entry["resolvedModel"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                supported_reasoning_efforts: levels,
+                default_reasoning_effort: String::new(),
+                is_default: value == "default",
+            })
+        })
+        .collect()
 }
 
 fn user_message(message: &Message, preference: Option<&str>) -> Result<Value> {
@@ -549,4 +625,51 @@ pub(super) async fn studio(
         }
     }
     bail!("Claude closed before returning the Studio result")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_labels_follow_the_catalog_and_launch_uses_the_original_selection() -> Result<()> {
+        let entries = json!([
+            {"value":"default","displayName":"Default (recommended)","resolvedModel":"claude-opus-5[1m]"},
+            {"value":"sonnet","displayName":"Sonnet","resolvedModel":"claude-sonnet-5-5","supportedEffortLevels":["medium","high"]},
+            {"value":"haiku","displayName":"Haiku","resolvedModel":"claude-haiku-4-5-20251001","supportsEffort":false},
+            {"value":"claude-fable-5[1m]","displayName":"Fable","resolvedModel":"claude-fable-5"},
+            {"value":"internal/deploy","displayName":"Design Preview","resolvedModel":"internal/deploy"},
+            {"value":"legacy","displayName":"Legacy Deployment"}
+        ]);
+        let catalog = Catalog {
+            models: parse_models(&entries)?,
+            ..Default::default()
+        };
+        for (entry, expected) in catalog.models.iter().zip([
+            "Claude Default · Opus 5 (1M)",
+            "Claude Sonnet 5.5",
+            "Claude Haiku 4.5",
+            "Claude Fable 5 (1M)",
+            "Claude Design Preview",
+            "Claude Legacy Deployment",
+        ]) {
+            assert_eq!(
+                catalog.claude_label(&entry.model).as_deref(),
+                Some(expected)
+            );
+            let mut args = Vec::new();
+            add_inference(&mut args, &entry.model, "")?;
+            assert_eq!(
+                args,
+                ["--model", entry.model.strip_prefix("claude:").unwrap()]
+            );
+        }
+        assert_eq!(catalog.models[1].supported_reasoning_efforts.len(), 2);
+        assert!(catalog.models[2].supported_reasoning_efforts.is_empty());
+        assert_eq!(
+            catalog.claude_label("claude:claude-sonnet-4-6").as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        Ok(())
+    }
 }
