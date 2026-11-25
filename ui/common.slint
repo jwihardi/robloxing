@@ -11,6 +11,8 @@ export struct ThemeColors {
     text: color,
     muted: color,
     accent: color,
+    symbol: color,
+    keyword: color,
     accent-hover: color,
     disabled: color,
     ample: color,
@@ -32,6 +34,16 @@ export global Theme {
     out property <color> text: colors.text;
     out property <color> muted: colors.muted;
     out property <color> accent: colors.accent;
+    out property <color> symbol: colors.symbol;
+    out property <color> keyword: colors.keyword;
+    out property <string> mono: "Consolas";
+    public pure function state-color(state: string) -> color {
+        if state == "Finished" || state == "Accepted" || state == "Ready" { return ample; }
+        if state == "Blocked" || state == "Failed" { return scarce; }
+        if state == "Queued" || state == "Ready for review" || state == "Interrupted" { return halfway; }
+        if state == "Working" || state == "Running" || state == "In progress" || state == "Integrating" || state == "Checking" { return symbol; }
+        return muted;
+    }
     out property <color> accent-hover: colors.accent-hover;
     out property <color> disabled: colors.disabled;
     out property <color> ample: colors.ample;
@@ -46,12 +58,15 @@ export component Action inherits Rectangle {
     in property <bool> icon-only: false;
     in property <bool> primary: false;
     in property <bool> selected: false;
+    in property <bool> outlined: false;
+    in property <color> glyph-color: root.selected ? Theme.accent : Theme.muted;
+    in property <string> label-font: "Segoe UI";
     in property <bool> enabled: true;
     callback activate();
     height: 36px;
     border-radius: primary ? 18px : 9px;
-    border-width: focus.has-focus ? 1px : 0px;
-    border-color: Theme.accent;
+    border-width: focus.has-focus || outlined ? 1px : 0px;
+    border-color: focus.has-focus ? Theme.accent : Theme.line;
     background: primary ? (enabled ? (area.pressed ? Theme.muted : area.has-hover ? Theme.accent-hover : Theme.accent) : Theme.disabled)
         : enabled && area.pressed ? Theme.track : selected ? Theme.selected : enabled && area.has-hover ? Theme.surface : transparent;
     accessible-role: button;
@@ -63,8 +78,8 @@ export component Action inherits Rectangle {
         padding-left: root.icon-only ? 0px : 10px; padding-right: root.icon-only ? 0px : 10px;
         spacing: 10px; alignment: root.icon-only ? center : start;
         if root.glyph != "": Text { text: root.glyph; vertical-alignment: center; font-size: 15px;
-            font-family: "Segoe MDL2 Assets"; color: root.primary && root.enabled ? Theme.canvas : Theme.muted; accessible-role: none; }
-        if !root.icon-only && root.detail == "": Text { text: root.label; vertical-alignment: center; font-size: 14px;
+            font-family: "Segoe MDL2 Assets"; color: root.primary && root.enabled ? Theme.canvas : root.glyph-color; accessible-role: none; }
+        if !root.icon-only && root.detail == "": Text { text: root.label; vertical-alignment: center; font-size: 14px; font-family: root.label-font;
             color: root.primary && root.enabled ? Theme.canvas : root.enabled ? Theme.text : Theme.muted; overflow: elide; accessible-role: none; }
         if root.detail != "": VerticalLayout { alignment: center; spacing: 2px;
             Text { text: root.label; color: Theme.text; font-size: 14px; overflow: elide; min-width: 0px; accessible-role: none; }

@@ -246,6 +246,10 @@ class FixtureProvider {
                     continue;
                 }
                 if (Mode("small-talk")) { Done("Hello!"); continue; }
+                if (Mode("formatted-reply")) {
+                    Done("## Project structure\n\nThe app opens the **current folder** and remembers the last active chat.\n\n```rust\nfn workspace_title(name: &str) -> String {\n    // Keep the folder name in the title bar.\n    format!(\"Workshop / {}\", name)\n}\n```\n\nCall `workspace_title` when the selected project changes.");
+                    continue;
+                }
                 if (Mode("blocker")) {
                     File.WriteAllText("answer.txt","partial");
                     Send(new {id="block",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="block",tool="workshop_blocked",arguments=new {reason="Missing release input"}}});

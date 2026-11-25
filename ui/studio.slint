@@ -225,7 +225,7 @@ export component StudioPage inherits Rectangle {
         }
         if Studio.jobs.length > 0: HorizontalLayout { height: 30px; spacing: 10px;
             Text { text: Studio.selected.title; font-size: 18px; font-weight: 600; color: Theme.text; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-            Text { text: Studio.selected.state; color: Theme.muted; font-size: 13px; vertical-alignment: center; }
+            Text { text: Studio.selected.state; color: Theme.state-color(Studio.selected.state); font-family: Theme.mono; font-size: 13px; vertical-alignment: center; }
         }
         if Studio.jobs.length > 0: HorizontalLayout { vertical-stretch: 1;
             Rectangle { horizontal-stretch: 1; background: Theme.sidebar; border-radius: 12px; clip: true;
@@ -253,7 +253,7 @@ export component StudioPage inherits Rectangle {
             }
         }
         if Studio.jobs.length > 0: HorizontalLayout { height: 28px; spacing: 8px;
-            Text { text: root.ready ? Studio.selected.detail : ""; horizontal-stretch: 1; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
+            Text { text: root.ready ? Studio.selected.detail : ""; horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
             if root.ready && !root.binary && Studio.selected.detail != "": Action { label: root.show-details ? "Preview" : "Details"; width: 72px; height: 28px; selected: root.show-details; activate => {root.show-details = !root.show-details;} }
             Action { label: "Reuse settings"; width: 112px; height: 28px; activate => {Studio.command("reuse");} }
         }

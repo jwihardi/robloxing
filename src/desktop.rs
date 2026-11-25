@@ -7,6 +7,7 @@ mod inspector;
 mod notifications;
 mod preferences;
 mod sketch;
+mod transcript;
 use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
 use std::{
@@ -28,7 +29,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
@@ -1499,6 +1500,7 @@ fn main() -> Result<()> {
         );
     }
     let ui = Desk::new()?;
+    transcript::connect(&ui);
     appearance::connect(&ui);
     ui.on_has_content(|text| !text.trim().is_empty());
     let (tx, rx) = mpsc::sync_channel(256);

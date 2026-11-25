@@ -64,6 +64,9 @@ fn apply_css(css: &str, mut palette: ThemeColors) -> Result<ThemeColors> {
         "Use one :root block or a list of color variables."
     );
     let mut has_colors = false;
+    let mut custom_accent = false;
+    let mut custom_symbol = false;
+    let mut custom_keyword = false;
     for line in body.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         let (name, value) = line
             .split_once(':')
@@ -81,7 +84,18 @@ fn apply_css(css: &str, mut palette: ThemeColors) -> Result<ThemeColors> {
             "--line" => &mut palette.line,
             "--text" => &mut palette.text,
             "--muted" => &mut palette.muted,
-            "--accent" => &mut palette.accent,
+            "--accent" => {
+                custom_accent = true;
+                &mut palette.accent
+            }
+            "--symbol" => {
+                custom_symbol = true;
+                &mut palette.symbol
+            }
+            "--keyword" => {
+                custom_keyword = true;
+                &mut palette.keyword
+            }
             "--accent-hover" => &mut palette.accent_hover,
             "--disabled" => &mut palette.disabled,
             "--ample" => &mut palette.ample,
@@ -99,6 +113,13 @@ fn apply_css(css: &str, mut palette: ThemeColors) -> Result<ThemeColors> {
         has_colors,
         "Enter at least one color variable to preview your theme."
     );
+    // Older themes can use their existing accent for the new syntax roles.
+    if custom_accent && !custom_symbol {
+        palette.symbol = palette.accent;
+    }
+    if custom_accent && !custom_keyword {
+        palette.keyword = palette.accent;
+    }
     Ok(palette)
 }
 
@@ -343,6 +364,11 @@ mod tests {
             defaults.clone(),
         )?;
         assert_eq!(palette.accent, Color::from_rgb_u8(0x11, 0x22, 0x33));
+        assert_eq!(palette.symbol, palette.accent);
+        assert_eq!(palette.keyword, palette.accent);
+        let custom = apply_css("--keyword: #abcdef; --accent: #123", defaults.clone())?;
+        assert_eq!(custom.keyword, Color::from_rgb_u8(0xab, 0xcd, 0xef));
+        assert_eq!(custom.symbol, custom.accent);
         assert_eq!(palette.text, Color::from_rgb_u8(0xab, 0xcd, 0xef));
         assert_eq!(palette.canvas, defaults.canvas);
         for invalid in [

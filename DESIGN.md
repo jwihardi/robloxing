@@ -3,18 +3,21 @@ version: alpha
 name: Workshop
 description: A native dark workspace for project conversations, agents and assets.
 colors:
-  rail: "#101217"
-  sidebar: "#14161b"
-  canvas: "#191c22"
-  surface: "#252a33"
-  selected: "#303643"
-  line: "#393e49"
-  text: "#f0f1f5"
-  muted: "#aeb5c3"
-  accent: "#b9c9ff"
+  rail: "#101317"
+  sidebar: "#13181d"
+  canvas: "#171c22"
+  surface: "#222a32"
+  selected: "#2a363d"
+  line: "#35414a"
+  text: "#edf2f4"
+  muted: "#a7b6c1"
+  accent: "#86e0c0"
+  symbol: "#a7bdff"
+  keyword: "#d4aff2"
 typography:
   sans: { fontFamily: "Segoe UI" }
   display: { fontFamily: "Segoe UI" }
+  mono: { fontFamily: "Consolas" }
 rounded:
   composer: "23px"
   action: "9px"
@@ -50,7 +53,9 @@ Each preset has a miniature conversation thumbnail and the active theme has a ch
 
 ## Components
 
-The files in `themes/` own the preset colors. Their CSS custom properties map directly to `ThemeColors` in `ui/common.slint`, which supplies the runtime palette to app components. The values above document Workshop Dark. The canvas brightness also selects the light or dark treatment for standard Slint widgets. Segoe UI carries both headings and conversation text. In Workshop Dark the rail is the darkest surface, the workspace is brighter, and selected actions and focused controls use a pale periwinkle accent. Capacity meters pair their green-to-red scale with numeric values. Use a labeled action for every icon-only control and keep advanced information available by keyboard.
+The files in `themes/` own the preset colors. Their CSS custom properties map directly to `ThemeColors` in `ui/common.slint`, which supplies the runtime palette to app components. The values above document Workshop Dark. Canvas brightness selects the light or dark treatment for standard Slint widgets. Segoe UI carries headings and conversation text. Consolas identifies code, model names and technical metadata. Mint marks the active destination and the assistant speaking. Blue identifies symbols and models, lilac identifies keywords and agent controls, and amber highlights constants and pending review. Capacity meters pair their green-to-red scale with numeric values. Worker states keep explicit labels.
+
+Replies use the native transcript in `ui/transcript.slint`. Headings break up long answers. Code sits in a recessed panel with a language header and a keyboard-accessible copy action. Streaming code appears immediately in monospace and gains syntax colors when the reply settles. Saved conversations render through the same component.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 |---|---|---|---|---|

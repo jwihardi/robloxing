@@ -1,0 +1,68 @@
+import { Action, Theme, ThemeColors } from "common.slint";
+
+export enum BlockKind { prose, rich, heading, code }
+export struct ReplyBlock { kind: BlockKind, text: string, language: string, styled: styled-text }
+export global Transcript {
+    pure callback blocks(string) -> [ReplyBlock];
+    pure callback highlight(string, string, ThemeColors) -> styled-text;
+}
+
+component CodeSnippet inherits Rectangle {
+    in property <ReplyBlock> block;
+    in property <bool> streaming;
+    private property <bool> copied;
+    preferred-height: column.preferred-height;
+    background: Theme.rail; border-color: Theme.line; border-width: 1px; border-radius: 12px;
+    column := VerticalLayout {
+        padding: 1px; spacing: 0px;
+        HorizontalLayout {
+            height: 38px; padding-left: 13px; padding-right: 6px; spacing: 9px;
+            Text { text: "</>"; color: Theme.keyword; font-family: Theme.mono; font-size: 13px; vertical-alignment: center; accessible-role: none; }
+            Text { text: root.block.language == "" ? "Code" : root.block.language; font-family: Theme.mono;
+                color: Theme.muted; font-size: 12px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
+            Action { label: root.copied ? "Copied" : "Copy"; accessible-label: "Copy code";
+                glyph: root.copied ? "\u{e73e}" : "\u{e8c8}"; glyph-color: root.copied ? Theme.accent : Theme.muted;
+                width: 90px; height: 32px;
+                activate => { source.select-all(); source.copy(); source.clear-selection(); root.copied = true; } }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+        VerticalLayout { padding: 14px; alignment: start;
+            if !root.streaming: StyledText {
+                text: Transcript.highlight(root.block.text, root.block.language, Theme.colors);
+                default-color: Theme.text; default-font-family: Theme.mono; default-font-size: 14px; selectable: true;
+                accessible-role: text; accessible-label: "Code"; accessible-value: root.block.text;
+                selection-background-color: Theme.selected; selection-foreground-color: Theme.text;
+            }
+            if root.streaming: TextInput { text: root.block.text; read-only: true; single-line: false; wrap: word-wrap;
+                color: Theme.text; font-family: Theme.mono; font-size: 14px; accessible-label: "Code"; }
+        }
+    }
+    // Use the native clipboard and preserve the source's final newline.
+    source := TextInput { visible: false; text: root.block.text; read-only: true; single-line: false; }
+    Timer { interval: 1500ms; running: root.copied; triggered => { root.copied = false; } }
+}
+
+export component ReplyView inherits VerticalLayout {
+    in property <string> body;
+    in property <string> provider;
+    in property <bool> streaming;
+    alignment: start; spacing: 10px;
+    HorizontalLayout { height: 19px; alignment: start; spacing: 8px;
+        Text { text: ">"; color: Theme.accent; font-family: Theme.mono; font-size: 14px; vertical-alignment: center; accessible-role: none; }
+        Text { text: root.provider; color: Theme.accent; font-family: Theme.mono; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+    }
+    for block in Transcript.blocks(root.body): VerticalLayout {
+        if block.kind == BlockKind.code: CodeSnippet { block: block; streaming: root.streaming; }
+        if block.kind == BlockKind.rich: StyledText {
+            text: block.styled; default-color: Theme.text; default-font-size: 16px; selectable: true;
+            selection-background-color: Theme.selected; selection-foreground-color: Theme.text;
+            accessible-role: text; accessible-label: root.provider + " reply"; accessible-value: block.text;
+        }
+        if block.kind == BlockKind.prose || block.kind == BlockKind.heading: TextInput {
+            text: block.text; read-only: true; single-line: false; wrap: word-wrap; color: Theme.text;
+            font-size: block.kind == BlockKind.heading ? 19px : 16px;
+            font-weight: block.kind == BlockKind.heading ? 600 : 400;
+            accessible-label: root.provider + " reply";
+        }
+    }
+}

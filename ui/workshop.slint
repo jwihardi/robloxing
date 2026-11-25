@@ -1,4 +1,6 @@
 import { Theme, ThemeColors, Action } from "common.slint";
+import { ReplyView } from "transcript.slint";
+export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
 export { ThemeColors } from "common.slint";
 import { AppearancePage } from "appearance.slint";
 import { SketchPad, Sketch } from "sketch.slint";
@@ -43,7 +45,7 @@ component RemainingValue inherits Text {
     color: fraction < 0 ? Theme.muted : fraction < 0.5
         ? Theme.halfway.mix(Theme.scarce, fraction * 2)
         : Theme.ample.mix(Theme.halfway, (fraction - 0.5) * 2);
-    vertical-alignment: center; font-size: 13px;
+    vertical-alignment: center; font-size: 13px; font-family: Theme.mono;
 }
 
 component InlineReading inherits HorizontalLayout {
@@ -80,7 +82,8 @@ component WorkerGroup inherits VerticalLayout {
     alignment: start; spacing: 0px;
     Action {
         label: root.label;
-        glyph: root.open ? "\u{e70d}" : "\u{e76c}";
+        glyph: root.open ? "\u{e70d}" : "\u{e76c}"; glyph-color: Theme.keyword; label-font: Theme.mono;
+        outlined: true;
         accessible-expanded: root.open;
         activate => { root.toggle(); }
     }
@@ -97,14 +100,14 @@ component WorkerGroup inherits VerticalLayout {
                     Action { label: agent.title; horizontal-stretch: 1; selected: root.expanded-worker == agent.id;
                         accessible-expanded: root.expanded-worker == agent.id; activate => {root.choose-worker(agent.id);}
                     }
-                    Text { text: agent.state; color: agent.running ? Theme.accent : Theme.muted; vertical-alignment: center; font-size: 13px; }
+                    Text { text: agent.state; color: Theme.state-color(agent.state); vertical-alignment: center; font-family: Theme.mono; font-size: 13px; }
                 }
                 if root.expanded-worker == agent.id: VerticalLayout { padding-left: 10px; padding-bottom: 9px; spacing: 5px;
                     Text { text: agent.assignment; color: Theme.text; font-size: 14px; wrap: word-wrap; }
                     if agent.detail != "" && agent.detail != agent.assignment: Text { text: agent.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     if agent.criteria != "": Text { text: "Acceptance · " + agent.criteria; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     if agent.dependencies != "": Text { text: "Depends on · " + agent.dependencies; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
-                    Text { text: agent.stats; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                    Text { text: agent.stats; color: Theme.symbol; font-family: Theme.mono; font-size: 12px; wrap: word-wrap; }
                     if agent.running: HorizontalLayout { alignment: start; spacing: 6px;
                         Action { label: "Send direction"; activate => {root.direct-worker(agent.id,agent.title);} }
                         Action { label: "Stop worker"; activate => {root.stop-worker(agent.id);} }
@@ -289,7 +292,7 @@ component InferencePicker inherits Rectangle {
     in property <string> role-name;
     in property <bool> enabled;
     callback open();
-    preferred-width: pill-text.preferred-width + 38px;
+    preferred-width: pill-text.preferred-width + 42px;
     height: 34px; border-radius: 17px;
     background: enabled && hit.pressed ? Theme.line : hit.has-hover && enabled ? Theme.track : Theme.selected;
     border-width: trigger.has-focus ? 1px : 0px; border-color: Theme.text;
@@ -297,10 +300,12 @@ component InferencePicker inherits Rectangle {
     accessible-description: choices.current-model + ", " + choices.current-effort;
     accessible-enabled: enabled; accessible-action-default => { if root.enabled { root.open(); } }
     forward-focus: trigger;
-    pill-text := Text {
-        x: 12px; width: parent.width - 36px; vertical-alignment: center;
-        text: root.choices.current-model + "  ·  " + root.choices.current-effort;
-        color: root.enabled ? Theme.text : Theme.muted; font-size: 13px; overflow: elide; accessible-role: none;
+    pill-text := HorizontalLayout {
+        x: 12px; width: parent.width - 36px;
+        height: parent.height; spacing: 7px;
+        Text { text: root.choices.current-model; color: root.enabled ? Theme.symbol : Theme.muted; overflow: elide; horizontal-stretch: 1;
+            font-family: Theme.mono; font-size: 13px; vertical-alignment: center; min-width: 0px; accessible-role: none; }
+        Text { text: root.choices.current-effort; color: Theme.muted; font-size: 12px; vertical-alignment: center; accessible-role: none; }
     }
     Text { x: parent.width - 22px; width: 14px; vertical-alignment: center; text: "\u{e70d}"; font-family: "Segoe MDL2 Assets"; color: Theme.muted; font-size: 10px; accessible-role: none; }
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { trigger.focus(); root.open(); } }
@@ -337,7 +342,7 @@ component Composer inherits Rectangle {
     private property <length> attachment-height: min(2,root.attachments.length) * 32px;
     private property <length> recipient-height: root.recipient == "" ? 0px : 32px;
     height: 74px + min(108px, max(38px, input.preferred-height)) + root.attachment-height + root.recipient-height; border-radius: 23px; background: Theme.surface;
-    border-width: 1px; border-color: input.has-focus ? Theme.accent.mix(Theme.line,0.55) : Theme.line;
+    border-width: 1px; border-color: input.has-focus ? Theme.accent.mix(Theme.line,0.65) : Theme.line;
     public function focus-input() { input.focus(); }
     public function focus-add() { plus.focus(); }
     public function paste-text() { input.focus(); input.paste(); }
@@ -389,7 +394,9 @@ component Composer inherits Rectangle {
     plus := Action { x: 9px; y: parent.height - 51px; width: 40px; height: 40px; border-radius: 20px;
         label: "Add to message"; glyph: "\u{e710}"; icon-only: true; enabled: root.enabled;
         activate => {root.open-add(self.absolute-position.x,self.absolute-position.y,self.width,self.height);} }
-    subagent-button := Action { x: plus.x + plus.width + 2px; y: parent.height - 48px; width: 95px; height: 34px;
+    subagent-button := Action { x: plus.x + plus.width + 2px; y: parent.height - 48px;
+        icon-only: root.width < 510px; width: self.icon-only ? 36px : 121px; height: 34px;
+        glyph: "\u{e716}"; glyph-color: Theme.keyword;
         label: "Subagents"; selected: root.custom-subagents; accessible-description: root.custom-subagents ? "Chat override" : "Global defaults"; enabled: root.policy-enabled; activate => { root.subagents(); } }
     inference := InferencePicker {
         private property <length> right-edge: parent.width - (root.running ? (delivery-button.visible ? 144px : 114px) : 64px);
@@ -665,7 +672,7 @@ export component Desk inherits Window {
                 font-size: 13px; vertical-alignment: center; }
             usage-button := UsageSummary { context: root.context-meter; windows: root.usage-meters;
                 open => { root.show-panel(OpenPanel.usage, self.absolute-position.x, self.absolute-position.y, self.width, self.height); } }
-            activity-button := Action { visible:!root.home; label:"Activity"; glyph:"\u{e9d9}"; icon-only:pane.width < 720px;
+            activity-button := Action { visible:!root.home; label:"Activity"; glyph:"\u{e9d9}"; glyph-color: Theme.keyword; icon-only:pane.width < 720px;
                 width: !self.visible ? 0px : self.icon-only ? 34px : 96px; selected:root.open-panel == OpenPanel.activity;
                 activate=>{if root.open-panel == OpenPanel.activity {root.dismiss-panel();} else {root.show-panel(OpenPanel.activity,self.absolute-position.x,self.absolute-position.y,self.width,self.height);}} }
             options := Action {
@@ -673,7 +680,7 @@ export component Desk inherits Window {
                 activate => {root.show-panel(OpenPanel.options, self.absolute-position.x, self.absolute-position.y, self.width, self.height);}
             }
             outputs-button := Action {
-                label: "Outputs"; glyph: "\u{e8b9}"; icon-only: pane.width < 600px;
+                label: "Outputs"; glyph: "\u{e8b9}"; glyph-color: Theme.symbol; icon-only: pane.width < 600px;
                 width: self.icon-only ? 36px : 108px; selected: root.open-panel == OpenPanel.outputs;
                 activate => {if root.open-panel == OpenPanel.outputs { root.dismiss-panel(); } else { root.show-outputs(); }}
             }
@@ -682,17 +689,21 @@ export component Desk inherits Window {
         if root.home && root.turns.length == 0 && !Sketch.expanded: VerticalLayout {
             x: (parent.width - self.width) / 2; width: min(pane.measure, 590px);
             height: self.preferred-height; y: max(58px, ((root.project == "" ? pane.height : pad.y) - self.height) / 2);
-            alignment: start; spacing: 13px;
-            HorizontalLayout { alignment: start; height: 41px; WorkshopMark { width: 38px; height:38px; } }
-            Text { text: root.project == "" ? "Open a project" : "What are we building?"; font-size: pane.width < 580px ? 29px : 36px;
+            alignment: start; spacing: 14px;
+            HorizontalLayout { alignment: start; height: 40px; spacing: 12px;
+                WorkshopMark { width: 38px; height:38px; }
+                if root.project != "": Text { text: root.project; color: Theme.accent; vertical-alignment: center;
+                    font-family: Theme.mono; font-size: 14px; overflow: elide; min-width: 0px; }
+            }
+            Text { text: root.project == "" ? "Open a project" : "What are we building?"; font-size: pane.width < 580px ? 30px : 39px;
                 color: Theme.text; font-weight: 600; wrap:word-wrap; }
             Text { text: root.project == "" ? "Choose a folder to start a chat and keep your project’s work together." :
                     "Ask " + root.chat-provider + " about the project, plan a change, or give the team a task."; color:Theme.muted; font-size:15px; wrap:word-wrap; }
             HorizontalLayout { alignment:start; spacing:10px; height:38px;
                 if root.project == "": Action { label:"Choose folder…"; glyph:"\u{e8b7}"; primary:true; width:145px; enabled:!root.busy; activate=>{root.open-project();} }
-                if root.project != "" && root.draft == "": Action { label:"Explore project"; glyph:"\u{e8b7}"; width:147px; selected:true;
+                if root.project != "" && root.draft == "": Action { label:"Explore project"; glyph:"\u{e8b7}"; glyph-color: Theme.halfway; width:147px; outlined:true;
                     activate=>{root.draft="Give me a tour of this project and point me to the main entry points."; composer.focus-input();} }
-                if root.project != "" && root.draft == "": Action { label:"Plan a change"; glyph:"\u{e9d5}"; width:146px; selected:true;
+                if root.project != "" && root.draft == "": Action { label:"Plan a change"; glyph:"\u{e9d5}"; glyph-color: Theme.keyword; width:146px; outlined:true;
                     activate=>{root.draft="Help me plan this change: "; composer.focus-input();} }
             }
         }
@@ -701,15 +712,18 @@ export component Desk inherits Window {
             height: max(0px, queue-strip.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
-                width: transcript.visible-width; padding-right: 8px; padding-top: 8px; padding-bottom: 10px; spacing: 25px; alignment: start;
+                width: transcript.visible-width; padding-right: 8px; padding-top: 18px; padding-bottom: 10px; spacing: 24px; alignment: start;
                 if !root.home && root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
                 for turn in root.turns: message := Rectangle {
+                    private property <bool> reply: !turn.from-user && !turn.delivery-notice && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
                     private property <bool> has-sketch: turn.sketch.width > 0;
                     private property <bool> enlarged;
                     private property <length> sketch-width: self.enlarged ? self.width - 32px : min(304px, self.width * 0.84 - 32px);
                     private property <length> image-height: min(self.enlarged ? 540px : 212px, self.sketch-width * turn.sketch.height / max(1,turn.sketch.width));
                     private property <length> preview-height: self.has-sketch ? self.image-height + 42px : 0px;
-                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    reply-view := ReplyView { visible: message.reply; width: parent.width;
+                        height: self.preferred-height; body: message.reply ? turn.body : ""; provider: root.chat-provider; }
                     if turn.shot != "": Action { width: min(248px,parent.width); x: parent.width - self.width; height: parent.height;
                         label: "Sent screenshot"; icon-only: true; selected: true;
                         Image { x: 6px; y: 6px; width: parent.width - 12px; height: 130px; source: root.shot-image(turn.shot,false); image-fit: contain; }
@@ -725,7 +739,7 @@ export component Desk inherits Window {
                         direct-worker(id,title) => {root.direct-worker(id,title);}
                     }
                     bubble := Rectangle {
-                        visible: turn.dispatch-id == 0 && turn.shot == "";
+                        visible: !message.reply && turn.dispatch-id == 0 && turn.shot == "";
                         width: message.has-sketch ? min(parent.width, max(message.sketch-width + 32px, min(parent.width * 0.84,body.preferred-width + 32px))) : turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
                         x: turn.from-user ? parent.width - self.width : 0px; height: parent.height;
                         background: turn.from-user ? Theme.surface : transparent; border-radius: 14px;
@@ -760,13 +774,12 @@ export component Desk inherits Window {
                     HorizontalLayout { alignment:start; Action { label:root.checkpoint-only ? "Accept decisions" : "Accept change"; width:146px; selected:true; enabled:!root.busy; activate=>{root.operate("accept");} } }
                 }
                 if !root.home && root.later-messages: Action { label: "Newer messages"; activate => {root.page(false,false);} }
-                if !root.later-messages && root.running && root.partial != "": TextInput {
-                    text: root.partial; read-only: true; single-line: false; wrap: word-wrap;
-                    color: Theme.text; font-size: 16px; accessible-label: root.chat-provider + " reply";
+                if !root.later-messages && root.running && root.partial != "": ReplyView {
+                    provider: root.chat-provider; body: root.partial; streaming: true;
                 }
                 if !root.later-messages && root.running && root.partial == "": Text { text: root.chat-provider + " is working…"; color: Theme.muted; font-size: 14px; }
                 if !root.home && (root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled"): Text {
-                    text: root.action; color: Theme.muted; font-size: 14px; wrap: word-wrap;
+                    text: root.action; color: Theme.state-color(root.state-label); font-size: 14px; wrap: word-wrap;
                 }
             }
         }
@@ -860,8 +873,8 @@ export component Desk inherits Window {
                             width: parent.width; height: parent.height; label: "View screenshot " + item.date; icon-only: true;
                             Rectangle { x: 0px; y: 0px; width: parent.width; height: 128px; border-radius: 10px; background: Theme.surface; clip: true;
                                 Image { width: parent.width; height: parent.height; source: root.shot-image(item.key,false); image-fit: contain; } }
-                            Text { x: 2px; y: 134px; width: parent.width - 4px; height: 20px; text: item.project; overflow: elide; color: Theme.text; font-size: 14px; }
-                            Text { x: 2px; y: 155px; width: parent.width - 4px; height: 16px; text: item.date; color: Theme.muted; font-size: 12px; }
+                            Text { x: 2px; y: 134px; width: parent.width - 4px; height: 20px; text: item.project; overflow: elide; color: Theme.text; font-size: 14px; font-weight: 600; }
+                            Text { x: 2px; y: 155px; width: parent.width - 4px; height: 16px; text: item.date; color: Theme.muted; font-family: Theme.mono; font-size: 12px; }
                             activate => {root.view-shot(item.key);} }
                     }
                 }
@@ -941,12 +954,11 @@ export component Desk inherits Window {
                     reload=>{root.reload-models();} back=>{root.settings-open=false;} }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
-                for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: root.recommendations ? max(76px, row-copy.preferred-height + 20px) : 60px;
+                for row in root.settings-rows: VerticalLayout { width: preference-list.visible-width; height: max(root.recommendations ? 76px : 60px, row-copy.preferred-height + 18px);
                     HorizontalLayout { spacing: 6px; padding-left: 2px; padding-right: 7px;
                         row-copy := VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 3px;
                             Text { text: row.label; color: Theme.text; font-size: 15px; font-weight: 600; min-width: 0px; overflow: elide; }
-                            Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 12px; min-width: 0px;
-                                wrap: root.recommendations ? word-wrap : no-wrap; overflow: elide; }
+                            Text { text: row.detail; color: Theme.muted; font-size: root.recommendations ? 14px : 13px; min-width: 0px; wrap: word-wrap; }
                         }
                         if root.confirm-id == row.id: VerticalLayout { alignment: center; width: 74px;
                             Action { label: "Cancel"; width: 72px; height: 32px; activate => {root.confirm-id = "";} }
@@ -1001,8 +1013,9 @@ export component Desk inherits Window {
         }
         if root.chat-screen: VerticalLayout {
             padding: 14px; padding-top: 18px; spacing: 9px;
-            Text { text: "Project"; color: Theme.muted; font-size: 12px; height: 16px; }
-            Action { label: root.project == "" ? "Choose folder…" : root.project; accessible-label:"Switch project"; enabled: !root.busy; height:32px;
+            Text { text: "Project"; color: Theme.muted; font-family: Theme.mono; font-size: 12px; height: 16px; }
+            Action { label: root.project == "" ? "Choose folder…" : root.project; accessible-label:"Switch project"; enabled: !root.busy; height:36px;
+                glyph: "\u{e8b7}"; glyph-color: Theme.halfway; label-font: Theme.mono;
                 activate=>{root.open-project();}
                 Text { x: parent.width - 20px; text:"\u{e70d}"; font-family:"Segoe MDL2 Assets"; color:Theme.muted; font-size:11px; vertical-alignment:center; }
             }
@@ -1102,7 +1115,7 @@ export component Desk inherits Window {
                     Text { text:"Session activity"; color:Theme.text; font-size:18px; font-weight:600; vertical-alignment:center; horizontal-stretch:1; }
                     Action { label:"Close activity"; glyph:"\u{e711}"; icon-only:true; width:30px; height:30px; activate=>{root.dismiss-panel();} }
                 }
-                Text { text:root.running ? root.chat-provider + " is working" : root.state-label; color:Theme.accent; font-size:14px; font-weight:600; }
+                Text { text:root.running ? root.chat-provider + " is working" : root.state-label; color:Theme.state-color(root.running ? "In progress" : root.state-label); font-family:Theme.mono; font-size:14px; }
                 if root.action != "": Text { text:root.action; color:Theme.muted; wrap:word-wrap; font-size:14px; }
                 if root.workers.length > 0: Rectangle { height:1px; background:Theme.line; }
                 if root.workers.length > 0: WorkerGroup { label:"Subagents (" + root.workers.length + ")"; workers:root.workers;

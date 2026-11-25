@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -7,6 +7,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($SketchOnly) { $parameters.SketchOnly = $true }
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
     if ($DeliveryOnly) { $parameters.DeliveryOnly = $true }
+    if ($TranscriptOnly) { $parameters.TranscriptOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
     return
 }
@@ -16,6 +17,8 @@ using System;
 using System.Runtime.InteropServices;
 public class WorkshopPointer {
     [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref Point p);
@@ -159,12 +162,14 @@ function Open-SketchPad {
     Wait-For { Named 'Sketch canvas' } 'drawing surface'
 }
 function Save-PrivateWindow($path) {
-    $rect = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
-    $bmp = [Drawing.Bitmap]::new([int]$rect.Width, [int]$rect.Height)
+    $rect = [WorkshopPointer+Rect]::new()
+    if (![WorkshopPointer]::GetClientRect($appWindow,[ref]$rect)) { throw 'Could not measure the private Workshop window' }
+    $bmp = [Drawing.Bitmap]::new($rect.Right, $rect.Bottom)
     $g = [Drawing.Graphics]::FromImage($bmp)
     $dc = $g.GetHdc()
     try {
-        if (![WorkshopPointer]::PrintWindow($appWindow,$dc,2)) { throw 'Could not render the private Workshop window' }
+        # Render client content into client-sized pixels, including the entire composer at high DPI.
+        if (![WorkshopPointer]::PrintWindow($appWindow,$dc,3)) { throw 'Could not render the private Workshop window' }
     } finally { $g.ReleaseHdc($dc); $g.Dispose() }
     try { $bmp.Save($path,[Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
 }
@@ -379,6 +384,17 @@ function Test-Sketch {
     Click 'New chat'
     Wait-For { Named 'New conversation' } 'fresh chat before reopening the sketch history'
     Click $caption
+    Wait-For { Named 'Enlarge sketch' } 'reopened drawing'
+    # The reopened chat starts at the latest reply. Bring the earlier sketch back into view.
+    $drawing = (Named 'Enlarge sketch').Current.BoundingRectangle
+    $mouse = [WorkshopPointer+Point]::new()
+    $mouse.X = [int]($drawing.X + $drawing.Width / 2)
+    $mouse.Y = [int]($drawing.Y + $drawing.Height / 2)
+    $screenPos = [IntPtr](($mouse.Y -shl 16) -bor ($mouse.X -band 65535))
+    [void][WorkshopPointer]::ScreenToClient($appWindow, [ref]$mouse)
+    $clientPos = [IntPtr](($mouse.Y -shl 16) -bor ($mouse.X -band 65535))
+    [void][WorkshopPointer]::PostMessage($appWindow,0x200,0,$clientPos)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x20a,(240 -shl 16),$screenPos)
     Wait-For {
         $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
         $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,'Enlarge sketch')
@@ -542,6 +558,39 @@ try {
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
     if ($DeliveryOnly) { Test-Delivery; return }
+    if ($TranscriptOnly) {
+        Save-PrivateWindow (Join-Path $root 'welcome.png')
+        [void](New-Item -ItemType File -Path (Join-Path $root 'formatted-reply'))
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Show me how the project title works.')
+        Click 'Send message'
+        Wait-For { (Named 'Copy code') -and (Named 'New chat').Current.IsEnabled } 'formatted agent response'
+        Save-PrivateWindow (Join-Path $root 'transcript.png')
+        $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](800*$scale),[int](650*$scale),0x16)
+        Wait-For { (Named 'Show sidebar') -and (Named 'Copy code') } 'compact code block'
+        Save-PrivateWindow (Join-Path $root 'transcript-compact.png')
+        Click 'Settings'
+        Wait-For { Named 'Settings sections' } 'compact settings'
+        Click 'Settings sections'
+        Wait-For { Named 'Appearance' } 'settings navigation'
+        Click 'Appearance'
+        Wait-For { Named 'Solarized Light' } 'theme choices'
+        Click 'Solarized Light'
+        Click 'Close settings'
+        Wait-For { Named 'Copy code' } 'open transcript follows theme'
+        Save-PrivateWindow (Join-Path $root 'transcript-light.png')
+        $render = [Drawing.Bitmap]::new((Join-Path $root 'transcript-light.png'))
+        try {
+            $panelColor = [Drawing.ColorTranslator]::FromHtml('#e7dfcb').ToArgb()
+            $panelFound = $false
+            for ($y = [int]($render.Height/4); $y -lt $render.Height*0.8; $y += 8) {
+                if ($render.GetPixel([int]($render.Width*0.6),$y).ToArgb() -eq $panelColor) { $panelFound = $true; break }
+            }
+            if (!$panelFound) { throw 'The open code panel did not switch to Solarized Light' }
+        } finally { $render.Dispose() }
+        "Formatted transcript and responsive theme checks passed. Screenshots in $root"
+        return
+    }
     if ($RecommendedOnly) {
         Click 'Settings'
         Wait-For { Named 'Plugins' } 'settings navigation'

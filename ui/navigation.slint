@@ -6,6 +6,9 @@ export component RailAction inherits Action {
     in property <string> caption;
     icon-only: true;
     height: 56px; border-radius: 12px;
+    if root.selected: Rectangle {
+        x: 0px; y: (parent.height - self.height) / 2; width: 3px; height: 19px; border-radius: 1.5px; background: Theme.accent;
+    }
     VerticalLayout { alignment: center; spacing: 4px;
         Text { text: root.symbol; font-family: "Segoe MDL2 Assets"; font-size: 19px;
             color: root.selected ? Theme.accent : Theme.muted; horizontal-alignment: center; accessible-role: none; }
@@ -17,11 +20,12 @@ export component RailAction inherits Action {
 
 export component WorkshopMark inherits Rectangle {
     width: 34px; height: 34px; background: Theme.brand-fill; border-radius: 11px;
-    for bar[i] in [0.34, 0.56, 0.44]: Rectangle {
-        x: parent.width * (0.23 + i * 0.20); y: (parent.height - self.height) / 2;
-        width: parent.width * 0.12; height: parent.height * bar;
-        border-radius: 2px; background: Theme.accent;
-    }
+    border-width: 1px; border-color: Theme.accent.mix(Theme.brand-fill, 0.22);
+    Path { x: parent.width * 0.22; y: parent.height * 0.30; width: parent.width * 0.28; height: parent.height * 0.37;
+        viewbox-width: 12; viewbox-height: 18; stroke: Theme.accent; stroke-width: 2px;
+        commands: "M 1 1 L 10 9 L 1 17"; }
+    Rectangle { x: parent.width * 0.51; y: parent.height * 0.64; width: parent.width * 0.23;
+        height: 2px; border-radius: 1px; background: Theme.accent; }
 }
 
 export component StudioNavigation inherits VerticalLayout {
@@ -34,7 +38,7 @@ export component StudioNavigation inherits VerticalLayout {
         }
     }
     Rectangle { height: 15px; }
-    Text { text: Studio.area == "Ghidra" ? "Report history" : "Run history"; color: Theme.muted; font-size: 13px; font-weight: 600; }
+    Text { text: Studio.area == "Ghidra" ? "Report history" : "Run history"; color: Theme.symbol; font-family: Theme.mono; font-size: 13px; }
     LineEdit { height: 34px; accessible-label: Studio.area == "Ghidra" ? "Search reports" : "Search assets";
         placeholder-text: Studio.area == "Ghidra" ? "Find binary or function" : "Search assets"; text <=> Studio.query; }
     if Studio.jobs.length == 0: Text { text: Studio.query != "" ? "No matching assets." : "No runs yet"; color: Theme.muted; font-size: 13px; height: 36px; vertical-alignment: center; }

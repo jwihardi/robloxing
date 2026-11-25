@@ -52,13 +52,15 @@ Enable **Settings → Notifications → Notify me when I’m needed** for Window
 
 Open **Settings → Appearance** and select **Workshop Dark**, **Nord**, **Catppuccin Mocha**, or **Solarized Light** to apply it across Workshop. Choose **New theme** to start with the current palette. Give it a name, paste color declarations or choose **Load file…** to read a local CSS file. The preview updates as you edit. **Save theme** applies it and remembers it across projects and restarts. Select a saved custom theme and choose **Edit theme** to change or remove it.
 
-Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Paste a single `:root` block or the declarations inside it. You can start with just a few overrides. Missing variables inherit Workshop Dark. The default file lists every supported color, including surfaces, text, focus accents and usage meters. [Full theme template](themes/workshop-dark.css)
+Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Paste a single `:root` block or the declarations inside it. Missing variables inherit Workshop Dark. If you set `--accent`, symbols and keywords also use that color unless you give them their own values. [Full theme template](themes/workshop-dark.css)
 
 ```css
 :root {
   --canvas: #161922;
   --surface: #252a38;
   --accent: #9ddfc7;
+  --symbol: #a7bdff;
+  --keyword: #d4aff2;
 }
 ```
 
