@@ -23,7 +23,7 @@ export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, inference: string, limits: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, goal-finished: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
 export struct OutputItem { sound: bool, title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
@@ -173,6 +173,11 @@ component Composer inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> running;
     in property <bool> can-send;
+    in property <bool> goal-mode;
+    in property <bool> suggesting-goal;
+    callback accept-goal();
+    callback cancel-goal();
+    callback dismiss-suggestion();
     callback send();
     callback stop();
     in property <string> recipient;
@@ -220,8 +225,17 @@ component Composer inherits Rectangle {
             text <=> root.value; color: Theme.text; font-size: 16px;
             selection-background-color: Theme.selected; single-line: false; wrap: word-wrap;
             vertical-alignment: top; enabled: root.enabled;
-            accessible-label: "Message " + root.chat-provider;
+            accessible-label: root.goal-mode ? "Goal objective" : "Message " + root.chat-provider;
             key-pressed(e) => {
+                if self.preedit-text == "" && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt {
+                    if root.suggesting-goal && (e.text == Key.Tab || e.text == Key.Return) {
+                        root.accept-goal(); return accept;
+                    }
+                    if e.text == Key.Escape {
+                        if root.suggesting-goal { root.dismiss-suggestion(); return accept; }
+                        if root.goal-mode { root.cancel-goal(); return accept; }
+                    }
+                }
                 if e.text == Key.Return && !e.modifiers.shift && self.preedit-text == "" {
                     if root.can-send { root.send(); } return accept;
                 }
@@ -236,19 +250,25 @@ component Composer inherits Rectangle {
         }
     }
     if input.text == "" && input.preedit-text == "": Text {
-        x: 18px; y: scroller.y; color: Theme.muted; text: "Message " + root.chat-provider + "…"; font-size: 16px; accessible-role: none;
+        x: 18px; y: scroller.y; color: Theme.muted; text: root.goal-mode ? "What should the agent work toward?" : "Message " + root.chat-provider + "…"; font-size: 16px; accessible-role: none;
     }
 
     plus := Action { x: 9px; y: parent.height - 51px; width: 40px; height: 40px; border-radius: 20px;
         label: "Add to message"; glyph: "\u{e710}"; icon-only: true; enabled: root.enabled;
         activate => {root.open-add(self.absolute-position.x,self.absolute-position.y,self.width,self.height);} }
     subagent-button := Action { x: plus.x + plus.width + 2px; y: parent.height - 48px;
-        icon-only: root.width < 510px; width: self.icon-only ? 36px : 121px; height: 34px;
+        icon-only: root.width < (root.goal-mode ? 610px : 510px); width: self.icon-only ? 36px : 121px; height: 34px;
         glyph: "\u{e716}"; glyph-color: Theme.keyword;
         label: "Subagents"; selected: root.custom-subagents; accessible-description: root.custom-subagents ? "Chat override" : root.project-worker-defaults ? "Project defaults" : "Global defaults"; enabled: root.policy-enabled; activate => { root.subagents(); } }
+    mode := Action {
+        visible: root.goal-mode; x: subagent-button.x + subagent-button.width + 4px; y: subagent-button.y;
+        width: self.visible ? 76px : 0px; height: 34px; glyph: "\u{e7c1}"; label: "Goal"; glyph-color: Theme.accent;
+        accessible-label: "Exit goal mode"; accessible-description: "Keep the text as a regular message";
+        activate => {root.cancel-goal();}
+    }
     inference := InferencePicker {
         private property <length> right-edge: parent.width - (root.running ? (delivery-button.visible ? 144px : 114px) : 64px);
-        width: min(self.preferred-width, self.right-edge - subagent-button.x - subagent-button.width - 6px); x: self.right-edge - self.width; y: parent.height - 48px;
+        width: min(self.preferred-width, self.right-edge - mode.x - mode.width - 6px); x: self.right-edge - self.width; y: parent.height - 48px;
         role-name: "Chat"; choices: root.choices; enabled: root.picking;
         open => { root.open-picker(self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
     }
@@ -257,7 +277,7 @@ component Composer inherits Rectangle {
     delivery-button := Action { visible: root.running && root.recipient == ""; x: parent.width - 89px; y: parent.height - 51px; width: 30px; height: 40px;
         label: "Send options"; glyph: "\u{e70d}"; icon-only: true; activate => {root.delivery(self.absolute-position.x,self.absolute-position.y,self.width,self.height);} }
     Action { x: parent.width - 58px; y: parent.height - 53px; width: 44px; height: 44px; border-radius: 22px;
-        label: root.recipient != "" ? "Send to worker" : root.running ? "Steer now" : "Send message"; glyph: "\u{e74a}"; icon-only: true; primary: true;
+        label: root.goal-mode ? "Start goal" : root.recipient != "" ? "Send to worker" : root.running ? "Steer now" : "Send message"; glyph: "\u{e74a}"; icon-only: true; primary: true;
         enabled: root.enabled && root.can-send; activate => {root.send();} }
 }
 
@@ -266,20 +286,32 @@ export component Desk inherits Window {
     in property <string> goal-status;
     in property <string> goal-detail;
     in-out property <bool> editing-goal;
-    out property <bool> goal-uses-draft;
+    in-out property <bool> goal-mode;
+    private property <bool> dismissed-goal;
+    changed draft => { root.dismissed-goal = false; }
+    pure callback goal-suggestion(string) -> bool;
+    pure callback goal-draft-text(string) -> string;
+    private property <bool> suggesting-goal: root.project != "" && root.writable && !root.busy && !root.goal-mode && !root.editing-goal
+        && !root.dismissed-goal && root.direction-worker < 0 && root.open-panel == OpenPanel.closed && root.goal-suggestion(root.draft);
+    public function begin-goal-draft() {
+        root.open-panel = OpenPanel.closed;
+        root.clear-recipient();
+        root.goal-mode = true;
+        root.draft = root.goal-draft-text(root.draft);
+        composer.focus-input();
+    }
+    function leave-goal-draft() { root.goal-mode = false; root.dismissed-goal = true; composer.focus-input(); }
     private property <string> goal-input;
-    pure callback initial-goal-text(string,string) -> string;
     callback run-goal(string);
-    public function open-goal(use-draft: bool) {
-        root.goal-uses-draft = use-draft;
-        root.goal-input = use-draft ? root.initial-goal-text(root.draft,root.goal-objective) : root.goal-objective;
+    public function open-goal() {
+        root.goal-input = root.goal-objective;
         root.open-panel = OpenPanel.closed;
         root.editing-goal = true;
         goal-editor.begin();
     }
     public function close-goal() {
         root.editing-goal = false;
-        if !root.goal-uses-draft && root.goal-objective != "" {goal-summary.focus();}
+        if root.goal-objective != "" {goal-summary.focus();}
         else {composer.focus-input();}
     }
     in property <[PickerOption]> queued;
@@ -287,7 +319,7 @@ export component Desk inherits Window {
     in-out property <int> direction-worker: -1;
     in-out property <string> direction-title;
     function direct-worker(id:int,title:string) {
-        root.direction-worker=id; root.direction-title=title; root.open-panel=OpenPanel.closed; composer.focus-input();
+        root.goal-mode=false; root.direction-worker=id; root.direction-title=title; root.open-panel=OpenPanel.closed; composer.focus-input();
     }
     public function clear-recipient() { root.direction-worker=-1; root.direction-title=""; }
     public function close-delivery() { if root.open-panel == OpenPanel.delivery {root.open-panel=OpenPanel.closed;} }
@@ -495,7 +527,8 @@ export component Desk inherits Window {
     public function focus-draft() {composer.focus-input();}
     public pure function at-end() -> bool { return transcript.content-height + transcript.content-y <= transcript.visible-height + 30px; }
     function send-message() {
-        if composer.can-send && root.writable && (!root.busy || root.running) {
+        if root.suggesting-goal { root.begin-goal-draft(); }
+        else if composer.can-send && root.writable && (!root.busy || root.running) {
             root.operate(root.direction-worker >= 0 ? "steer-worker" : root.home ? "submit" : root.running ? "steer" : "resume");
         }
     }
@@ -653,7 +686,7 @@ export component Desk inherits Window {
         goal-summary := GoalSummary {
             visible: !root.home && root.goal-objective != ""; x:(parent.width - self.width)/2; y:61px; width:pane.measure;
             height: self.visible ? 36px : 0px; objective:root.goal-objective; status:root.goal-status;
-            accessible-expanded:root.editing-goal; activate=>{if root.editing-goal {root.close-goal();} else {root.open-goal(false);}}
+            accessible-expanded:root.editing-goal; activate=>{if root.editing-goal {root.close-goal();} else {root.open-goal();}}
         }
         transcript := ScrollView {
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: goal-summary.y + goal-summary.height; width: pane.measure;
@@ -663,14 +696,19 @@ export component Desk inherits Window {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 18px; padding-bottom: 10px; spacing: 24px; alignment: start;
                 if !root.home && root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
                 for turn in root.turns: message := Rectangle {
-                    private property <bool> reply: !turn.from-user && !turn.delivery-notice && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
+                    private property <bool> reply: !turn.goal-finished && !turn.from-user && !turn.delivery-notice && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
                     private property <bool> has-sketch: turn.sketch.width > 0;
                     private property <bool> formatted-user: turn.from-user && Transcript.formatted(turn.body);
                     private property <bool> enlarged;
                     private property <length> sketch-width: self.enlarged ? self.width - 32px : min(304px, self.width * 0.84 - 32px);
                     private property <length> image-height: min(self.enlarged ? 540px : 212px, self.sketch-width * turn.sketch.height / max(1,turn.sketch.width));
                     private property <length> preview-height: self.has-sketch ? self.image-height + 42px : 0px;
-                    height: turn.asset-id > 0 ? asset-reply.preferred-height : turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : (self.formatted-user ? user-markdown.preferred-height : body.preferred-height) + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    height: turn.goal-finished ? receipt.preferred-height : turn.asset-id > 0 ? asset-reply.preferred-height : turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : (self.formatted-user ? user-markdown.preferred-height : body.preferred-height) + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    receipt := HorizontalLayout {
+                        visible:turn.goal-finished; width:parent.width; spacing:8px;
+                        Text { text:"\u{e73e}"; font-family:"Segoe MDL2 Assets"; color:Theme.accent; vertical-alignment:top; accessible-role:none; }
+                        Text { text:turn.body; color:Theme.text; font-size:14px; wrap:word-wrap; horizontal-stretch:1; }
+                    }
                     asset-reply := VerticalLayout {
                         visible: turn.asset-id > 0; x: 0px; y: 0px; width: min(360px, parent.width); spacing: 5px;
                         Action {
@@ -707,7 +745,7 @@ export component Desk inherits Window {
                         direct-worker(id,title) => {root.direct-worker(id,title);}
                     }
                     bubble := Rectangle {
-                        visible: !message.reply && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "";
+                        visible: !turn.goal-finished && !message.reply && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "";
                         width: message.has-sketch ? min(parent.width, max(message.sketch-width + 32px, min(parent.width * 0.84,body.preferred-width + 32px))) : turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
                         x: turn.from-user ? parent.width - self.width : 0px; height: parent.height;
                         background: turn.from-user ? Theme.surface : transparent; border-radius: 14px;
@@ -776,7 +814,9 @@ export component Desk inherits Window {
             visible: root.project != "" && !root.editing-goal;
             x: (parent.width - self.width) / 2; width: pane.measure;
             y: parent.height - self.height - feedback.height - 24px;
-            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.writable && !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || root.attachments.length > 0 || Sketch.has-content);
+            goal-mode: root.goal-mode; suggesting-goal: root.suggesting-goal;
+            accept-goal => {root.begin-goal-draft();} cancel-goal => {root.leave-goal-draft();} dismiss-suggestion => {root.dismissed-goal = true;}
+            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.writable && (!root.goal-mode || !root.busy) && !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || (!root.goal-mode && (root.attachments.length > 0 || Sketch.has-content)));
             attachments: root.attachments; remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
@@ -785,6 +825,17 @@ export component Desk inherits Window {
             send => { root.send-message(); } stop => { root.operate("cancel"); }
             recipient: root.direction-title; clear-recipient => {root.clear-recipient();composer.focus-input();}
             delivery(x,y,w,h) => {root.show-panel(OpenPanel.delivery,x,y,w,h);}
+        }
+        if root.suggesting-goal: Action {
+            x:composer.x; y:pad.y - self.height - 5px; width:composer.width; height:40px;
+            label:"Goal"; accessible-description:"Set a goal to keep pursuing"; icon-only:true; tab-stop:false;
+            border-width:1px; border-color:Theme.line; border-radius:16px; background:self.hovered ? Theme.selected : Theme.surface;
+            HorizontalLayout { padding-left:14px; padding-right:12px; spacing:9px;
+                Text { text:"\u{e7c1}"; font-family:"Segoe MDL2 Assets"; color:Theme.accent; vertical-alignment:center; accessible-role:none; }
+                Text { text:"Goal"; color:Theme.text; font-size:15px; vertical-alignment:center; accessible-role:none; }
+                Text { text:"Set a goal to keep pursuing"; color:Theme.muted; font-size:14px; vertical-alignment:center; horizontal-stretch:1; overflow:elide; accessible-role:none; }
+            }
+            activate=>{root.begin-goal-draft();}
         }
         goal-editor := GoalEditor {
             visible:root.editing-goal; x:composer.x; width:pane.measure; height:root.goal-detail != "" ? 242px : 202px;
@@ -1074,7 +1125,7 @@ export component Desk inherits Window {
             Rectangle { height: 1px; background: Theme.line; }
             RowAction { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
             RowAction { label:root.goal-objective == "" ? "Set a goal" : "Chat goal"; glyph:"\u{e7c1}"; enabled:!root.busy || root.goal-objective != "";
-                activate=>{root.open-goal(root.goal-objective == "");}
+                activate=>{if root.goal-objective == "" {root.begin-goal-draft();} else {root.open-goal();}}
                 Text { x:parent.width - 56px; width:44px; height:parent.height; text:"/goal"; color:Theme.muted; font-family:Theme.mono; font-size:12px; horizontal-alignment:right; vertical-alignment:center; accessible-role:none; }
             }
             RowAction { label: "Draw a sketch"; glyph: "\u{e104}"; activate => {root.dismiss-panel(); Sketch.edit(); composer.focus-input();} }

@@ -18,6 +18,12 @@ pub fn command(text: &str) -> Option<&str> {
     (tail.is_empty() || tail.starts_with(char::is_whitespace)).then(|| tail.trim())
 }
 
+/// The composer offers a command only for a separate, unfinished final word.
+pub fn goal_prefix(draft: &str) -> Option<&str> {
+    let word = draft.rsplit(char::is_whitespace).next()?;
+    (word.starts_with('/') && "/goal".starts_with(word)).then(|| &draft[..draft.len() - word.len()])
+}
+
 pub(crate) fn set(db: &Connection, id: i64, objective: &str) -> Result<()> {
     let objective = objective.trim();
     ensure!(
@@ -276,6 +282,26 @@ fn footer(text: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_goal_suggestions_match_only_a_trailing_command_word() {
+        for (text, prefix) in [
+            ("/goal", ""),
+            ("draft /go", "draft "),
+            ("路线\n/", "路线\n"),
+        ] {
+            assert_eq!(goal_prefix(text), Some(prefix));
+        }
+        for text in [
+            "",
+            "docs/goal",
+            "/goals",
+            "/goal an objective",
+            "already typed /g ",
+        ] {
+            assert_eq!(goal_prefix(text), None);
+        }
+    }
 
     #[test]
     fn goals_require_a_whole_command_and_an_explicit_footer() {

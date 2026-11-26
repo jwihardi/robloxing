@@ -80,6 +80,7 @@ pub struct ChatMessage {
     pub id: i64,
     pub from_user: bool,
     pub delivery_notice: bool,
+    pub goal_finished: bool,
     pub text: String,
     pub dispatched_workers: Vec<i64>,
 }
@@ -132,7 +133,7 @@ impl Store {
             LEFT JOIN event_assets ON event_assets.event=events.id
             WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/model','workshop/sound','workshop/image_error')
+                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','goal/finished','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/model','workshop/sound','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -165,6 +166,7 @@ impl Store {
                     kind.as_str(),
                     "steer/sent" | "user/followup" | "worker/direction"
                 ),
+                goal_finished: kind == "goal/finished",
                 delivery_notice: matches!(
                     kind.as_str(),
                     "steer/error"
@@ -763,11 +765,14 @@ impl Store {
             "UPDATE attempts SET state=?2,action=?3,candidate=?4,patch=?5 WHERE id=?1",
             params![id, state, summary, candidate, patch],
         )?;
-        tx.execute(
+        let goal_updated = tx.execute(
             "UPDATE chat_goals SET status=CASE WHEN ?2='review' THEN 'complete' ELSE 'paused' END
              WHERE attempt=?1 AND status='verifying'",
             params![id, state],
         )?;
+        if goal_updated == 1 && state == "review" {
+            tx.execute("INSERT INTO events(attempt,kind,summary) SELECT attempt,'goal/finished','Goal complete · ' || objective FROM chat_goals WHERE attempt=?1", [id])?;
+        }
         if apply && state == "review" {
             tx.execute(
                 "INSERT OR IGNORE INTO pending_chat_applies VALUES(?1)",

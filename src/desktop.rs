@@ -109,7 +109,7 @@ struct App {
     first_event: Cell<i64>,
     pages: RefCell<Vec<i64>>,
     chat_offset: Cell<usize>,
-    drafts: RefCell<std::collections::HashMap<Option<i64>, String>>,
+    drafts: RefCell<std::collections::HashMap<Option<i64>, (String, bool)>>,
     attachments: RefCell<std::collections::HashMap<Option<i64>, Vec<PathBuf>>>,
     sketches: RefCell<std::collections::HashMap<Option<i64>, sketch::Draft>>,
     draft_policy: RefCell<Option<WorkerPolicy>>,
@@ -726,6 +726,7 @@ impl App {
             let mut turn = ChatTurn {
                 from_user: message.from_user,
                 delivery_notice: message.delivery_notice,
+                goal_finished: message.goal_finished,
                 body: message.text.into(),
                 ..Default::default()
             };
@@ -1199,11 +1200,16 @@ impl App {
         let ui = self.ui.unwrap();
         ui.invoke_clear_recipient();
         let mut drafts = self.drafts.borrow_mut();
-        drafts.insert(self.id.get(), ui.get_draft().to_string());
+        drafts.insert(
+            self.id.get(),
+            (ui.get_draft().to_string(), ui.get_goal_mode()),
+        );
         self.id.set(selected);
         self.render_attachments();
         self.displayed.set(None);
-        ui.set_draft(drafts.remove(&selected).unwrap_or_default().into());
+        let (text, goal_mode) = drafts.remove(&selected).unwrap_or_default();
+        ui.set_goal_mode(goal_mode);
+        ui.set_draft(text.into());
         ui.set_notice("".into());
         if let Err(e) = self.render() {
             ui.set_notice(format!("{e:#}").into());
@@ -1577,6 +1583,7 @@ impl App {
                     let project = store.project.clone();
                     self.store.replace(Some(store));
                     self.load_models(project);
+                    ui.set_goal_mode(false);
                     ui.set_draft("".into());
                 }
                 Update::Models(project, generation, result) => {
@@ -1846,7 +1853,9 @@ impl App {
         self.attachments.borrow_mut().remove(&self.id.get());
         self.sketches.borrow_mut().remove(&self.id.get());
         self.render_attachments();
-        self.ui.unwrap().set_draft("".into());
+        let ui = self.ui.unwrap();
+        ui.set_goal_mode(false);
+        ui.set_draft("".into());
     }
     fn operate(self: &Rc<Self>, op: &str) -> Result<()> {
         self.operate_with_goal(op, None)
@@ -1854,21 +1863,30 @@ impl App {
     fn operate_with_goal(self: &Rc<Self>, op: &str, editor: Option<&str>) -> Result<()> {
         let ui = self.ui.unwrap();
         let input = ui.get_draft();
-        let from_composer = (editor.is_none() || ui.get_goal_uses_draft())
-            && !(op == "retry" && ui.get_editing_goal());
+        let from_composer = editor.is_none() && !(op == "retry" && ui.get_editing_goal());
         let mut objective = editor;
 
         if matches!(op, "submit" | "resume" | "steer" | "queue" | "steer-worker") {
             if ui.get_capturing() {
                 return Ok(());
             }
-            objective = objective.or_else(|| workshop::goals::command(&input));
+            objective = objective.or_else(|| {
+                if ui.get_goal_mode() {
+                    Some(input.trim())
+                } else {
+                    workshop::goals::command(&input)
+                }
+            });
             if objective == Some("") {
                 anyhow::ensure!(
                     !ui.get_busy() || !ui.get_goal_objective().is_empty(),
                     "Stop the current response before starting a goal."
                 );
-                ui.invoke_open_goal(true);
+                if ui.get_busy() {
+                    ui.invoke_open_goal();
+                } else {
+                    ui.invoke_begin_goal_draft();
+                }
                 return Ok(());
             }
             if objective.is_some() {
@@ -1986,19 +2004,16 @@ impl App {
             if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
                 let (a, prompt) = match op.as_str() {
                     "submit" => {
-                        let text = objective
-                            .as_ref()
-                            .map_or(draft.text, |goal| format!("/goal {goal}"));
+                        let command = objective.as_ref().map(|goal| format!("/goal {goal}"));
                         let attempt = store.prepare_with_files(
-                            &text,
+                            command.as_deref().unwrap_or(&draft.text),
                             "",
                             None,
                             draft_policy.as_ref(),
                             &draft.files,
                         )?;
                         store.bind_draft_screenshots(attempt.id)?;
-                        let prompt = attempt.prompt.as_str().into();
-                        (attempt, prompt)
+                        (attempt, draft)
                     }
                     "retry" => store.retry_chat(id.context("Select a chat.")?)?,
                     "send-next" => store
@@ -2092,11 +2107,13 @@ fn main() -> Result<()> {
     transcript::connect(&ui);
     appearance::connect(&ui);
     ui.on_has_content(|text| !text.trim().is_empty());
-    ui.on_initial_goal_text(|draft, current| {
-        match workshop::goals::command(&draft).unwrap_or(draft.trim()) {
-            "" => current,
-            text => text.into(),
-        }
+    ui.on_goal_suggestion(|draft| workshop::goals::goal_prefix(&draft).is_some());
+    ui.on_goal_draft_text(|draft| {
+        workshop::goals::goal_prefix(&draft)
+            .map(str::trim_end)
+            .or_else(|| workshop::goals::command(&draft))
+            .unwrap_or(&draft)
+            .into()
     });
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {

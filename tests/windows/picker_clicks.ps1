@@ -557,30 +557,42 @@ function Test-DeleteChats {
 function Test-ChatGoals {
     function Draft($value) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($value) }
     function Objective($value) { (Named 'Goal objective').GetCurrentPattern($valuePattern).SetValue($value) }
-    Draft '/goal'
-    Click 'Send message'
-    Wait-For { Named 'Goal objective' } 'bare goal command opens editor'
+    function KeyPress([int]$key) {
+        [void][WorkshopPointer]::PostMessage($appWindow,0x100,$key,1)
+        [void][WorkshopPointer]::PostMessage($appWindow,0x101,$key,1)
+    }
+    Draft 'Look at docs/goal'
+    if (Named 'Goal') { throw 'A path opened the goal suggestion' }
+    Draft '/g'
+    Wait-For { Named 'Goal' } 'partial slash command suggests goal'
+    Click 'Message Codex'
+    KeyPress 13
+    Wait-For { Named 'Exit goal mode' } 'Enter accepts the goal suggestion'
     if ((Named 'Start goal').Current.IsEnabled) { throw 'An empty goal can start' }
-    [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
-    [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
-    Wait-For { !(Named 'Goal objective') } 'Escape leaves the goal editor'
+    KeyPress 27
+    Wait-For { (Named 'Message Codex') -and !(Named 'Exit goal mode') } 'Escape exits goal mode'
+    Draft 'An objective /go'
+    Click 'Message Codex'
+    KeyPress 9
+    Wait-For { ($field = Named 'Goal objective') -and $field.GetCurrentPattern($valuePattern).Current.Value -eq 'An objective' } 'Tab accepts the suggestion'
+    Click 'Exit goal mode'
     Draft '/goal Check the typed objective'
     Click 'Add to message'
     Click 'Set a goal'
-    Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq 'Check the typed objective' } 'the menu and slash command share one objective'
-    Click 'Close goal editor'
-    Draft 'Keep this draft'
-    Click 'Add to message'
-    Click 'Set a goal'
-    Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq 'Keep this draft' } 'start a goal from a draft'
-    Objective 'Cancel this edit'
-    Click 'Close goal editor'
-    Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq 'Keep this draft' } 'cancel preserves the draft'
+    Wait-For { ($field = Named 'Goal objective') -and $field.GetCurrentPattern($valuePattern).Current.Value -eq 'Check the typed objective' } 'menu preserves an inline objective'
+    Objective 'Keep the edited text'
+    Click 'Exit goal mode'
+    Wait-For { ($field = Named 'Message Codex') -and $field.GetCurrentPattern($valuePattern).Current.Value -eq 'Keep the edited text' } 'exiting goal mode keeps the edited draft'
     $goal = 'Check the two fixture files'
     [void](New-Item -ItemType File (Join-Path $root 'goal-mode'))
-    Draft "/goal $goal"
-    Click 'Send message'
-    Wait-For { Named 'Goal complete' } 'a progress turn continues and completes the goal'
+    Draft "$goal /goal"
+    Wait-For { Named 'Goal' } 'goal suggestion after an existing draft'
+    Save-PrivateWindow (Join-Path $root 'goal-suggestion.png')
+    Click 'Goal'
+    Wait-For { ($field = Named 'Goal objective') -and $field.GetCurrentPattern($valuePattern).Current.Value -eq $goal } 'only the trailing command is removed'
+    Save-PrivateWindow (Join-Path $root 'goal-composer.png')
+    Click 'Start goal'
+    Wait-For { (Named 'Goal complete') -and (Named ("Goal complete " + [char]0xB7 + " " + $goal)) } 'verified completion in the transcript'
     Click 'Goal complete'
     Wait-For { (Named 'Goal objective').GetCurrentPattern($valuePattern).Current.Value -eq $goal } 'saved objective'
     if ((Named 'Goal update').GetCurrentPattern($valuePattern).Current.Value -notlike '*Verified both fixture files*') {throw 'Missing goal evidence'}
@@ -602,6 +614,13 @@ function Test-ChatGoals {
     Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq 'Unsent and unrelated' } 'goal management preserved unrelated draft'
     Click 'New chat'
     Wait-For { !(Named 'Goal complete') -and (Named 'Explore project') } 'fresh chat has no inherited goal'
+    Draft 'Plan a follow-up /goal'
+    Click 'Goal'
+    Click $goal
+    Wait-For { (Named 'Goal complete') -and (Named 'Message Codex') } 'original chat keeps its own goal and input mode'
+    Click 'New chat'
+    Wait-For { ($field = Named 'Goal objective') -and $field.GetCurrentPattern($valuePattern).Current.Value -eq 'Plan a follow-up' } 'unsent goal and mode survive switching chats'
+    Click 'Exit goal mode'
     Click $goal
     Wait-For { Named 'Goal complete' } 'original chat keeps its goal'
     Click 'Goal complete'
