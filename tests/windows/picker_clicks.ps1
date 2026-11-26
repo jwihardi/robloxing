@@ -564,7 +564,8 @@ function Test-Delivery {
         Click 'Send after this run'
         Wait-For { (Named 'Remove queued message') -and !(Named 'Send after this run') } 'queued draft'
     }
-    Wait-For { (Named 'New chat').Current.IsEnabled } 'previous chat to finish'
+    # In the full suite the previous chat may still be checking two worker copies.
+    Wait-For { (Named 'New chat').Current.IsEnabled } 'previous chat to finish' 30
     Click 'New chat'
     $mode = Join-Path $root 'delivery-mode'
     [void](New-Item -ItemType File $mode)
