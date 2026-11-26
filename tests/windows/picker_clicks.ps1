@@ -554,6 +554,52 @@ function Test-DeleteChats {
     Write-Output "Chat deletion, cancellation, search and draft preservation passed. Screenshot in $root"
 }
 
+function Test-TranscriptScroll {
+    $hold = Join-Path $root 'scroll.hold'
+    [void](New-Item -ItemType File -Path $hold)
+    $field = 'Message Codex'
+    function DraftText($text) { (Named $field).GetCurrentPattern($valuePattern).SetValue($text) }
+    function BottomGap($name) {
+        $rect = (Named $name).Current.BoundingRectangle
+        if ($rect.IsEmpty) { return [double]::PositiveInfinity }
+        (Named $field).Current.BoundingRectangle.Top - $rect.Bottom
+    }
+    function Wheel([int]$delta) {
+        $inputRect = (Named $field).Current.BoundingRectangle
+        $x = [int]($inputRect.Left + $inputRect.Width/2)
+        $y = [int]($inputRect.Top - 120)
+        $point = [WorkshopPointer+Point]::new()
+        $point.X = $x; $point.Y = $y
+        [void][WorkshopPointer]::ScreenToClient($appWindow, [ref]$point)
+        [void][WorkshopPointer]::PostMessage($appWindow,0x200,0,[IntPtr](($point.Y -shl 16) -bor ($point.X -band 65535)))
+        [void][WorkshopPointer]::PostMessage($appWindow,0x20A,[IntPtr]($delta -shl 16),[IntPtr](($y -shl 16) -bor ($x -band 65535)))
+    }
+    DraftText 'Send a long reply'
+    Click 'Send message'
+    Wait-For { (Named 'part-15.zip') -and (BottomGap 'part-15.zip') -gt 0 -and (BottomGap 'part-15.zip') -lt 160 } 'bottom of the streaming reply'
+    $gap = BottomGap 'part-15.zip'
+    $inputTop = (Named $field).Current.BoundingRectangle.Top
+    DraftText ((1..7 | ForEach-Object { "Draft line $_" }) -join [Environment]::NewLine)
+    Wait-For { (Named $field).Current.BoundingRectangle.Top -lt $inputTop - 20 -and [Math]::Abs((BottomGap 'part-15.zip') - $gap) -lt 4 } 'growing the composer keeps the last line visible'
+    DraftText ''
+    Wait-For { [Math]::Abs((Named $field).Current.BoundingRectangle.Top - $inputTop) -lt 4 -and [Math]::Abs((BottomGap 'part-15.zip') - $gap) -lt 4 } 'shrinking the composer stays at the bottom'
+    $anchor = 'part-13.zip'
+    $before = (Named $anchor).Current.BoundingRectangle.Top
+    Wheel 240
+    Wait-For { (Named $anchor).Current.BoundingRectangle.Top -gt $before + 12 } 'manually scrolling up in the transcript'
+    Start-Sleep -Milliseconds 400
+    $reading = (Named $anchor).Current.BoundingRectangle.Top
+    Remove-Item -LiteralPath $hold
+    Wait-For { !(Named 'Stop response') -and (Named $anchor) } 'stream finalized while reading'
+    if ([Math]::Abs((Named $anchor).Current.BoundingRectangle.Top - $reading) -gt 4) { throw 'Finalizing the reply moved the reading position' }
+    Wheel -2400
+    Wait-For { (Named 'finished.zip') -and (BottomGap 'finished.zip') -gt 0 -and (BottomGap 'finished.zip') -lt 160 } 'scrolling back to the newest message'
+    $gap = BottomGap 'finished.zip'
+    DraftText ((1..6 | ForEach-Object { "Line $_" }) -join [Environment]::NewLine)
+    Wait-For { (Named $field).Current.BoundingRectangle.Top -lt $inputTop - 20 -and [Math]::Abs((BottomGap 'finished.zip') - $gap) -lt 4 } 'returning to the bottom restores following'
+    DraftText ''
+    Click 'New chat'
+}
 function Test-ChatGoals {
     function Draft($value) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($value) }
     function Objective($value) { (Named 'Goal objective').GetCurrentPattern($valuePattern).SetValue($value) }
@@ -1355,6 +1401,7 @@ try {
     if ($DeliveryOnly) { Test-Delivery; return }
     if ($TranscriptOnly) {
         Save-PrivateWindow (Join-Path $root 'welcome.png')
+        Test-TranscriptScroll
         [void](New-Item -ItemType File -Path (Join-Path $root 'formatted-reply'))
         (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Show me how the project title works.')
         Click 'Send message'

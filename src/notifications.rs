@@ -242,7 +242,7 @@ impl App {
                 if attempt.state == "failed" {
                     ui.set_notice(attempt.action.into());
                 }
-                Self::scroll_after_layout(&ui);
+                ui.invoke_position_transcript(true);
             }
             Destination::Studio(id) => {
                 let job = store.studio_job(id)?;

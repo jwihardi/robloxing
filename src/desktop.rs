@@ -547,6 +547,7 @@ impl App {
             .preceding_screenshots(id)?
             .into_iter()
             .map(|key| ChatTurn {
+                row_key: format!("shot/{key}").into(),
                 shot: key.into(),
                 ..Default::default()
             })
@@ -689,7 +690,6 @@ impl App {
         }
         self.render_queue(store, attempt.id)?;
         let switching = self.displayed.get() != Some(attempt.id);
-        let follow = switching || ui.invoke_at_end();
         if switching {
             self.pages.borrow_mut().clear();
             self.displayed.set(Some(attempt.id));
@@ -708,6 +708,7 @@ impl App {
         if !more {
             rows.extend(self.preceding_shots(store, Some(attempt.id))?);
             let mut first = ChatTurn {
+                row_key: "prompt".into(),
                 from_user: true,
                 body: attempt.prompt.as_str().into(),
                 ..Default::default()
@@ -718,12 +719,14 @@ impl App {
         for message in messages {
             if message.screenshot {
                 rows.push(ChatTurn {
+                    row_key: message.id.to_string().into(),
                     shot: message.text.into(),
                     ..Default::default()
                 });
                 continue;
             }
             let mut turn = ChatTurn {
+                row_key: message.id.to_string().into(),
                 from_user: message.from_user,
                 delivery_notice: message.delivery_notice,
                 goal_finished: message.goal_finished,
@@ -774,19 +777,43 @@ impl App {
             rows.push(turn);
         }
         ui.set_workers(ModelRc::new(VecModel::from(workers)));
-        self.turns.set_vec(rows);
-        if follow && before == i64::MAX {
-            Self::scroll_after_layout(&ui);
+        if switching {
+            self.turns.set_vec(rows);
+            ui.invoke_position_transcript(true);
+        } else {
+            self.update_turns(rows);
         }
         Ok(())
     }
-    fn scroll_after_layout(ui: &Desk) {
-        let weak = ui.as_weak();
-        Timer::single_shot(Duration::ZERO, move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_scroll_end();
+
+    // Keep mounted messages and their selections, previews and expanded images across updates.
+    fn update_turns(&self, rows: Vec<ChatTurn>) {
+        let keys: std::collections::HashSet<_> = rows.iter().map(|r| r.row_key.as_str()).collect();
+        for i in (0..self.turns.row_count()).rev() {
+            if self
+                .turns
+                .row_data(i)
+                .is_some_and(|r| !keys.contains(r.row_key.as_str()))
+            {
+                self.turns.remove(i);
             }
-        });
+        }
+        for (i, mut row) in rows.into_iter().enumerate() {
+            if let Some(old) = self
+                .turns
+                .row_data(i)
+                .filter(|old| old.row_key == row.row_key)
+            {
+                if old.workers.iter().eq(row.workers.iter()) {
+                    row.workers = old.workers.clone();
+                }
+                if old != row {
+                    self.turns.set_row_data(i, row);
+                }
+            } else {
+                self.turns.insert(i, row);
+            }
+        }
     }
     fn render_settings(&self, store: &Store) -> Result<()> {
         let s = store.team_settings()?;
@@ -1300,7 +1327,6 @@ impl App {
         let mut partial = None::<String>;
         let mut transcript_changed = false;
         let mut work_changed = false;
-        let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
             work_changed |= matches!(
                 &update,
@@ -1428,7 +1454,6 @@ impl App {
                                 ui.set_notice("".into());
                                 self.render()?;
                                 ui.invoke_show_outputs();
-                                Self::scroll_after_layout(&ui);
                             }
                             Ok(false) => {}
                             Err(e) => ui.set_notice(format!("{e:#}").into()),
@@ -1656,10 +1681,11 @@ impl App {
                     }
                     if clear_draft {
                         self.clear_draft();
+                        self.pages.borrow_mut().clear();
+                        ui.invoke_position_transcript(true);
                     }
                     self.id.set(Some(id));
                     self.render_attachments();
-                    self.displayed.set(None);
                     self.render()?;
                     ui.set_live_activity(
                         format!("Connecting to {}…", ui.get_chat_provider()).into(),
@@ -1737,9 +1763,6 @@ impl App {
         }
         if let Some(text) = partial {
             ui.set_partial(text.into());
-            if follow {
-                Self::scroll_after_layout(&ui);
-            }
         }
         if transcript_changed
             && ui.get_running()
@@ -2210,8 +2233,10 @@ fn main() -> Result<()> {
         } else {
             a.pages.borrow_mut().pop();
         }
-        if let Err(e) = a.render() {
-            a.ui.unwrap().set_notice(format!("{e:#}").into());
+        match a.render() {
+            Ok(()) if !chat => a.ui.unwrap().invoke_position_transcript(older),
+            Ok(()) => {}
+            Err(e) => a.ui.unwrap().set_notice(format!("{e:#}").into()),
         }
     });
     let a = app.clone();

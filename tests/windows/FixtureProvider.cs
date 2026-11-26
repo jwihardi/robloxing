@@ -22,6 +22,9 @@ class FixtureProvider {
             return;
         }
         Send(new { method="item/agentMessage/delta", @params=new {threadId=session,turnId=turn,itemId="reply",delta=text} });
+        FinishCodexReply(text);
+    }
+    static void FinishCodexReply(string text) {
         Send(new { method="item/completed", @params=new {threadId=session,turnId=turn,item=new {type="agentMessage",id="reply",text=text}} });
         Send(new { method="thread/tokenUsage/updated", @params=new {threadId=session,tokenUsage=new {total=new {totalTokens=100}}} });
         Send(new { method="turn/completed", @params=new {threadId=session,turn=new {id=turn,status="completed"}} });
@@ -450,6 +453,14 @@ class FixtureProvider {
                         File.WriteAllBytes("Game.zip",zip);
                         Done("**Ready.** [Download the project](Game.zip)\n\n![Lobby preview](Lobby.png)");
                     }
+                    continue;
+                }
+                if (Mode("scroll.hold")) {
+                    var reply = new System.Text.StringBuilder();
+                    for (int i=0; i<16; i++) reply.AppendFormat("[Part {0}](part-{0}.zip)\n\n", i);
+                    Send(new {method="item/agentMessage/delta",@params=new {threadId=session,turnId=turn,itemId="reply",delta=reply.ToString()}});
+                    while (Mode("scroll.hold")) Thread.Sleep(30);
+                    FinishCodexReply(reply.ToString() + "## Delivery\n\n[Final file](finished.zip)");
                     continue;
                 }
                 if (Mode("formatted-reply")) {

@@ -23,7 +23,7 @@ export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, inference: string, limits: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, goal-finished: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
+export struct ChatTurn { row-key: string, from-user: bool, delivery-notice: bool, goal-finished: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
 export struct OutputItem { sound: bool, title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
@@ -523,9 +523,11 @@ export component Desk inherits Window {
     changed height => {root.open-panel = OpenPanel.closed;}
     private property <bool> home: selection < 0;
     private property <bool> writable: home || running || can-resume;
-    public function scroll-end() { transcript.content-y = min(0px, transcript.visible-height - transcript.content-height); }
+    public function position-transcript(bottom: bool) {
+        transcript.follow-bottom = bottom;
+        transcript.content-y = bottom ? transcript.end-y : 0px;
+    }
     public function focus-draft() {composer.focus-input();}
-    public pure function at-end() -> bool { return transcript.content-height + transcript.content-y <= transcript.visible-height + 30px; }
     function send-message() {
         if root.suggesting-goal { root.begin-goal-draft(); }
         else if composer.can-send && root.writable && (!root.busy || root.running) {
@@ -689,6 +691,20 @@ export component Desk inherits Window {
             accessible-expanded:root.editing-goal; activate=>{if root.editing-goal {root.close-goal();} else {root.open-goal();}}
         }
         transcript := ScrollView {
+            in-out property <bool> follow-bottom: true;
+            out property <length> end-y: min(0px, self.visible-height - self.content-height);
+            private property <length> last-end;
+            // Layout can change after a reply is stored, a preview loads, or the composer grows.
+            changed end-y => {
+                self.last-end = self.end-y;
+                if self.follow-bottom { self.content-y = self.end-y; }
+                else if self.content-y < self.end-y { self.content-y = self.end-y; }
+            }
+            changed content-y => {
+                if self.last-end == self.end-y {
+                    self.follow-bottom = self.content-y <= self.end-y + 1px;
+                }
+            }
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: goal-summary.y + goal-summary.height; width: pane.measure;
             height: max(0px, queue-strip.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
