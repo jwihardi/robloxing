@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS attempts(
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, attempt INTEGER NOT NULL REFERENCES attempts,
     recorded TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, summary TEXT);
 CREATE TABLE IF NOT EXISTS event_images(event INTEGER PRIMARY KEY REFERENCES events(id), path TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS event_files(event INTEGER NOT NULL REFERENCES events(id), path TEXT NOT NULL, PRIMARY KEY(event,path));
 CREATE TABLE IF NOT EXISTS annotation_sources(attachment TEXT PRIMARY KEY, original TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS chat_image_events ON events(attempt,id) WHERE kind='workshop/image';
 CREATE TABLE IF NOT EXISTS decisions(attempt INTEGER PRIMARY KEY REFERENCES attempts, decision TEXT NOT NULL,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL
     tokens INTEGER, model TEXT, effort TEXT, UNIQUE(lead,name));
 CREATE TABLE IF NOT EXISTS checkpoints(lead INTEGER PRIMARY KEY REFERENCES attempts, decisions TEXT NOT NULL, next_task TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_by_attempt ON events(attempt,id);
+CREATE TABLE IF NOT EXISTS codex_asset_sessions(session TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queued_messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT, attempt INTEGER NOT NULL REFERENCES attempts,
@@ -52,6 +54,10 @@ CREATE TABLE IF NOT EXISTS studio_jobs(
     created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS studio_jobs_area ON studio_jobs(area,id);
+CREATE TABLE IF NOT EXISTS event_assets(
+    event INTEGER PRIMARY KEY REFERENCES events(id), job INTEGER NOT NULL UNIQUE REFERENCES studio_jobs(id),
+    maker TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS decompile_records(
     job INTEGER PRIMARY KEY REFERENCES studio_jobs(id), input_sha TEXT NOT NULL DEFAULT '',
     filter_key TEXT NOT NULL DEFAULT '', format INTEGER NOT NULL DEFAULT 0,

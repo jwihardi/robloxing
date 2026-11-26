@@ -26,10 +26,20 @@ pub(in crate::provider) struct Bridge {
 
 impl Bridge {
     pub(super) fn new(worker: bool, project_trusted: bool) -> Result<Self> {
+        Self::with_tools(crate::team::tools(worker), project_trusted)
+    }
+    pub(in crate::provider) fn legacy_assets() -> Result<Self> {
+        let mut tools = crate::team::tools(false);
+        tools
+            .as_array_mut()
+            .context("Invalid Workshop tools")?
+            .retain(|t| t["name"] == "workshop_generate_asset");
+        Self::with_tools(tools, false)
+    }
+    fn with_tools(mut tools: Value, project_trusted: bool) -> Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix("workshop-gemini-")
             .tempdir()?;
-        let mut tools = crate::team::tools(worker);
         for tool in tools.as_array_mut().context("Invalid Workshop tools")? {
             tool.as_object_mut()
                 .context("Invalid tool definition")?
@@ -60,10 +70,16 @@ impl Bridge {
             "env":[{"name":DIRECTORY,"value":self.dir.path()}]}),
         )
     }
-    pub(super) fn call(&self) -> Result<Option<Value>> {
+    pub(in crate::provider) fn codex_config(&self) -> Result<Value> {
+        Ok(
+            json!({"command":std::env::current_exe()?,"args":[SWITCH],"env":{(DIRECTORY):self.dir.path()},"tool_timeout_sec":960,
+                "tools":{"workshop_generate_asset":{"approval_mode":"approve"}}}),
+        )
+    }
+    pub(in crate::provider) fn call(&self) -> Result<Option<Value>> {
         take(self.dir.path(), "call")
     }
-    pub(super) fn reply(&self, result: Result<String>) -> Result<()> {
+    pub(in crate::provider) fn reply(&self, result: Result<String>) -> Result<()> {
         let error = result.is_err();
         let text = result.unwrap_or_else(|e| format!("{e:#}"));
         publish(

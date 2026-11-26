@@ -1,4 +1,4 @@
-use super::{Connection, catalog::request, send};
+use super::{Connection, Message, catalog::request, send};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::ImageReader;
@@ -11,7 +11,7 @@ use std::{
 async fn art_turn(
     dir: &Path,
     instructions: &str,
-    prompt: &str,
+    prompt: &Message,
     schema: Value,
     item_type: &str,
     inference: &(String, String),
@@ -31,14 +31,14 @@ async fn art_turn(
             item_type != "imageGeneration",
             "Choose a Codex or Antigravity model for native image generation."
         );
-        return super::gemini::studio(dir, instructions, prompt, schema, inference).await;
+        return super::gemini::studio(dir, instructions, &prompt.text, schema, inference).await;
     }
     if super::provider_for(&inference.0) == "claude" {
         ensure!(
             item_type != "imageGeneration",
             "Claude Code does not provide native image generation. Choose a Codex or Antigravity model."
         );
-        return super::claude::studio(dir, instructions, prompt, schema, inference).await;
+        return super::claude::studio(dir, instructions, &prompt.text, schema, inference).await;
     }
     let mut io = Connection::spawn(dir.to_owned(), tempfile::tempfile()?)?;
     request(
@@ -65,8 +65,7 @@ async fn art_turn(
     let id = thread["thread"]["id"]
         .as_str()
         .context("Missing studio session")?;
-    let mut turn =
-        json!({"threadId":id,"outputSchema":schema,"input":[{"type":"text","text":prompt}]});
+    let mut turn = json!({"threadId":id,"outputSchema":schema,"input":prompt.input()?});
     if !inference.0.is_empty() {
         turn["model"] = json!(inference.0);
     }
@@ -142,7 +141,7 @@ pub(crate) async fn summarize_report(
     let result = art_turn(
         scratch.path(),
         instructions,
-        &prompt,
+        &Message::from(prompt.as_str()),
         Value::Null,
         "agentMessage",
         inference,
@@ -167,9 +166,17 @@ pub(crate) async fn generate_image(
     prompt: &str,
     style: &str,
     inference: &(String, String),
+    reference: Option<&Path>,
 ) -> Result<()> {
-    let item=art_turn(dir,"Use the built-in image generation tool to produce one game image for the user's art brief. Use no other tools.",
-        &format!("Art direction: {style}.\n{prompt}"), Value::Null,"imageGeneration",inference).await?;
+    let mut request = Message::from(prompt);
+    if !style.is_empty() {
+        request.text.push_str(&format!("\nArt direction: {style}"));
+    }
+    if let Some(path) = reference {
+        request.files.push(path.to_owned());
+    }
+    let item=art_turn(dir,"Use the built-in image generation tool to produce one image for the user's art brief. When a reference is supplied, apply the requested changes to that image. Use no other tools.",
+        &request, Value::Null,"imageGeneration",inference).await?;
     let decoded = generated_image(&item, dir)?;
     decoded.save(dir.join("image.png"))?;
     Ok(())
@@ -211,7 +218,7 @@ pub(crate) async fn design_model(
             "size":vector,"center":vector,"rotation":vector,"color":{"type":"string"}},
             "required":["name","shape","size","center","rotation","color"]}}},"required":["parts"],"additionalProperties":false});
     let item=art_turn(dir,"Design a cohesive low-poly game prop using at most 64 named primitive meshes. Return just the JSON scene description. Size is full local XYZ dimensions in metres, center is XYZ position, rotation is XYZ Euler degrees, color is a six-digit sRGB hex value. Z is up; stand the prop on z=0. Give its silhouette distinctive proportions and connected parts. Use no tools.",
-        brief,schema,"agentMessage",inference).await?;
+        &Message::from(brief),schema,"agentMessage",inference).await?;
     let description: Value =
         serde_json::from_str(item["text"].as_str().context("Missing model design")?)?;
     std::fs::write(

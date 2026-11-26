@@ -256,6 +256,11 @@ class FixtureProvider {
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
                 if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
+                if(Convert.ToString(msg["id"])=="chat-asset") {
+                    var result=(Dictionary<string,object>)msg["result"];
+                    File.AppendAllText(Path.Combine(Dir,"chat-asset-results.jsonl"),Json.Serialize(result)+"\n");
+                    Done(Object.Equals(result["success"],true) ? "Your asset is ready." : "The asset could not be created.");
+                }
                 if(Convert.ToString(msg["id"])=="goal-result") {
                     var result=(Dictionary<string,object>)msg["result"];
                     if(!Object.Equals(result["success"],true)) throw new InvalidDataException("Workshop rejected the goal report");
@@ -335,6 +340,18 @@ class FixtureProvider {
                 }
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
+                if (Mode("chat-assets")) {
+                    object spec=null;
+                    if(message.StartsWith("Draw a forest icon")) spec=new {kind="image",brief="Forest icon",model="fixture-deep",effort="high"};
+                    if(message.StartsWith("Draw the moonlit harbor")) spec=new {kind="image",brief="Moonlit harbor"};
+                    if(message.StartsWith("Refine the marked icon")) spec=new {kind="image",brief="Refined icon",reference_image="chat"};
+                    if(message.StartsWith("Build a lantern")) spec=new {kind="model",title="Copper lantern",brief="Design a lantern with a copper frame."};
+                    if(spec!=null) {
+                        Send(new {id="chat-asset",method="item/tool/call",@params=new {threadId=session,turnId=turn,
+                            callId="chat-asset",tool="workshop_generate_asset",arguments=spec}});
+                        continue;
+                    }
+                }
                 if (Mode("goal-mode")) {
                     if (Mode("goal.hold")) continue;
                     bool firstFile=!File.Exists("first.txt");

@@ -14,7 +14,7 @@ pub mod usage;
 pub mod worker_policy;
 
 use anyhow::{Context, Result, bail, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -70,6 +70,8 @@ pub struct Store {
 
 pub struct ChatMessage {
     pub screenshot: bool,
+    pub asset: Option<i64>,
+    pub maker: Option<String>,
     pub image: Option<PathBuf>,
     pub comparison: Option<ImageComparison>,
     pub id: i64,
@@ -89,6 +91,12 @@ impl Store {
             [attempt],
             |r| r.get(0),
         )?)
+    }
+    pub fn last_asset_output(&self, attempt: i64) -> Result<Option<(i64, String)>> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT id,kind FROM events WHERE attempt=?1 AND kind IN ('workshop/image','workshop/model') ORDER BY id DESC LIMIT 1",
+            [attempt], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?)
     }
     pub fn message_page(
         &self,
@@ -116,11 +124,12 @@ impl Store {
         let db = self.db.lock().unwrap();
         let order = if descending { "DESC" } else { "ASC" };
         let mut stmt = db.prepare(&format!(
-            "SELECT events.id,kind,summary,event_images.path FROM events
+            "SELECT events.id,kind,summary,event_images.path,event_assets.job,event_assets.maker FROM events
             LEFT JOIN event_images ON event_images.event=events.id
+            LEFT JOIN event_assets ON event_assets.event=events.id
             WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/image_error')
+                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/model','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -138,6 +147,8 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                asset: row.get(4)?,
+                maker: row.get(5)?,
                 comparison: if kind == "workshop/image" {
                     self.comparison_before(&db, attempt, row.get(0)?)?
                 } else {
@@ -586,7 +597,7 @@ impl Store {
             kind,
             Some(&message.text),
             self.attached_chat_image(&message.files),
-            message.queued_id,
+            Some(message),
         )
     }
     fn event_with_image(
@@ -595,11 +606,11 @@ impl Store {
         kind: &str,
         action: Option<&str>,
         image: Option<&PathBuf>,
-        queued_id: Option<i64>,
+        message: Option<&provider::Message>,
     ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        if let Some(queued) = queued_id {
+        if let Some(queued) = message.and_then(|m| m.queued_id) {
             ensure!(
                 tx.execute(
                     "DELETE FROM queued_messages WHERE attempt=?1 AND id=?2 AND sending=1",
@@ -612,13 +623,19 @@ impl Store {
             "INSERT INTO events(attempt,kind,summary) VALUES(?1,?2,?3)",
             params![id, kind, action],
         )?;
+        let event = tx.last_insert_rowid();
+        if let Some(message) = message {
+            for file in &message.files {
+                tx.execute(
+                    "INSERT OR IGNORE INTO event_files(event,path) VALUES(?1,?2)",
+                    params![event, file.to_str().context("Invalid attachment path")?],
+                )?;
+            }
+        }
         if let Some(path) = image {
             tx.execute(
                 "INSERT INTO event_images(event,path) VALUES(?1,?2)",
-                params![
-                    tx.last_insert_rowid(),
-                    path.to_str().context("Unreadable sketch path")?
-                ],
+                params![event, path.to_str().context("Unreadable sketch path")?],
             )?;
         }
         if let Some(action) = action {
@@ -674,7 +691,6 @@ impl Store {
         let tx = db.transaction()?;
         let mut summary = action.to_string();
         if state == "review" {
-            use rusqlite::OptionalExtension;
             if let Some(last)=tx.query_row("SELECT summary FROM events WHERE attempt=?1 AND kind='agent/message' ORDER BY id DESC LIMIT 1",[id],|r|r.get::<_,String>(0)).optional()? {
                 summary=last;
             } else if bytes.is_empty() { summary="Finished without changing the working copy.".into(); }

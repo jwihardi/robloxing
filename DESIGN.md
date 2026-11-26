@@ -31,13 +31,13 @@ components:
 
 # Workshop
 
-The far-left rail holds the destinations that apply across the project. A second column holds whatever you can browse in the current destination, such as chats, Studio runs or settings sections. At widths below 940 logical pixels the second column becomes a drawer. The reading area, composer and output preview get that space back. The Sidebar control opens or closes the column at either size. This arrangement draws on the separation of navigation and sessions in KiroCrew and Linear’s sidebar hierarchy. [KiroCrew session view](https://github.com/kirodotdev/KiroCrew/blob/main/.github/screenshots/25249/composer-meter-after-model-switch-dark.png) · [Linear UI refresh](https://linear.app/changelog/2026-03-12-ui-refresh)
+The far-left rail holds the destinations that apply across the project. A second column holds whatever you can browse in the current destination, such as chats, saved assets, reports or settings sections. At widths below 940 logical pixels the second column becomes a drawer. The reading area, composer and output preview get that space back. The Sidebar control opens or closes the column at either size. This arrangement draws on the separation of navigation and sessions in KiroCrew and Linear’s sidebar hierarchy. [KiroCrew session view](https://github.com/kirodotdev/KiroCrew/blob/main/.github/screenshots/25249/composer-meter-after-model-switch-dark.png) · [Linear UI refresh](https://linear.app/changelog/2026-03-12-ui-refresh)
 
 ## Conversations
 
 Keep the composer at the bottom in a new chat and throughout a conversation. The two shortcuts on the welcome screen fill in editable drafts. The project navigator searches saved chat prompts across history pages. The reading column tops out at 760 logical pixels. Right-align the user's messages on a raised surface and place selectable assistant replies directly on the canvas.
 
-Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs opens screenshots for this chat and links to the album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)
+Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs lists the media from this chat and links to the screenshot album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)
 
 A chat goal sits above its conversation as one compact row with the objective and its current state. Selecting the row opens the editor in the composer area. Editing an existing goal preserves the unsent message. The same editor is available from **+** and `/goal`.
 
@@ -45,9 +45,9 @@ Sketches open inline above the composer from **Add to message**. **Annotate** op
 
 During a run, Enter steers the lead. The arrow beside Send opens delivery options. Pending follow-ups sit above the composer in a short scrollable list, each with its own remove action. Selecting **Send direction** on an expanded worker addresses the same composer to that worker. The recipient stays visible until the direction is sent or the user returns to the lead.
 
-## Studio, settings and album
+## Project tools, settings and album
 
-Studio pairs a task-specific editor and preview with a searchable run history. The result actions stay next to the selected output. Run settings apply to one task. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. Expand a provider to toggle the tasks it may handle. Show the number of enabled tasks beside its name, and keep account actions separate from the toggles. Closing Settings returns to the previous destination and selected output. The album uses a responsive thumbnail grid with the project and capture date under each image.
+Chat is the creation surface for images and 3D models. Show the finished preview, its maker and the relevant actions together in the transcript. Outputs opens the images, models and screenshots for this chat. Tools contains a searchable project asset library and the local decompilation editor. Decompilation run settings apply to one analysis. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. Expand a provider to toggle the tasks it may handle. Show the number of enabled tasks beside its name, and keep account actions separate from the toggles. Closing Settings returns to the previous destination and selected output. The album uses a responsive thumbnail grid with the project and capture date under each image.
 
 ## Appearance
 

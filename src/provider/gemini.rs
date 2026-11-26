@@ -217,7 +217,7 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
     Ok(io)
 }
 
-fn content(message: &Message) -> Result<Vec<Value>> {
+pub(super) fn content(message: &Message) -> Result<Vec<Value>> {
     let mut blocks = Vec::new();
     for mut item in message
         .input()?

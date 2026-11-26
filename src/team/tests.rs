@@ -3,6 +3,75 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
+fn generated_assets_stay_with_the_chat_and_respect_provider_permissions() -> Result<()> {
+    use crate::provider_permissions::{ProviderPermissions, TaskRole};
+    let root = tempdir()?;
+    let project = root.path().join("project");
+    let home = root.path().join("data");
+    let store = Store::open(&project, &home)?;
+    let lead = store.prepare("Make a tile", "", None)?;
+    let tool = "workshop_generate_asset";
+    assert!(
+        tools(false)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == tool)
+    );
+    assert!(
+        !tools(true)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == tool)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let call = |arguments| {
+        rt.block_on(dispatch(
+            &store,
+            &lead,
+            &json!({"tool":tool,"arguments":arguments}),
+            &|_| {},
+        ))
+    };
+    for provider in ["codex", "antigravity"] {
+        ProviderPermissions::set(&home, provider, TaskRole::Images, false)?;
+    }
+    assert!(
+        call(json!({"kind":"image","brief":"A forest"}))
+            .unwrap_err()
+            .to_string()
+            .contains("Enable a provider")
+    );
+    assert!(
+        call(json!({"kind":"image","brief":"Use a reference","reference_image":"chat"})).is_err()
+    );
+    let result: Value = serde_json::from_str(&call(
+        json!({"kind":"texture","material":"Moss","seed":42}),
+    )?)?;
+    let job = result["id"].as_i64().unwrap();
+    assert_eq!(store.studio_job(job)?.state, "Ready");
+    let receipt = store.messages_after(lead.id, 0)?.pop().unwrap();
+    assert_eq!(receipt.asset, Some(job));
+    assert_eq!(receipt.maker.as_deref(), Some("Local texture generator"));
+    assert!(store.is_chat_image(receipt.image.as_ref().unwrap()));
+    assert!(!store.work(lead.id).join("image.png").exists());
+    store.finish(lead.id, "review", "Delivered")?;
+    let other = store.prepare("Another conversation", "", None)?;
+    assert!(store.chat_outputs(Some(other.id))?.is_empty());
+    drop(store);
+    let reopened = Store::open(&project, &home)?;
+    let outputs = reopened.chat_outputs(Some(lead.id))?;
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].asset, Some(job));
+    assert!(outputs[0].preview.as_ref().unwrap().is_file());
+    assert_eq!(reopened.studio_history("Assets")?.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn posted_image_survives_project_edits_and_restricts_sources_to_the_working_copy() -> Result<()> {
     let tmp = tempdir()?;
     let store = Store::open(&tmp.path().join("p"), &tmp.path().join("data"))?;

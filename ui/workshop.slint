@@ -10,12 +10,13 @@ export { Comparison } from "comparison.slint";
 export { Sketch } from "sketch.slint";
 export { Appearance, ThemeChoice } from "appearance.slint";
 import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
-import { Studio, StudioPage } from "studio.slint";
+import { Studio, StudioPage, ModelInspector } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-model: bool, maker: string }
+export struct OutputItem { title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
@@ -275,7 +276,7 @@ component TaskEditor inherits VerticalLayout {
             vertical-alignment:center; horizontal-stretch:1; font-size:21px; font-weight:600; color:Theme.text; }
         if !root.local || TaskControls.summary: Action { label:"Choose providers"; width:144px; glyph:"\u{e77b}"; activate=>{root.choose-providers();} }
     }
-    Text { text:TaskControls.for-run ? "Changes apply to the next run." : root.workers ? "Used across projects unless a chat has its own worker settings." : "Used across projects when you start a new run.";
+    Text { text:TaskControls.for-run ? "Changes apply to the next run." : root.workers ? "Used across projects unless a chat has its own worker settings." : root.local ? "Used across projects for decompilation." : "The lead uses these choices when you ask for an asset in chat.";
         font-size:14px; color:Theme.muted; wrap:word-wrap; }
     if TaskControls.for-run: CheckBox { text:"Use task defaults"; checked:TaskControls.inherited; toggled=>{TaskControls.change(self.checked ? "inherit" : "customize","");} }
     Rectangle { height:1px; background:Theme.line; }
@@ -468,16 +469,19 @@ export component Desk inherits Window {
     public function clear-recipient() { root.direction-worker=-1; root.direction-title=""; }
     public function close-delivery() { if root.open-panel == OpenPanel.delivery {root.open-panel=OpenPanel.closed;} }
     in property <[AlbumItem]> album;
-    in property <[AlbumItem]> outputs;
+    in property <[OutputItem]> outputs;
     in property <string> album-error;
     in property <bool> capturing;
     private property <bool> album-open;
     in-out property <bool> studio-open;
     private property <string> viewing-shot;
+    private property <bool> viewing-image;
+    private property <int> viewing-asset;
     private property <bool> return-to-outputs;
     callback refresh-album();
     callback take-screenshot();
     pure callback shot-image(string,bool) -> image;
+    pure callback file-image(string) -> image;
     in-out property <bool> official-only: true;
     in property <[PickerOption]> attachments;
     callback attach(bool);
@@ -623,9 +627,13 @@ export component Desk inherits Window {
         }
     }
     function view-shot(key: string) {
+        root.viewing-image = false; root.viewing-asset = 0;
         root.return-to-outputs = root.open-panel == OpenPanel.outputs;
         root.open-panel = OpenPanel.closed;
         root.viewing-shot = key;
+    }
+    function view-image(path: string, asset: int) {
+        root.view-shot(path); root.viewing-image = true; root.viewing-asset = asset;
     }
     function close-shot() {
         root.viewing-shot = "";
@@ -670,8 +678,8 @@ export component Desk inherits Window {
     private property <bool> compact: root.width < 940px;
     private property <bool> hide-context;
     private property <bool> compact-context;
-    private property <bool> chat-screen: !Comparison.visible && !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
-    private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !(root.studio-open && Studio.inspecting));
+    private property <bool> chat-screen: !Comparison.visible && !Studio.inspecting && !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
+    private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !Studio.inspecting);
     private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
     private property <string> chat-query;
     private property <[PickerOption]> search-hits;
@@ -699,12 +707,16 @@ export component Desk inherits Window {
             if Studio.inspecting {Studio.command("close-inspector");}
         }
     }
+    private property <bool> restoring-destination;
     function close-settings() {
+        root.restoring-destination = true;
         root.visit(root.settings-origin);
+        root.restoring-destination = false;
         root.viewing-shot = root.settings-origin-shot;
         settings.focus();
     }
     function visit(where: string) {
+        if Studio.inspecting && where != "settings" && !root.restoring-destination {Studio.command("close-inspector");}
         if where == "settings" && !root.settings-open {
             root.settings-origin = Comparison.visible ? "comparison" : root.studio-open ? "studio" : root.album-open ? "album" : "chat";
             root.settings-origin-shot = root.viewing-shot;
@@ -730,7 +742,7 @@ export component Desk inherits Window {
                 if root.project != "": RailAction { caption: "New chat"; label: "New chat"; symbol: "\u{e710}"; enabled: !root.busy; activate => {root.new-chat();} }
                 RailAction { caption: "Chats"; label: "Chats"; symbol: "\u{e8bd}"; selected: root.chat-screen;
                     activate => {if root.chat-screen {root.toggle-context();} else {root.visit("chat");}} }
-                if root.project != "": RailAction { caption: "Studio"; label: "Game studio"; symbol: "\u{e7b8}"; selected: root.studio-open;
+                if root.project != "": RailAction { caption: "Tools"; label: "Project tools"; symbol: "\u{e90f}"; selected: root.studio-open;
                     activate => {if root.studio-open && root.compact {root.toggle-context();} else {root.visit(root.studio-open ? "chat" : "studio");}} }
                 RailAction { caption: "Album"; label:"Screenshots"; symbol: "\u{e91b}"; selected: root.album-open;
                     activate => {root.visit(root.album-open ? "chat" : "album");} }
@@ -805,13 +817,31 @@ export component Desk inherits Window {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 18px; padding-bottom: 10px; spacing: 24px; alignment: start;
                 if !root.home && root.earlier-messages: Action { label: "Earlier messages"; activate => {root.page(false,true);} }
                 for turn in root.turns: message := Rectangle {
-                    private property <bool> reply: !turn.from-user && !turn.delivery-notice && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
+                    private property <bool> reply: !turn.from-user && !turn.delivery-notice && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
                     private property <bool> has-sketch: turn.sketch.width > 0;
                     private property <bool> enlarged;
                     private property <length> sketch-width: self.enlarged ? self.width - 32px : min(304px, self.width * 0.84 - 32px);
                     private property <length> image-height: min(self.enlarged ? 540px : 212px, self.sketch-width * turn.sketch.height / max(1,turn.sketch.width));
                     private property <length> preview-height: self.has-sketch ? self.image-height + 42px : 0px;
-                    height: turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    height: turn.asset-id > 0 ? asset-reply.preferred-height : turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    asset-reply := VerticalLayout {
+                        visible: turn.asset-id > 0; x: 0px; y: 0px; width: min(360px, parent.width); spacing: 5px;
+                        Action {
+                            height: min(218px, self.width * max(1,turn.sketch.height) / max(1,turn.sketch.width)); icon-only: true;
+                            label: turn.asset-model ? "Open model preview" : "Enlarge image"; background: Theme.sidebar; border-radius: 12px; clip: true;
+                            Image { width: parent.width; height: parent.height; source: turn.sketch; image-fit: contain; }
+                            activate => {if turn.asset-model {Studio.asset-action(turn.asset-id,"inspect");} else {root.view-image(turn.image-path,turn.asset-id);}}
+                        }
+                        Text { text: turn.body; color: Theme.text; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+                        Text { text: (turn.asset-model ? "3D model · GLB" : "Image · PNG") + "  ·  " + turn.maker; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        HorizontalLayout { height: 32px; spacing: 3px; alignment: start;
+                            if turn.asset-model: Action { width: 112px; label: "Inspect model"; activate => {Studio.asset-action(turn.asset-id,"inspect");} }
+                            if !turn.asset-model: Action { width: 92px; label: "Annotate"; enabled: !root.busy || root.running; activate => {Sketch.annotate(turn.image-path,false);} }
+                            if turn.original-path != "": Action { width: 81px; label: "Compare";
+                                activate => {Comparison.open(turn.original-path,turn.markup-path,turn.image-path,turn.previous-output);} }
+                            Action { width: 99px; label: turn.asset-model ? "Save model" : "Save image"; activate => {Studio.asset-action(turn.asset-id,"export");} }
+                        }
+                    }
                     reply-view := ReplyView { visible: message.reply; width: parent.width;
                         height: self.preferred-height; body: message.reply ? turn.body : ""; provider: root.chat-provider; }
                     if turn.shot != "": Action { width: min(248px,parent.width); x: parent.width - self.width; height: parent.height;
@@ -829,7 +859,7 @@ export component Desk inherits Window {
                         direct-worker(id,title) => {root.direct-worker(id,title);}
                     }
                     bubble := Rectangle {
-                        visible: !message.reply && turn.dispatch-id == 0 && turn.shot == "";
+                        visible: !message.reply && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "";
                         width: message.has-sketch ? min(parent.width, max(message.sketch-width + 32px, min(parent.width * 0.84,body.preferred-width + 32px))) : turn.from-user ? min(parent.width * 0.84, max(46px, body.preferred-width + 32px)) : parent.width;
                         x: turn.from-user ? parent.width - self.width : 0px; height: parent.height;
                         background: turn.from-user ? Theme.surface : transparent; border-radius: 14px;
@@ -938,10 +968,11 @@ export component Desk inherits Window {
     // Disable the outside hit area during the press so Slint delivers that same
     // event to the newly uncovered control. The opener itself toggles on release.
     if root.studio-open && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; navigation-hidden: !root.context-visible; browse=>{root.toggle-context();} }
+    if Studio.inspecting && !root.studio-open && !root.settings-open: ModelInspector { x: rail.width; width: root.width - self.x; height: root.height; }
     if root.studio-open && Studio.editing-run: Rectangle {
         x:rail.width; width:root.width - self.x; height:root.height; background:Theme.canvas;
         VerticalLayout { x:(parent.width - self.width)/2; width:min(520px,parent.width - 40px); y:24px; height:parent.height - 48px; spacing:16px;
-            Action { height:36px; label:"Back to studio"; glyph:"\u{e72b}"; width:142px; activate=>{Studio.editing-run=false;} }
+            Action { height:36px; label:"Back to reports"; glyph:"\u{e72b}"; width:142px; activate=>{Studio.editing-run=false;} }
             run-scroll:=ScrollView { vertical-stretch:1; content-width:self.visible-width; content-height:run-editor.preferred-height;
                 run-editor:=TaskEditor { width:run-scroll.visible-width - 8px; catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
                     reload=>{root.reload-models();} back=>{Studio.editing-run=false;} choose-providers=>{root.choose-providers();} }
@@ -984,9 +1015,10 @@ export component Desk inherits Window {
         x: rail.width; width: root.width - self.x; height: root.height;
         escape => {root.close-shot();} init => {back.focus();}
         back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.close-shot();} }
-        Action { x: parent.width - 140px; y: 18px; width: 120px; label: "Annotate"; glyph: "\u{e104}"; selected: true; enabled: root.project != "" && (!root.busy || root.running); activate => {Sketch.annotate(root.viewing-shot,true);} }
+        if root.viewing-image && root.viewing-asset > 0: Action { x: parent.width - 250px; y: 18px; width: 100px; label: "Save image"; activate => {Studio.asset-action(root.viewing-asset,"export");} }
+        Action { x: parent.width - 140px; y: 18px; width: 120px; label: "Annotate"; glyph: "\u{e104}"; selected: true; enabled: root.project != "" && (!root.busy || root.running); activate => {Sketch.annotate(root.viewing-shot,!root.viewing-image);} }
         Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
-            source: root.shot-image(root.viewing-shot,true); accessible-label: "Full screenshot"; }
+            source: root.viewing-image ? root.file-image(root.viewing-shot) : root.shot-image(root.viewing-shot,true); accessible-label: root.viewing-image ? "Full image" : "Full screenshot"; }
     }
     if Comparison.visible: ComparisonPage {
         visible: !root.settings-open;
@@ -1020,7 +1052,7 @@ export component Desk inherits Window {
                     } }
                 }
             }
-            if root.settings-tab == "Providers": Text { text: "Choose a provider to manage its workers and Studio tasks across projects."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
+            if root.settings-tab == "Providers": Text { text: "Choose which tasks each provider can handle across your projects."; color: Theme.muted; wrap: word-wrap; font-size: 14px; }
             if root.settings-tab == "Providers" && root.permission-error != "": Text { text:root.permission-error; wrap:word-wrap; color:Theme.scarce; }
             if root.source-open && (root.settings-tab == "Plugins" || root.settings-tab == "Skills"): HorizontalLayout { height: 36px; spacing: 6px;
                 LineEdit { horizontal-stretch: 1; text <=> root.source-input; accessible-label: root.settings-tab == "Skills" ? "Skill source" : "Plugin source";
@@ -1210,20 +1242,19 @@ export component Desk inherits Window {
             HorizontalLayout { height: 36px; padding-left: 8px;
                 Text { text: "Outputs"; vertical-alignment: center; font-weight: 600; font-size: 15px; color: Theme.text; } }
             if root.outputs.length == 0: HorizontalLayout { padding-left: 8px; padding-right: 8px; vertical-stretch: 1;
-                Text { text: "Screenshots you send in this chat appear here."; wrap: word-wrap; font-size: 13px; color: Theme.muted; } }
+                Text { text: "Images, 3D models and screenshots from this chat appear here."; wrap: word-wrap; font-size: 13px; color: Theme.muted; } }
             if root.outputs.length > 0: output-list := ListView {
                 vertical-stretch: 1;
-                for item[i] in root.outputs: output-row := Action {
+                for item in root.outputs: output-row := Action {
                     width: output-list.visible-width; height: 64px; icon-only: true;
-                    private property <int> number: root.outputs.length - i;
-                    label: "Open screenshot " + self.number; accessible-description: item.date;
+                    label: item.open-label; accessible-description: item.detail;
                     Rectangle { x: 8px; y: 8px; width: 72px; height: 48px; background: Theme.sidebar; border-radius: 7px; clip: true;
-                        Image { width: parent.width; height: parent.height; source: root.shot-image(item.key,false); image-fit: cover; } }
+                        Image { width: parent.width; height: parent.height; source: item.shot != "" ? root.shot-image(item.shot,false) : root.file-image(item.preview); image-fit: cover; } }
                     VerticalLayout { x: 92px; y: 0px; width: parent.width - 100px; height: parent.height; alignment: center; spacing: 2px;
-                        Text { text: "Screenshot " + output-row.number; color: Theme.text; font-size: 14px; }
-                        Text { text: item.date; color: Theme.muted; font-size: 12px; }
+                        Text { text: item.title; color: Theme.text; font-size: 14px; overflow: elide; }
+                        Text { text: item.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
                     }
-                    activate => {root.view-shot(item.key);}
+                    activate => {if item.shot != "" {root.view-shot(item.shot);} else if item.path != "" {root.view-image(item.path,item.asset-id);} else {root.dismiss-panel(); Studio.asset-action(item.asset-id,"inspect");}}
                 }
             }
             Rectangle { height: 1px; background: Theme.line; }

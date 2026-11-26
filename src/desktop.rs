@@ -31,7 +31,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
@@ -496,6 +496,39 @@ impl App {
             Err(e) => ui.set_album_error(format!("Could not open the album: {e:#}").into()),
         }
     }
+    fn refresh_outputs(&self, store: &Store, chat: Option<i64>) -> Result<()> {
+        let items: Vec<_> = store
+            .chat_outputs(chat)?
+            .into_iter()
+            .map(|item| {
+                let path = |p: Option<PathBuf>| {
+                    p.map(|p| p.to_string_lossy().as_ref().into())
+                        .unwrap_or_default()
+                };
+                OutputItem {
+                    open_label: format!(
+                        "Open {}",
+                        if item.shot.is_empty() {
+                            item.title.clone()
+                        } else {
+                            item.title.to_lowercase()
+                        }
+                    )
+                    .into(),
+                    title: item.title.into(),
+                    detail: item.detail.into(),
+                    shot: item.shot.into(),
+                    asset_id: item.asset.unwrap_or_default() as i32,
+                    path: path(item.image),
+                    preview: path(item.preview),
+                }
+            })
+            .collect();
+        self.ui
+            .unwrap()
+            .set_outputs(ModelRc::new(VecModel::from(items)));
+        Ok(())
+    }
     fn capture(&self, command: Option<String>) {
         let ui = self.ui.unwrap();
         if ui.get_capturing() {
@@ -561,6 +594,28 @@ impl App {
                 body: message.text.into(),
                 ..Default::default()
             };
+            if let Some(asset) = message.asset {
+                turn.asset_id = asset as i32;
+                turn.asset_model = message.image.is_none();
+                if let Some(maker) = message.maker {
+                    let (model, effort) = maker.split_once(" · ").unwrap_or((&maker, ""));
+                    let label = model_label(&self.catalog.borrow(), model);
+                    turn.maker = if effort.is_empty() {
+                        label
+                    } else {
+                        format!("{label} · {effort}")
+                    }
+                    .into();
+                }
+                if turn.asset_model {
+                    let preview = store
+                        .dir
+                        .join("studio")
+                        .join(asset.to_string())
+                        .join("preview.png");
+                    turn.sketch = slint::Image::load_from_path(&preview).unwrap_or_default();
+                }
+            }
             sketch::set_turn_image(&mut turn, message.image);
             if let Some(pair) = message.comparison {
                 turn.original_path = pair.original.to_string_lossy().as_ref().into();
@@ -975,9 +1030,7 @@ impl App {
         let selected = rows.iter().position(|a| Some(a.id) == self.id.get());
         ui.set_selection(selected.map_or(-1, |i| i as i32));
         self.render_goal(store, selected.map(|i| rows[i].id))?;
-        ui.set_outputs(Self::screenshot_items(
-            store.chat_screenshots(selected.map(|i| rows[i].id))?,
-        ));
+        self.refresh_outputs(store, selected.map(|i| rows[i].id))?;
         // Keep the live Stop control mounted when an activity update refreshes this chat.
         ui.set_running(
             selected.is_some_and(|i| rows[i].state == "running") && self.control.borrow().is_some(),
@@ -1396,6 +1449,13 @@ impl App {
                         .into(),
                     );
                     self.render()?;
+                    let studio = ui.global::<Studio>();
+                    if ui.get_studio_open()
+                        && studio.get_area() == "Assets"
+                        && let Some(store) = self.store.borrow().as_ref()
+                    {
+                        self.refresh_studio(store, Some(i64::from(studio.get_selected().id)))?;
+                    }
                     self.open_notification()?;
                 }
             }
@@ -1413,6 +1473,7 @@ impl App {
             && let Some(attempt) = self.attempts.borrow().iter().find(|a| a.id == id)
         {
             self.render_goal(store, Some(id))?;
+            self.refresh_outputs(store, Some(id))?;
             self.refresh_chat(store, attempt)?;
         }
         Ok(())
@@ -1690,7 +1751,7 @@ impl App {
                 }
                 events.send(Update::Started(a.id, op != "send-next" && from_composer))?;
                 let active_goal = store.chat_goal(a.id)?.filter(|g| g.status == "active");
-                let earlier_image = store.last_chat_image_event(a.id)?;
+                let earlier_output = store.last_asset_output(a.id)?.map_or(0, |(id, _)| id);
                 let earlier_checkpoint = store.current_checkpoint(a.id)?;
                 let outcome =
                     provider::run_turn(&mut session, &store, &a, prompt, rx, false, |message| {
@@ -1717,7 +1778,7 @@ impl App {
                     &a,
                     &finished,
                     active_goal.is_some(),
-                    earlier_image,
+                    earlier_output,
                     earlier_checkpoint,
                 )? {
                     let detail = if finished.state == "failed" {
@@ -1827,6 +1888,12 @@ fn main() -> Result<()> {
             .ok()
             .and_then(|p| slint::Image::load_from_path(&p).ok())
             .unwrap_or_default()
+    });
+    ui.on_file_image(|path| {
+        if path.is_empty() {
+            return Default::default();
+        }
+        slint::Image::load_from_path(std::path::Path::new(path.as_str())).unwrap_or_default()
     });
     let a = app.clone();
     ui.on_load_settings(move |refresh| a.load_preferences(String::new(), refresh));

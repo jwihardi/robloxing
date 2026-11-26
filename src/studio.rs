@@ -1,4 +1,5 @@
 //! Project-scoped game asset jobs. Only finished runs expose deliverables.
+mod chat;
 pub mod reports;
 pub mod settings;
 use settings::TaskSettings;
@@ -114,6 +115,32 @@ impl Job {
     }
     pub fn folder(&self, store: &Store) -> PathBuf {
         store.dir.join("studio").join(self.id.to_string())
+    }
+}
+
+#[derive(Default)]
+struct BuildContext<'a> {
+    inference: Option<&'a (String, String)>,
+    reference: Option<&'a Path>,
+    delivery: Option<(i64, &'a str)>,
+}
+
+struct RunningJob<'a> {
+    store: &'a Store,
+    id: i64,
+    finished: bool,
+}
+
+impl Drop for RunningJob<'_> {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Ok(db) = self.store.db.lock()
+        {
+            let _ = db.execute(
+                "UPDATE studio_jobs SET state='Cancelled' WHERE id=?1 AND state='Running'",
+                [self.id],
+            );
+        }
     }
 }
 fn same_contents(left: &Path, right: &Path) -> Result<bool> {
@@ -240,7 +267,7 @@ impl Store {
     ) -> Result<Vec<Job>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs
-            WHERE area=?1 AND (instr(lower(title),lower(?2))>0 OR (area='Ghidra' AND
+            WHERE (area=?1 OR (?1='Assets' AND area IN ('Images','Models'))) AND (instr(lower(title),lower(?2))>0 OR (area='Ghidra' AND
             (instr(lower(json_extract(request,'$.filter')),lower(?2))>0 OR EXISTS(
             SELECT 1 FROM decompile_records r WHERE r.job=id AND (instr(lower(r.symbols),lower(?2))>0 OR instr(r.input_sha,lower(?2))>0)))))
             AND (?3=0 OR state='Ready') ORDER BY id DESC LIMIT ?4")?;
@@ -261,6 +288,14 @@ impl Store {
         recipe: &Recipe,
         overrides: Option<&TaskSettings>,
     ) -> Result<i64> {
+        self.queue_named_studio_job(recipe, overrides, None)
+    }
+    fn queue_named_studio_job(
+        &self,
+        recipe: &Recipe,
+        overrides: Option<&TaskSettings>,
+        title: Option<&str>,
+    ) -> Result<i64> {
         recipe.validate()?;
         let settings = match overrides {
             Some(value) => value.clone(),
@@ -278,7 +313,11 @@ impl Store {
             "INSERT INTO studio_jobs(area,title,request,state) VALUES(?1,?2,?3,'Queued')",
             params![
                 recipe.area(),
-                recipe.title(),
+                title
+                    .and_then(|s| s.trim().lines().next())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.chars().take(72).collect())
+                    .unwrap_or_else(|| recipe.title()),
                 serde_json::to_string(&request)?
             ],
         )?;
@@ -290,8 +329,20 @@ impl Store {
     pub fn run_studio_job_with_refresh(
         &self,
         id: i64,
+        cancel: oneshot::Receiver<()>,
+        fresh: bool,
+    ) -> Result<()> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(self.execute_studio_job(id, cancel, fresh, BuildContext::default()))
+    }
+    async fn execute_studio_job(
+        &self,
+        id: i64,
         mut cancel: oneshot::Receiver<()>,
         fresh: bool,
+        context: BuildContext<'_>,
     ) -> Result<()> {
         ensure!(
             self.db.lock().unwrap().execute(
@@ -300,9 +351,14 @@ impl Store {
             )? == 1,
             "This job has already started."
         );
+        let mut running = RunningJob {
+            store: self,
+            id,
+            finished: false,
+        };
         let job = self.studio_job(id)?;
         let folder = job.folder(self);
-        let run = || -> Result<String> {
+        let result = async {
             fs::create_dir_all(folder.parent().context("Missing job directory")?)?;
             fs::create_dir(&folder)?;
             if let Recipe::Decompile { binary, filter } = &job.recipe {
@@ -322,37 +378,37 @@ impl Store {
                     ),
                 )?;
             }
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(async {
-                let detail = tokio::select! {
-                    biased;
-                    _ = &mut cancel => bail!("Cancelled"),
-                    result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job, &folder, fresh)) =>
-                        result.context("The tool timed out after 15 minutes")?,
-                }?;
-                if matches!(job.recipe, Recipe::Decompile { .. }) && job.settings.summarize {
-                    // Preserve access to the completed local report if Workshop exits during the summary.
-                    self.db.lock().unwrap().execute(
-                        "UPDATE studio_jobs SET state='Ready',detail=?2 WHERE id=?1",
-                        params![id, detail],
-                    )?;
-                    self.run_report_summary(&job, &folder, &detail, cancel).await;
-                }
-                Ok(detail)
-            })
-        };
-        let result = run();
+            let detail = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("Cancelled"),
+                result = tokio::time::timeout(Duration::from_secs(900), self.build_asset(&job, &folder, fresh, &context)) =>
+                    result.context("The tool timed out after 15 minutes")?,
+            }?;
+            if matches!(job.recipe, Recipe::Decompile { .. }) && job.settings.summarize {
+                // Preserve access to the completed local report if Workshop exits during the summary.
+                self.db.lock().unwrap().execute(
+                    "UPDATE studio_jobs SET state='Ready',detail=?2 WHERE id=?1",
+                    params![id, detail],
+                )?;
+                self.run_report_summary(&job, &folder, &detail, cancel).await;
+            }
+            if let Some((attempt, maker)) = context.delivery {
+                self.deliver_chat_asset(&job, attempt, maker, &detail)?;
+            }
+            Ok::<_, anyhow::Error>(detail)
+        }.await;
         let (state, detail) = match &result {
             Ok(detail) => ("Ready", detail.clone()),
             Err(e) if e.to_string() == "Cancelled" => ("Cancelled", String::new()),
             Err(e) => ("Failed", format!("{e:#}")),
         };
-        self.db.lock().unwrap().execute(
-            "UPDATE studio_jobs SET state=?2,detail=?3 WHERE id=?1",
-            params![id, state, detail],
-        )?;
+        if result.is_err() || context.delivery.is_none() {
+            self.db.lock().unwrap().execute(
+                "UPDATE studio_jobs SET state=?2,detail=?3 WHERE id=?1",
+                params![id, state, detail],
+            )?;
+        }
+        running.finished = true;
         if job.recipe.area() == "Ghidra" && folder.is_dir() {
             reports::log(
                 &self.db.lock().unwrap(),
@@ -402,24 +458,36 @@ impl Store {
         };
         let _ = reports::log(&self.db.lock().unwrap(), folder, &message);
     }
-    async fn build_asset(&self, job: &Job, folder: &Path, fresh: bool) -> Result<String> {
+    async fn build_asset(
+        &self,
+        job: &Job,
+        folder: &Path,
+        fresh: bool,
+        context: &BuildContext<'_>,
+    ) -> Result<String> {
         let recipe = &job.recipe;
+        let inference = match (recipe.agent_role(), context.inference) {
+            (Some(role), None) => Some(
+                self.policy_inference(role, &job.settings.agent, "", "", "codex")
+                    .await?,
+            ),
+            (_, selection) => selection.cloned(),
+        };
         match recipe {
             Recipe::Image { brief, style } => {
-                let inference = self
-                    .policy_inference(
-                        crate::provider_permissions::TaskRole::Images,
-                        &job.settings.agent,
-                        "",
-                        "",
-                        "codex",
-                    )
-                    .await?;
-                provider::generate_image(folder, brief, style, &inference).await?
+                provider::generate_image(
+                    folder,
+                    brief,
+                    style,
+                    inference.as_ref().context("Missing image agent")?,
+                    context.reference,
+                )
+                .await?
             }
             Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,
             Recipe::Model { .. } | Recipe::ModelBrief { .. } | Recipe::Blend { .. } => {
-                return tools::model(self, folder, job).await;
+                return tools::model(self, folder, job, inference.as_ref(), context.reference)
+                    .await;
             }
             Recipe::Decompile { binary, filter } => {
                 return tools::decompile(self, job, folder, binary, filter, fresh).await;

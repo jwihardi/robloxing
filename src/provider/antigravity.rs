@@ -111,7 +111,7 @@ pub async fn sign_out() -> Result<()> {
 
 pub(super) async fn studio(
     instructions: &str,
-    prompt: &str,
+    prompt: &Message,
     schema: Value,
     inference: &(String, String),
     image: bool,
@@ -168,12 +168,17 @@ pub(super) async fn studio(
             "\nReturn only JSON matching this schema: {schema}"
         ));
     }
-    request.push_str(&format!("\n\n{prompt}"));
+    request.push_str(&format!("\n\n{}", prompt.text));
+    let input = Message {
+        text: request,
+        files: prompt.files.clone(),
+        queued_id: None,
+    };
     gemini::rpc(
         &mut io.stdin,
         5,
         "session/prompt",
-        json!({"sessionId":io.session,"prompt":[{"type":"text","text":request}]}),
+        json!({"sessionId":io.session,"prompt":gemini::content(&input)?}),
     )
     .await?;
     let mut text = String::new();

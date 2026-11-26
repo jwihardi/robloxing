@@ -82,7 +82,7 @@ pub(crate) fn chat_reason(
     start: &Attempt,
     end: &Attempt,
     had_active_goal: bool,
-    previous_image: i64,
+    previous_output: i64,
     previous_checkpoint: Option<(String, String)>,
 ) -> Result<Option<&'static str>> {
     if end.state == "failed" {
@@ -98,8 +98,15 @@ pub(crate) fn chat_reason(
             _ => {}
         }
     }
-    if store.last_chat_image_event(end.id)? > previous_image {
-        return Ok(Some("Image ready for review"));
+    if let Some((_, kind)) = store
+        .last_asset_output(end.id)?
+        .filter(|(event, _)| *event > previous_output)
+    {
+        return Ok(Some(if kind == "workshop/model" {
+            "3D model ready for review"
+        } else {
+            "Image ready for review"
+        }));
     }
     let changes =
         !end.patch.is_empty() && (start.patch.is_empty() || start.candidate != end.candidate);
@@ -236,7 +243,14 @@ impl App {
                 self.close_inspector();
                 let studio = ui.global::<Studio>();
                 studio.set_editing_run(false);
-                studio.set_area(job.recipe.area().into());
+                studio.set_area(
+                    if job.recipe.area() == "Ghidra" {
+                        "Ghidra"
+                    } else {
+                        "Assets"
+                    }
+                    .into(),
+                );
                 studio.set_query("".into());
                 ui.invoke_show_destination(true);
                 self.refresh_studio(&store, Some(id))?;

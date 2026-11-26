@@ -1,19 +1,10 @@
-import { ComboBox, LineEdit, ListView, TextEdit } from "std-widgets.slint";
+import { LineEdit, ListView, TextEdit } from "std-widgets.slint";
 import { Action, Theme, ActivityLine } from "common.slint";
 
-export struct StudioItem { id: int, title: string, state: string, detail: string, date: string }
+export struct StudioItem { id: int, title: string, state: string, detail: string, date: string, area: string }
 
 export global Studio {
-    in-out property <string> area: "Images";
-    in-out property <int> image-mode;
-    in-out property <int> model-mode;
-    in-out property <int> material;
-    in-out property <string> seed: "1";
-    in-out property <string> brief;
-    in-out property <string> custom-style;
-    in-out property <string> model-name;
-    in-out property <string> model-brief;
-    in-out property <string> scene-path;
+    in-out property <string> area: "Assets";
     in-out property <string> binary-path;
     in-out property <string> filter;
     in-out property <string> query;
@@ -36,11 +27,14 @@ export global Studio {
     in property <string> inspect-result;
     in property <string> inspect-faces;
     in property <string> inspect-error;
+    in property <int> inspect-id;
+    in property <string> inspect-title;
+    callback asset-action(int,string);
     callback inspect-view(float,float,float,int,int,int);
     callback command(string);
     callback select(int);
     public function clear-project() {
-        area = "Images"; brief = ""; custom-style = ""; model-name = ""; model-brief = ""; scene-path = ""; binary-path = ""; filter = ""; query = ""; seed = "1";
+        area = "Assets"; binary-path = ""; filter = ""; query = "";
     }
 }
 
@@ -50,7 +44,7 @@ component CameraButton inherits Action {
     icon-only: true;
 }
 
-component ModelInspector inherits FocusScope {
+export component ModelInspector inherits FocusScope {
     private property <float> yaw: -32;
     private property <float> pitch: 18;
     private property <float> zoom: 1;
@@ -82,14 +76,14 @@ component ModelInspector inherits FocusScope {
         padding: root.width < 640px ? 16px : 24px; spacing: 12px;
         HorizontalLayout {
             height: 48px; spacing: 8px;
-            Action { width: 36px; label: "Back to models"; icon-only: true; glyph: "\u{e72b}";
+            Action { width: 36px; label: "Close model inspector"; icon-only: true; glyph: "\u{e72b}";
                 activate => { Studio.command("close-inspector"); } }
             VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
                 Text { text: "Model inspector"; font-size: 12px; color: Theme.muted; }
-                Text { text: Studio.selected.title; font-size: 20px; font-weight: 600; color: Theme.text; overflow: elide; min-width: 0px; }
+                Text { text: Studio.inspect-title; font-size: 20px; font-weight: 600; color: Theme.text; overflow: elide; min-width: 0px; }
             }
             Action { label: "Open in Blender"; glyph: "\u{e8a7}"; selected: true; width: 148px;
-                activate => { Studio.command("edit"); } }
+                activate => { Studio.asset-action(Studio.inspect-id,"edit"); } }
         }
         HorizontalLayout { height: 36px; spacing: 4px;
             for name[i] in ["Surface", "Wireframe", "Overlaps"]: Action {
@@ -156,16 +150,13 @@ export component StudioPage inherits Rectangle {
     in property <bool> can-attach;
     in property <bool> navigation-hidden;
     callback browse();
-    private property <bool> images: Studio.area == "Images";
-    private property <bool> models: Studio.area == "Models";
+    private property <bool> images: Studio.selected.area == "Images";
+    private property <bool> models: Studio.selected.area == "Models";
     private property <bool> binary: Studio.area == "Ghidra";
-    private property <bool> tile: images && Studio.image-mode == 3;
-    private property <bool> import-scene: models && Studio.model-mode == 4;
     private property <bool> show-details;
     private property <int> selected-id: Studio.selected.id;
     changed selected-id => {root.show-details = false;}
     private property <bool> ready: Studio.selected.state == "Ready";
-    private property <string> run-label: tile ? "Make tile" : images ? "Generate image" : import-scene ? "Export scene" : models ? "Create model" : "Decompile";
     background: Theme.canvas;
     Timer { interval: 750ms; running: root.binary && Studio.working && Studio.show-log &&
         (Studio.selected.state == "Running" || Studio.selected.state == "Queued");
@@ -174,54 +165,30 @@ export component StudioPage inherits Rectangle {
     if !Studio.inspecting: VerticalLayout {
         x: (root.width - self.width) / 2; y: 22px; width: min(950px,root.width - 48px); height: root.height - 40px; spacing: 10px;
         HorizontalLayout { height: 42px; spacing: 8px;
-            Text { text: root.images ? "Image studio" : root.models ? "3D model studio" : "Decompilation"; color: Theme.text; font-size: 28px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            Text { text: root.binary ? "Decompilation" : "Saved assets"; color: Theme.text; font-size: 28px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            if !root.binary: Action { label: "Locate Blender"; width: 116px; activate => {Studio.command("locate");} }
             if root.navigation-hidden: Action { label: "Tools and history"; width: 162px; glyph: "\u{e700}"; activate => { root.browse(); } }
         }
-        Text { text: root.images ? "Generate artwork or build a seamless texture tile." : root.models ? "Design a prop, use a starter mesh, or export a Blender scene." : "Recover functions from a local game binary with Ghidra.";
+        Text { text: root.binary ? "Recover functions from a local game binary with Ghidra." : "Images and 3D models from chats in this project.";
             color: Theme.muted; font-size: 14px; wrap:word-wrap; }
         Rectangle { height: 1px; background: Theme.line; }
-        HorizontalLayout { height: 32px; spacing: 8px;
-            if root.images: ComboBox { width: 156px; accessible-label: "Image format";
-                model: ["Concept art","Inventory icon","Sprite sheet","Seamless tile","Custom style"]; current-index <=> Studio.image-mode; }
-            if root.images && Studio.image-mode == 4: LineEdit { horizontal-stretch: 1; placeholder-text: "Art direction…"; accessible-label: "Custom art direction"; text <=> Studio.custom-style; }
-            if root.models: ComboBox { width: 158px; accessible-label: "Model source";
-                model: ["From brief","Crystal","Barrel","Planter","Blender scene"]; current-index <=> Studio.model-mode; }
-            if root.binary: Text { text: "Local binary"; color: Theme.text; vertical-alignment: center; font-size: 15px; font-weight: 600; }
-            Rectangle { horizontal-stretch: 1; }
-            if !root.images: Action { label: root.models ? "Locate Blender" : "Locate Ghidra"; width: 118px; height: 32px; activate => {Studio.command("locate");} }
-        }
-        if root.images && !root.tile: LineEdit {
-            height: 40px; placeholder-text: "Describe the game image you want to make…"; accessible-label: "Art brief"; text <=> Studio.brief;
-        }
-        if root.tile: HorizontalLayout { height: 40px; spacing: 10px;
-            ComboBox { width: 150px; model: ["Moss","Basalt","Sand"]; accessible-label: "Tile material"; current-index <=> Studio.material; }
-            Text { text: "Seed"; color: Theme.muted; vertical-alignment: center; }
-            LineEdit { width: 115px; accessible-label: "Tile seed"; text <=> Studio.seed; }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        if root.models && Studio.model-mode == 0: LineEdit { height: 40px; text <=> Studio.model-brief; accessible-label: "Model brief"; placeholder-text: "Describe the shape, proportions, and colors of your prop…"; }
-        if root.models && Studio.model-mode > 0 && !root.import-scene: LineEdit { height: 40px; text <=> Studio.model-name; accessible-label: "Model name"; placeholder-text: "Name your model…"; }
-        if root.import-scene || root.binary: HorizontalLayout { height: 36px; spacing: 8px;
-            Action { label: root.binary ? "Choose binary…" : "Choose scene…"; width: 136px; selected: true; activate => {Studio.command("pick");} }
-            Text { text: root.binary ? Studio.binary-path : Studio.scene-path; color: Theme.muted; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+        if root.binary: HorizontalLayout { height: 36px; spacing: 8px;
+            Action { label: "Choose binary…"; width: 136px; selected: true; activate => {Studio.command("pick");} }
+            Text { text: Studio.binary-path; color: Theme.muted; min-width: 0px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+            Action { label: "Locate Ghidra"; width: 118px; activate => {Studio.command("locate");} }
         }
         if root.binary: LineEdit { height: 34px; text <=> Studio.filter; placeholder-text: "Function name contains (optional)"; accessible-label: "Function filter"; }
-        HorizontalLayout { height: 36px; spacing: 10px;
-            Action { label: Studio.working ? "Cancel run" : root.run-label; width: 138px; primary: !Studio.working;
-                enabled: Studio.working || (root.binary ? Studio.binary-path != "" : root.import-scene ? Studio.scene-path != "" :
-                    root.tile ? Studio.seed != "" : root.images ? Studio.brief != "" : Studio.model-mode == 0 ? Studio.model-brief != "" : Studio.model-name != "");
+        if root.binary: HorizontalLayout { height: 36px; spacing: 10px;
+            Action { label: Studio.working ? "Cancel run" : "Decompile"; width: 138px; primary: !Studio.working; enabled: Studio.working || Studio.binary-path != "";
                 activate => {Studio.command(Studio.working ? "cancel" : "run");} }
             if Studio.working: ActivityLine { label: Studio.message; horizontal-stretch: 1; }
             if !Studio.working: Text { text: Studio.message; wrap: word-wrap; overflow: elide; min-width: 0px; horizontal-stretch: 1; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
-            if root.binary || (root.images && !root.tile) || (root.models && Studio.model-mode==0): Action {
-                label:Studio.custom-task ? "Custom run settings" : "Run settings"; width:Studio.custom-task ? 181px : 137px;
-                glyph:"\u{e713}"; activate=>{Studio.command("edit-task");}
-            }
+            Action { label:Studio.custom-task ? "Custom run settings" : "Run settings"; width:Studio.custom-task ? 181px : 137px; glyph:"\u{e713}"; activate=>{Studio.command("edit-task");} }
         }
-        Rectangle { height: 1px; background: Theme.line; }
+        if root.binary: Rectangle { height: 1px; background: Theme.line; }
         if Studio.jobs.length == 0: VerticalLayout { alignment: center; spacing: 8px; vertical-stretch: 1;
-            Text { text: root.binary ? "Report preview" : root.models ? "Model preview" : "Image preview"; horizontal-alignment:center; color:Theme.text; font-size:18px; font-weight:600; }
-            Text { text: Studio.query != "" ? "Choose a different search in the run history." : root.binary ? "Choose a binary and run decompilation to read its report." : root.models ? "Create a model to inspect, export, or attach it to chat." : "Generate an image to preview, export, or attach it to chat.";
+            Text { text: root.binary ? "Report preview" : Studio.query != "" ? "No matching assets" : "No saved assets yet"; horizontal-alignment:center; color:Theme.text; font-size:18px; font-weight:600; }
+            Text { text: Studio.query != "" ? "Choose a different search in the run history." : root.binary ? "Choose a binary and run decompilation to read its report." : "Ask for an image or a 3D model in chat.";
                 horizontal-alignment:center; wrap:word-wrap; color: Theme.muted; font-size: 14px; }
         }
         if Studio.jobs.length > 0: HorizontalLayout { height: 30px; spacing: 10px;
@@ -256,15 +223,16 @@ export component StudioPage inherits Rectangle {
         if Studio.jobs.length > 0: HorizontalLayout { height: 28px; spacing: 8px;
             Text { text: root.ready ? Studio.selected.detail : ""; horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; color: Theme.muted; font-size: 12px; overflow: elide; }
             if root.ready && !root.binary && Studio.selected.detail != "": Action { label: root.show-details ? "Preview" : "Details"; width: 72px; height: 28px; selected: root.show-details; activate => {root.show-details = !root.show-details;} }
-            Action { label: "Reuse settings"; width: 112px; height: 28px; activate => {Studio.command("reuse");} }
+            if root.binary: Action { label: "Reuse settings"; width: 112px; height: 28px; activate => {Studio.command("reuse");} }
         }
+        if !root.binary && Studio.message != "": Text { text: Studio.message; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
         if Studio.jobs.length > 0: HorizontalLayout { height: 36px; spacing: 3px; alignment: start;
             if root.ready: Action { label: "Save as…"; width: 78px; selected: true; activate => {Studio.command("export");} }
             if root.ready: Action { label: "Attach to chat"; width: 110px; enabled: root.can-attach; activate => {Studio.command("attach");} }
             if root.ready && root.images: Action { label: "Annotate"; width: 88px; enabled: root.can-attach; activate => {Studio.command("annotate");} }
             if root.ready && root.models: Action { label: "Open in Blender"; width: 120px; activate => {Studio.command("edit");} }
-            if root.ready && root.models: Action { label: "Re-export"; width: 81px; enabled: !Studio.working; activate => {Studio.command("rebuild");} }
-            if Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted": Action {
+
+            if root.binary && (Studio.selected.state == "Failed" || Studio.selected.state == "Cancelled" || Studio.selected.state == "Interrupted"): Action {
                 label: "Retry run"; width: 88px; enabled: !Studio.working; activate => {Studio.command("retry");} }
             if root.ready && root.binary: Action { label: "Run fresh"; width: 85px; enabled: !Studio.working; activate => {Studio.command("fresh");} }
             if root.binary || (!root.ready && Studio.selected.state == "Failed"): Action { label: "Show files"; width: 90px; activate => {Studio.command("files");} }

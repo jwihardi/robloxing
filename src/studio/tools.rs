@@ -137,20 +137,22 @@ async fn run(program: &Path, args: &[&str], cwd: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) async fn model(store: &Store, cwd: &Path, job: &super::Job) -> Result<String> {
+pub(super) async fn model(
+    store: &Store,
+    cwd: &Path,
+    job: &super::Job,
+    inference: Option<&(String, String)>,
+    reference: Option<&Path>,
+) -> Result<String> {
     let recipe = &job.recipe;
     let blender = store.studio_tool("Blender")?;
     if let Recipe::ModelBrief { brief } = recipe {
-        let inference = store
-            .policy_inference(
-                crate::provider_permissions::TaskRole::Models,
-                &job.settings.agent,
-                "",
-                "",
-                "codex",
-            )
-            .await?;
-        provider::design_model(cwd, brief, &inference).await?;
+        let mut brief = brief.clone();
+        if let Some(path) = reference {
+            let previous = fs::read_to_string(path)?;
+            brief.push_str(&format!("\n\nPrevious model design to revise:\n{previous}"));
+        }
+        provider::design_model(cwd, &brief, inference.context("Missing model designer")?).await?;
     }
     fs::write(cwd.join("model.py"), include_str!("model.py"))?;
     fs::write(cwd.join("request.json"), serde_json::to_vec(recipe)?)?;

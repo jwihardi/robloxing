@@ -38,7 +38,7 @@ Type `/goal Add a dark theme and verify it at both window sizes` to give the cur
 
 Open the model and effort pill beside Send. Select the header showing the effort and model to open the model list. Drag the slider or use the arrow keys to choose an effort level. New-chat choices set the project defaults. Changes within an existing chat apply to its next message. Workshop gets the available models and effort levels from each installed CLI. Choose a Claude model for a Claude lead. Start a new chat to switch providers, or change models from the same provider between turns.
 
-In **Settings → Providers**, each provider shows how many tasks it can handle. Expand it to check or uncheck individual tasks across projects. **Choose providers** in task settings opens the same controls. Each provider has independent choices for workers, model design and decompilation summaries. Codex and Antigravity can also generate Studio images. Clear a task for every provider to turn off its AI routing.
+In **Settings → Providers**, each provider shows how many tasks it can handle. Expand it to check or uncheck individual tasks across projects. **Choose providers** in task settings opens the same controls. Each provider has independent choices for workers, model design and decompilation summaries. Codex and Antigravity can also generate chat images. Clear a task for every provider to turn off its AI routing.
 
 Use **Settings → Tasks → Workers** to set allowed models and maximum effort. To customize one chat, open **Subagents** beside **+** and turn off **Use global defaults**. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
@@ -46,15 +46,15 @@ While the lead is working, Enter or **Steer now** sends a correction to the curr
 
 To address a single worker, expand its dispatch or open **Activity**, select the worker, and choose **Send direction**. The composer names the recipient. Send your text or attachment there, or choose **Return to lead** to keep editing the draft. Directions appear in the chat, and the lead receives them with the worker results.
 
-Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Album** in the navigation rail. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
+Choose **+ → Take screenshot**, type `/screenshot`, or ask “take a screenshot” to open the Windows region picker. Drag to send the selected area to the current chat. Escape cancels. The screenshot appears in the conversation and opens **Outputs** in the top right. Reopen Outputs to browse this chat’s images, models and screenshots, newest first. Select a thumbnail to see the full image. **View all screenshots** opens the same cross-project album as **Album** in the navigation rail. Screenshot commands and captured images stay out of provider requests. Use **Attach files** when you want the model to inspect an image.
 
 Choose **+ → Draw a sketch** to open a drawing pad above the message box. Draw with the mouse or pen and type your explanation in the composer. **Undo stroke** removes the last mark. **Done** folds the sketch into the draft so you can edit or remove it before sending. Send a sketch by itself or with a caption. The selected model receives the drawing as a PNG, and clicking it in the conversation enlarges it.
 
-To give feedback on an image, choose **Annotate** under a generated image in chat, on a finished image in **Game studio**, or in the full-size screenshot viewer. Mark the area you mean, type the change you want, and send. Workshop keeps the original and sends a marked-up PNG at the source resolution. Undo removes pen strokes while keeping the underlying image.
+To give feedback on an image, choose **Annotate** under a generated image in chat, on a finished image in **Tools → Saved assets**, or in the full-size screenshot viewer. Mark the area you mean, type the change you want, and send. Workshop keeps the original and sends a marked-up PNG at the source resolution. Undo removes pen strokes while keeping the underlying image.
 
 Choose **Compare** under a returned image to drag a divider between versions. The arrow keys move the divider. Home and End reveal either side. **Show markup** brings back the strokes you sent, and **Annotate original** or **Annotate revision** starts another edit. For a text-only follow-up, Compare shows the previous image from that chat.
 
-Enable **Settings → Notifications → Notify me when I’m needed** for Windows alerts while Workshop runs in the background. An alert opens the chat or Studio result that needs attention. A blocked run, a new image, and changes or decisions ready for review can trigger an alert.
+Enable **Settings → Notifications → Notify me when I’m needed** for Windows alerts while Workshop runs in the background. An alert opens the chat or decompilation report that needs attention. A blocked run, a new image or 3D model, and changes or decisions ready for review can trigger an alert.
 
 ## Themes
 
@@ -78,7 +78,7 @@ Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Past
 
 For a personal Google account, install Antigravity CLI and sign in under **Settings → Providers → Antigravity**. Workshop detects the standard Windows installation even when `agy` is outside PATH. The picker reads your signed-in catalog and groups each Gemini family’s effort variants on one slider. Google-hosted Claude and GPT models appear under their own Antigravity names. The usage meter follows the selected model’s quota group. Set `WORKSHOP_ANTIGRAVITY` to use another executable. [Antigravity CLI](https://antigravity.google/docs/cli/acp/)
 
-For a headless chat, run `workshop-cli models --provider antigravity`, then `workshop-cli run --provider antigravity "Describe this project"`. Choose a family and effort with `--model gemini-3.8-flash --effort low` if your account lists that model. The same model choices are available for worker and Studio settings.
+For a headless chat, run `workshop-cli models --provider antigravity`, then `workshop-cli run --provider antigravity "Describe this project"`. Choose a family and effort with `--model gemini-3.8-flash --effort low` if your account lists that model. The same model choices are available for worker and task settings.
 
 For an organization account or API key on the separate Gemini CLI, install it with `npm install -g @google/gemini-cli`. Under **Settings → Providers → Gemini CLI**, choose **Sign in**, then select **Gemini Default** or a specific Gemini model in a new chat. **Gemini project tools → Trust project** allows Gemini to load that project’s configuration and Workshop worker tools in its isolated copies. **Reset trust** restores the CLI’s own trust rules. For headless use, run `workshop-cli gemini-trust true` in the project, `workshop-cli models --provider gemini` to list models, and `workshop-cli run --provider gemini "Describe this project"` to chat. Gemini manages reasoning effort. Set `WORKSHOP_GEMINI` to an executable or the npm JavaScript entry point to select another installation. [Gemini CLI authentication](https://geminicli.com/docs/get-started/authentication/)
 
@@ -96,29 +96,31 @@ When the lead delegates, expand its dispatch in the conversation or open **Activ
 
 Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
 
-## Game studio
+## Images and 3D models in chat
 
-Open **Studio** in the navigation rail. Select Images, Models or Ghidra in the adjacent sidebar. Each tool has a searchable run history beside its editor and preview. Select **Reuse settings** to start a variation from an earlier brief, seed or source file. You can continue chatting during a run, cancel it, and retry a failed or interrupted run. Reopening a project restores its library.
+Describe what you want in the composer. For example, ask “Draw a moonlit harbor icon” or “Build a low-poly copper lantern I can rotate.” The lead chooses a generator, uses the providers allowed in Settings and posts the result in the conversation. **Stop response** also stops the active generation.
 
-| Area | What you can make | Requirements |
-|---|---|---|
-| Images | Describe concept art, an inventory icon or a sprite sheet. **Seamless tile** generates a 256 × 256 PNG from a material and repeatable seed. | Prompted images use Codex image generation or Antigravity’s built-in image generator. Tiles run locally. |
-| Models | Generate an editable prop, choose a crystal, barrel or planter starter, or import a local Blender scene. Select **Inspect model** on a finished preview to explore the exported mesh. **Open in Blender** opens its editable source. **Re-export** saves your edits as a new version. | Creating and re-exporting models uses Blender with its glTF exporter. **From brief** also uses the selected agent model. Inspection runs inside Workshop. |
-| Ghidra | Choose a compiled game module and optionally filter its functions by name. Inspect the recovered C pseudocode and save the report. By default, each run attempts 64 matching functions with up to 12 seconds per function. | An extracted Ghidra distribution and its supported JDK on PATH or in `JAVA_HOME`. |
+- **Images** arrive as PNGs. Enlarge, save or annotate an image and send feedback in the same chat. Prompted artwork uses Codex or Antigravity. Seamless moss, basalt and sand tiles can use the local generator with a repeatable seed.
+- **3D models** arrive with a preview, **Inspect model** and **Save model**. The lead can commission a design, use a crystal, barrel or planter starter, or export an attached Blender scene. Ask for a variation to create a new version. Blender builds each GLB and its editable scene.
+- **Outputs** collects the images, models and screenshots for the current chat. **Tools → Saved assets** searches generated assets across chats in the project, including work made in earlier versions. Ask the lead to add an asset to the project when it should be included in a reviewed change.
 
 In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/− also work. **Wireframe** shows triangle edges. **Overlaps** highlights coplanar faces that share surface area in orange, even behind another surface. The inspector reads static geometry and base material colors from GLB exports up to 64 MiB and 150,000 triangles. Dense models can show a partial overlap count when the comparison budget is reached.
 
-**Settings → Tasks** saves independent defaults for image generation, 3D model design, and decompilation across projects. For the two design tasks, choose the allowed models and maximum reasoning effort. Select one model to use it every time. In **Game studio → Run settings**, turn off **Use task defaults** to customize the next run. Retrying a run or reusing its settings restores its original choices.
+**Settings → Providers** controls which tasks each provider can handle. **Settings → Tasks** sets allowed models and maximum reasoning effort for image generation and model design. You can request a particular model or effort in your message. The lead stays within those settings.
+
+## Decompilation
+
+Open **Tools → Decompilation**, choose a binary and optionally filter functions by name. Use an extracted Ghidra distribution with its supported JDK on PATH or in `JAVA_HOME`. **Run settings** lets you override the defaults for one analysis. **Reuse settings** restores an earlier analysis configuration.
 
 Decompilation runs locally. Set **Functions per run** (1–256) and **Seconds per function** (1–120). Turn on **Generate an AI summary** to send up to 48 KiB of saved pseudocode to the selected provider, using the decompilation task’s own model and effort settings. Open **Summary** beside **Report** to read it. If the selected provider is unavailable, the pseudocode stays accessible and **Run log** records the summary error.
 
 Use **Locate Blender** to select the executable or **Locate Ghidra** to select the installation root. Workshop remembers these choices across projects. You can also set `WORKSHOP_BLENDER` to an executable and `WORKSHOP_GHIDRA` to an installation root. Standard Windows and Steam installations of Blender are detected automatically.
 
-In **Ghidra**, search the project history by binary name, function, entry point, filter or input SHA-256. **Run log** shows the progress of the selected run, including which functions were saved or skipped, any failure and whether Workshop reused an earlier result. **Report** opens the saved pseudocode. Both remain available after restarting Workshop or moving the original binary. Older runs retain their original tool logs.
+In **Decompilation**, search the project history by binary name, function, entry point, filter or input SHA-256. **Run log** shows the progress of the selected run, including which functions were saved or skipped, any failure and whether Workshop reused an earlier result. **Report** opens the saved pseudocode. Both remain available after restarting Workshop or moving the original binary. Older runs retain their original tool logs.
 
 Repeating a request for the same binary contents, normalized filter, function limit and per-function timeout reuses a completed report after checking its SHA-256. The new run records the source run ID. **Run fresh** runs the selected analysis again, for example after updating Ghidra. Reports created before input fingerprints were recorded remain searchable and readable.
 
-**Save as…** exports the PNG, GLB or C report to a destination you choose. **Attach to chat** adds the selected file to the composer for your next message. In a new chat, you can also ask the lead to find a finished image or model by title and use it in a reviewable project change. Studio originals stay in the project’s Workshop data folder.
+**Save as…** exports the PNG, GLB or C report to a destination you choose. **Attach to chat** adds the selected file to the composer for your next message. In a new chat, you can also ask the lead to find a finished image or model by title and use it in a reviewable project change. Saved originals stay in the project’s Workshop data folder.
 
 ## CLI
 
@@ -174,6 +176,6 @@ After a release build, run the Windows UI tests from PowerShell.
 .\tests\windows\cancel_cycles.ps1
 ```
 
-Each test runs on its own private Windows desktop. The tests exercise Workshop, its native file dialogs, and its screenshot picker there. The screenshot test selects pixels from a generated image. Use `-StudioOnly` with `picker_clicks.ps1` for the shorter Studio suite or `-SketchOnly` for drawing, image markup, and message delivery.
+Each test runs on its own private Windows desktop. The tests exercise Workshop, its native file dialogs, and its screenshot picker there. The screenshot test selects pixels from a generated image. Use `-StudioOnly` with `picker_clicks.ps1` for the chat asset suite or `-SketchOnly` for drawing, image markup, and message delivery.
 
 For an ad hoc UI check, dot-source `tests/windows/TestDesktop.ps1` and call `Invoke-WorkshopUiTest -Script .\my-check.ps1`. Inside the check, use `[TestDesktop]::StartApp($absoluteWorkshopExe, $absoluteProjectPath)` and `[TestDesktop]::WaitForWindow($process)` to drive the window on the private desktop. Script output and failures return to the caller.

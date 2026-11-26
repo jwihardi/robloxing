@@ -101,8 +101,8 @@ function Named($name) {
     $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $name))
 }
-function Wait-For([scriptblock]$condition, $description) {
-    $deadline = [datetime]::UtcNow.AddSeconds(8)
+function Wait-For([scriptblock]$condition, $description, [int]$seconds = 8) {
+    $deadline = [datetime]::UtcNow.AddSeconds($seconds)
     do {
         if (& $condition) { return }
         Start-Sleep -Milliseconds 50
@@ -131,7 +131,7 @@ function Choose-Attachment($title,$path) {
     $dialog = [System.Windows.Automation.AutomationElement]::FromHandle([WorkshopPointer]::Dialog($proc.Id,$title))
     if ($dialog.Current.ProcessId -ne $proc.Id) { throw 'Unexpected picker process' }
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
-    $save = $title -eq 'Save studio asset'
+    $save = $title -eq 'Save asset'
     Wait-For { [WorkshopPointer]::IsWindowVisible($handle) -and [WorkshopPointer]::IsWindowVisible([WorkshopPointer]::FilenameEdit($handle,$save)) } 'visible native filename editor'
     $edit = [WorkshopPointer]::FilenameEdit($handle,$save)
     [void]$proc.WaitForInputIdle(1000)
@@ -317,25 +317,17 @@ function Test-NavigationLayout {
         Wait-For { Named 'Use global defaults' } 'worker policy'
         Snapshot 'subagents'
         Click 'Done'
-        Click 'Game studio'
-        Wait-For { Named 'Art brief' } 'image studio'
-        Snapshot 'studio-images'
-        Click 'Run settings'
-        Wait-For { Named 'Choose providers' } 'provider selection from image run settings'
-        Click 'Choose providers'
-        Wait-For { Named 'Codex' } 'global provider selection from Studio'
-        Click 'Close settings'
-        Wait-For { (Named 'Image generation settings') -and (Named 'Use task defaults') } 'return to the same run settings'
-        Click 'Back to studio'
-        Section 'Tools and history' 'Models' 'Model brief'
-        Snapshot 'studio-models'
-        Section 'Tools and history' 'Ghidra' 'Choose binary…'
+        Click 'Project tools'
+        Wait-For { Named 'No saved assets yet' } 'empty project library'
+        if ((Named 'Art brief') -or (Named 'Model brief')) { throw 'Asset creation belongs in chat' }
+        Snapshot 'saved-assets'
+        Section 'Tools and history' 'Decompilation' 'Choose binary…'
         Snapshot 'studio-reports'
         Check-Center 'Choose binary…' 'studio-reports'
         Click 'Run settings'
         Wait-For { Named 'Functions per run' } 'run settings'
         Snapshot 'run-settings'
-        Click 'Back to studio'
+        Click 'Back to reports'
         Click 'Settings'
         Section 'Settings sections' 'Providers' 'Codex'
         Click 'Codex'
@@ -367,7 +359,7 @@ function Test-NavigationLayout {
         Section 'Settings sections' 'Providers' 'Codex'
         Click 'Close settings'
         Wait-For { Named 'Choose binary…' } 'return to the previous Studio workspace'
-        Section 'Tools and history' 'Images' 'Art brief'
+        Section 'Tools and history' 'Saved assets' 'Locate Blender'
         Click 'Screenshots'
         Wait-For { Named 'No screenshots yet' } 'empty capture album'
         Snapshot 'album'
@@ -617,24 +609,111 @@ function Test-Attention {
     Wait-For { !(Named 'Retry') -and !(Named 'Codex reply') } 'leave the blocked conversation'
     [void](New-Item -ItemType File -Path ($notices[0].FullName + '.click'))
     Wait-For { $el=Named 'Your message'; $el -and $el.GetCurrentPattern($valuePattern).Current.Value -eq 'Prepare the release' } 'notification activation restores the correct chat'
-    Click 'Game studio'
-    Wait-For { Named 'Images' } 'Studio tool list'
-    if (!(Named 'Art brief')) { Click 'Images' }
-    Wait-For { Named 'Art brief' } 'image workspace'
+    Click 'New chat'
+    [void](New-Item -ItemType File -Force (Join-Path $root 'chat-assets'))
     Copy-Item -LiteralPath $env:WORKSHOP_TEST_CAPTURE_IMAGE -Destination (Join-Path $root 'studio-image.png') -Force
-    (Named 'Art brief').GetCurrentPattern($valuePattern).SetValue('Moonlit harbor')
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Draw the moonlit harbor')
     [void](New-Item -ItemType File -Path $hold)
-    Click 'Generate image'
-    Wait-For { Named 'Cancel run' } 'Studio run in progress'
+    Click 'Send message'
+    Wait-For { Named 'Stop response' } 'asset request in progress'
     Click 'Settings'
-    Wait-For { Named $toggle } 'background Studio run'
+    Wait-For { Named $toggle } 'background chat'
     Remove-Item -LiteralPath $hold
-    Wait-For { @(Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json').Count -eq 2 } 'ready Studio notification'
+    Wait-For { @(Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json').Count -eq 2 } 'background image notification'
     $ready = Get-ChildItem -LiteralPath $env:WORKSHOP_TEST_NOTICE_DIR -Filter '*.json' | Where-Object { $_.FullName -ne $notices[0].FullName }
-    if ((Get-Content -Raw -LiteralPath $ready.FullName | ConvertFrom-Json).title -ne 'Studio result ready for review') { throw 'Missing Studio review alert' }
+    if ((Get-Content -Raw -LiteralPath $ready.FullName | ConvertFrom-Json).title -ne 'Image ready for review') { throw 'Missing image review alert' }
     [void](New-Item -ItemType File -Path ($ready.FullName + '.click'))
-    Wait-For { (Named 'Attach to chat') -and (Named 'Moonlit harbor') } 'notification opens its completed Studio asset'
-    'Background notifications, chat activation and Studio result activation passed'
+    Wait-For { (Named 'Save image') -and (Named 'Moonlit harbor') } 'notification opens the chat containing the image'
+    'Background notifications and chat asset activation passed'
+}
+function Test-ChatAssets {
+    Add-Type -AssemblyName System.Drawing
+    $studioImage = [Drawing.Bitmap]::new(40,24)
+    try {
+        $art = [Drawing.Graphics]::FromImage($studioImage)
+        try {
+            $art.Clear([Drawing.Color]::DarkSlateGray)
+            $art.FillPolygon([Drawing.Brushes]::SeaGreen, [Drawing.Point[]]@([Drawing.Point]::new(5,21),[Drawing.Point]::new(14,4),[Drawing.Point]::new(22,21)))
+        } finally { $art.Dispose() }
+        $studioImage.Save((Join-Path $root 'studio-image.png'),[Drawing.Imaging.ImageFormat]::Png)
+    } finally { $studioImage.Dispose() }
+    foreach ($flag in @('chat-assets','record-inference','studio.hold')) {
+        [void](New-Item -ItemType File -Force (Join-Path $root $flag))
+    }
+    Click 'New chat'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Draw a forest icon')
+    Click 'Send message'
+    Wait-For { (Named 'Stop response') -and (Named 'Generating an image…') } 'cancellable generation in the chat'
+    Click 'Stop response'
+    Wait-For { (Named 'New chat').Current.IsEnabled } 'cancelled image request'
+    Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
+    if (Named 'Save image') { throw 'Cancelled generation delivered an image' }
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Draw a forest icon again')
+    Click 'Send message'
+    Wait-For { (Named 'Save image') -and (Named 'New chat').Current.IsEnabled } 'finished image in the same chat'
+    $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
+    if ($request.model -ne 'fixture-deep' -or $request.effort -ne 'high') { throw 'Generation lost the selected model or effort' }
+    Click 'Outputs'
+    Wait-For { Named 'Open Forest icon' } 'generated image in Outputs'
+    Click 'Open Forest icon'
+    Wait-For { Named 'Full image' } 'open full-size output'
+    Click 'Save image'
+    $exported=Join-Path $project 'forest.png'
+    Choose-Attachment 'Save asset' $exported
+    Wait-For { Test-Path -LiteralPath $exported } 'PNG export completed'
+    $result=[Drawing.Bitmap]::FromFile($exported)
+    try { if($result.Width -ne 40 -or $result.Height -ne 24){throw 'Incorrect exported image'} } finally { $result.Dispose() }
+    Click 'Annotate'
+    Wait-For { Named 'Sketch canvas' } 'mark up the generated image'
+    Draw-SketchLine
+    Click 'Done'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Refine the marked icon')
+    Click 'Send message'
+    Wait-For { (Named 'Compare') -and (Named 'New chat').Current.IsEnabled } 'marked-up revision in the chat'
+    $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
+    if (!($request.input | Where-Object { $_.type -eq 'localImage' -and $_.path -like '*markup*' })) { throw 'The generator did not receive the marked-up pixels' }
+    Click 'Outputs'
+    Wait-For { Named 'Open Refined icon' } 'revised image in Outputs'
+    Save-PrivateWindow (Join-Path $root 'chat-asset-outputs.png')
+    Click 'Outputs'
+    Click 'Project tools'
+    Wait-For { (Named 'Search assets') -and (Named 'Attach to chat') } 'saved project library'
+    if ((Named 'Art brief') -or (Named 'Model brief')) { throw 'Unexpected generation editor in the library' }
+    (Named 'Search assets').GetCurrentPattern($valuePattern).SetValue('no matching title')
+    Wait-For { Named 'No matching assets.' } 'filtered project library'
+    (Named 'Search assets').GetCurrentPattern($valuePattern).SetValue('Forest icon')
+    Wait-For { Named 'Attach to chat' } 'restored library asset'
+    Click 'Details'
+    Wait-For { Named 'Run details' } 'asset metadata'
+    Click 'Preview'
+    Click 'Attach to chat'
+    Wait-For { Named 'Remove image.png' } 'attach an earlier asset to the chat'
+    Click 'Remove image.png'
+    Click 'New chat'
+    Click 'Outputs'
+    Wait-For { Named 'Images, 3D models and screenshots from this chat appear here.' } 'outputs scoped to the new chat'
+    Click 'Outputs'
+    $steamBlender = Join-Path ${env:ProgramFiles(x86)} 'Steam/steamapps/common/Blender/blender.exe'
+    if ($env:WORKSHOP_BLENDER -or (Test-Path -LiteralPath $steamBlender) -or (Get-Command blender -ErrorAction SilentlyContinue)) {
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Build a lantern')
+        Click 'Send message'
+        Wait-For { (Named 'Save model') -and (Named 'New chat').Current.IsEnabled } 'Blender render and GLB in the chat' 100
+        Click 'Outputs'
+        Wait-For { Named 'Open Copper lantern' } 'completed model in Outputs'
+        Click 'Open Copper lantern'
+        Wait-For { (Named 'Model inspector') -and (Named 'Wireframe').Current.IsEnabled } 'interactive model from Outputs' 15
+        Click 'Wireframe'
+        Click 'Close model inspector'
+        Wait-For { Named 'Save model' } 'return to the conversation'
+        Click 'Save model'
+        $glb = Join-Path $project 'lantern.glb'
+        Choose-Attachment 'Save asset' $glb
+        Wait-For { Test-Path -LiteralPath $glb } 'GLB export completed'
+        if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($glb),0,4) -ne 'glTF') { throw 'Chat export is not a binary glTF model' }
+        Save-PrivateWindow (Join-Path $root 'chat-model.png')
+    }
+    Remove-Item -LiteralPath (Join-Path $root 'record-inference')
+    'Chat image generation, cancellation, marked-up revision, Outputs and the shared asset library passed'
 }
 function Test-Sketch {
     Wait-For { (Named 'New chat').Current.IsEnabled } 'available project'
@@ -888,11 +967,12 @@ try {
         Remove-Item -LiteralPath (Join-Path $root 'catalog.hold')
     }
     Wait-For { $el = Named 'Chat model and effort'; $el -and $el.Current.IsEnabled } 'model discovery'
-    $rail = (Named 'Game studio').Current.BoundingRectangle
+    $rail = (Named 'Project tools').Current.BoundingRectangle
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
     if ($NavigationOnly) { Test-NavigationLayout; return }
+    if ($StudioOnly) { Test-ChatAssets; return }
     if ($GoalOnly) { Test-ChatGoals; return }
     if ($ProviderTasksOnly) {
         Test-ProviderTasks
@@ -1143,7 +1223,7 @@ try {
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
     Click 'Tasks'
     Wait-For { Named 'Task defaults' } 'per-task defaults'
-    Click 'fixture-fast'
+    Click 'fixture-deep'
     Click 'Decompilation'
     Wait-For { (Named 'Functions per run') -and (Named 'Generate an AI summary') } 'local analysis controls'
     Click 'Generate an AI summary'
@@ -1152,73 +1232,15 @@ try {
     Wait-For { (Named 'Maximum task effort') -and !(Named 'Generate an AI summary') } 'model design policy'
     Click 'Close settings'
     Wait-For { Named 'Message Codex' } 'return to composer'
-    Add-Type -AssemblyName System.Drawing
-    $studioImage=[Drawing.Bitmap]::new(40,24)
-    try {$studioImage.Save((Join-Path $root 'studio-image.png'),[Drawing.Imaging.ImageFormat]::Png)} finally {$studioImage.Dispose()}
-    Click 'Game studio'
-    Wait-For { Named 'Art brief' } 'image workspace'
-    Click 'Run settings'
-    Wait-For { (Named 'Use task defaults') -and (Named 'fixture-fast') } 'inherited image policy'
-    Click 'Use task defaults'
-    Wait-For { Named 'Maximum task effort' } 'editable one-run policy'
-    Click 'Any available model'
-    Click 'fixture-deep'
-    Click 'Maximum task effort' 0.5
-    Wait-For { (Named 'Maximum task effort').GetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern).Current.Value -eq 1 } 'per-run high effort'
-    Click 'Back to studio'
-    Wait-For { Named 'Custom run settings' } 'override ready'
-    [void](New-Item -ItemType File (Join-Path $root 'record-inference'))
-    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Forest icon')
-    [void](New-Item -ItemType File (Join-Path $root 'studio.hold'))
-    Click 'Generate image'
-    Wait-For { (Named 'Cancel run') -and (Named 'Generating an image…') } 'cancellable image generation with progress'
-    Click 'Cancel run'
-    Wait-For { $retry=Named 'Retry run'; $retry -and $retry.Current.IsEnabled } 'cancelled job saved in library'
-    Remove-Item -LiteralPath (Join-Path $root 'studio.hold')
-    Click 'Retry run'
-    Wait-For { Named 'Attach to chat' } 'image job ready after retry'
-    Click 'Details'
-    Wait-For { Named 'Run details' } 'selected run metadata'
-    Click 'Preview'
-    Wait-For { !(Named 'Run details') } 'selected image preview'
-    $request = Get-ChildItem $root -Filter 'studio-image-*.json' | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
-    if ($request.model -ne 'fixture-deep' -or $request.effort -ne 'high') { throw 'Retry lost the image model or effort override' }
-    Remove-Item -LiteralPath (Join-Path $root 'record-inference')
-    if (!(Named 'Run settings')) { throw 'One-run override was not consumed' }
-    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('no matching title')
-    Wait-For { Named 'No matching assets.' } 'filtered project library'
-    (Named 'Search assets').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
-    Wait-For { Named 'Attach to chat' } 'restored asset selection'
-    Click 'Models'
-    Wait-For { Named 'Model brief' } 'model workspace'
-    Click 'Ghidra'
-    Wait-For { Named 'Choose binary…' } 'Ghidra workspace'
-    Click 'Images'
-    Wait-For { Named 'Attach to chat' } 'return to generated image'
-    (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Different brief')
-    Click 'Reuse settings'
-    Wait-For { (Named 'Art brief').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq 'Forest icon' } 'reuse the saved art brief'
-    $exported=Join-Path $project 'forest.png'
-    Click 'Save as…'
-    Choose-Attachment 'Save studio asset' $exported
-    Wait-For { Test-Path -LiteralPath $exported } 'saved studio asset'
-    $exportedImage=[Drawing.Bitmap]::FromFile($exported)
-    try {if($exportedImage.Width -ne 40 -or $exportedImage.Height -ne 24){throw 'Incorrect exported asset'}} finally {$exportedImage.Dispose()}
-    Click 'Annotate'
-    Wait-For { (Named 'Sketch canvas') -and (Named 'White pen') } 'Studio image open for feedback'
-    Click 'Done'
-    Wait-For { Named 'Remove sketch' } 'Studio image in draft'
-    Click 'Remove sketch'
-    Wait-For { !(Named 'Remove sketch') } 'unattach Studio image'
-    Click 'Game studio'
-    Wait-For { Named 'Attach to chat' } 'Studio image result'
-    Click 'Attach to chat'
-    Wait-For { Named 'Remove image.png' } 'asset attached to chat draft'
-    Click 'Remove image.png'
-    Wait-For { !(Named 'Remove image.png') } 'remove studio attachment'
-    if ($StudioOnly) { 'Game studio capture-independent UI checks passed'; return }
+    Test-ChatAssets
+    Click 'New chat'
+    function ProviderLogs {
+        (Get-ChildItem -LiteralPath $env:WORKSHOP_HOME -Recurse -Filter 'events.jsonl' | Sort-Object FullName |
+            ForEach-Object { "$($_.FullName) $($_.Length)" }) -join [Environment]::NewLine
+    }
+    $beforeScreenshot = ProviderLogs
     Click 'Outputs'
-    Wait-For { Named 'Screenshots you send in this chat appear here.' } 'empty chat outputs'
+    Wait-For { Named 'Images, 3D models and screenshots from this chat appear here.' } 'empty chat outputs'
     Click 'Outputs'
     Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
     (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')
@@ -1277,7 +1299,7 @@ try {
     if (@(Get-ChildItem (Join-Path $env:WORKSHOP_HOME 'screenshots') -Recurse -Filter capture.png).Count -ne 1 -or
         (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Unsent draft') {throw 'Cancel changed screenshot history or draft'}
     (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
-    if (Get-ChildItem $env:WORKSHOP_HOME -Recurse -Filter 'events.jsonl') {throw 'Screenshot started a provider turn'}
+    if ((ProviderLogs) -ne $beforeScreenshot) {throw 'Screenshot started a provider turn'}
     $note = Join-Path $root 'attached note.txt'
     Set-Content $note 'Attachment transport check'
     Click 'Add to message'
@@ -1298,10 +1320,12 @@ try {
     Wait-For { Named 'Attach folder…' } 'folder command'
     Click 'Attach folder…'
     Choose-Attachment 'Attach a folder' $project
+    $earlierLeads = @(Get-ChildItem -LiteralPath $root -Filter 'lead-*.json' | Select-Object -ExpandProperty Name)
     [void](New-Item -ItemType File (Join-Path $root 'record-inference'))
     Click 'Send message'
-    Wait-For { Get-ChildItem $root -Filter 'lead-*.json' } 'attachment-only turn'
-    $wire = Get-Content (Get-ChildItem $root -Filter 'lead-*.json' | Select-Object -First 1).FullName -Raw | ConvertFrom-Json
+    function AttachmentLead { Get-ChildItem -LiteralPath $root -Filter 'lead-*.json' | Where-Object { $_.Name -notin $earlierLeads } | Select-Object -First 1 }
+    Wait-For { AttachmentLead } 'attachment-only turn'
+    $wire = Get-Content -LiteralPath (AttachmentLead).FullName -Raw | ConvertFrom-Json
     if (!(($wire.input | Where-Object type -eq 'text').text -match 'Attachment transport check')) { throw 'Provider did not receive attached text' }
     if (($wire.input | Where-Object type -eq 'localImage').path -ne $image) { throw 'Provider did not receive the image' }
     if (($wire | ConvertTo-Json -Depth 12) -match 'capture\.png|/screenshot|shot-[A-Za-z0-9]+[/\\]') {throw 'Local screenshot entered model input'}

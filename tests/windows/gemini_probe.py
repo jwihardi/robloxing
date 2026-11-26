@@ -27,6 +27,7 @@ class ModelEndpoint(BaseHTTPRequestHandler):
         text = " ".join(p.get("text", "") for p in last)
         delegate = next((n for n in names if n.endswith("workshop_delegate")), None)
         report = next((n for n in names if n.endswith("workshop_report_result")), None)
+        generate = next((n for n in names if n.endswith("workshop_generate_asset")), None)
         if "HOLD_GEMINI_PROBE" in text:
             self.server.waiting.set()
             self.server.release.wait(timeout=10)
@@ -37,6 +38,10 @@ class ModelEndpoint(BaseHTTPRequestHandler):
             parts = [{"text": "Queued message received."}]
         elif any("functionResponse" in part for part in last):
             parts = [{"text": "Tool result received."}]
+        elif "ASSET_PROBE" in text and generate:
+            parts = [{"functionCall": {"name": generate, "args": {
+                "kind": "texture", "material": "Moss", "seed": 17,
+            }}}]
         elif "DELEGATE_PROBE" in text and delegate:
             parts = [{"functionCall": {"name": delegate, "args": {"tasks": [{
                 "key": "review", "title": "Review project", "deliverable": "Review README",
@@ -120,6 +125,10 @@ def main():
         with closing(sqlite3.connect(db_path)) as db:
             assert db.execute("SELECT state FROM workers").fetchall() == [("finished",)]
             assert db.execute("SELECT used,capacity FROM context_usage WHERE attempt=1").fetchone()[0] == 15
+        assert "Tool result received" in call("resume", "2", "ASSET_PROBE")
+        with closing(sqlite3.connect(db_path)) as db:
+            row = db.execute("SELECT e.attempt,a.maker,i.path FROM event_assets a JOIN events e ON e.id=a.event JOIN event_images i ON i.event=e.id").fetchone()
+            assert row[:2] == (2, "Local texture generator") and Path(row[2]).is_file()
         with subprocess.Popen([str(cli), "--project", str(project), "run", "--provider", "gemini",
                                "HOLD_GEMINI_PROBE"], env=env, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
@@ -144,7 +153,7 @@ def main():
         error = result.stderr.lower()
         assert result.returncode and b"needs authentication" in error, result.stderr
         assert b"antigravity" in error and b"api key" in error, result.stderr
-    print("Gemini discovery, streaming, resume, worker dispatch, usage, steering, queue, and signed-out handling passed.")
+    print("Gemini discovery, streaming, resume, asset delivery, worker dispatch, usage, steering, queue, and signed-out handling passed.")
 
 
 if __name__ == "__main__":

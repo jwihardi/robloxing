@@ -13,15 +13,10 @@ use workshop::{
     Store,
     studio::{Job, Recipe},
 };
-const IMAGE_STYLES: [&str; 3] = [
-    "Concept art",
-    "A single inventory icon on a transparent background",
-    "A grid-aligned sprite sheet on a transparent background",
-];
-
 fn item(job: &Job) -> StudioItem {
     StudioItem {
         id: job.id as i32,
+        area: job.recipe.area().into(),
         title: job.title.as_str().into(),
         state: job.state.as_str().into(),
         date: job.created.as_str().into(),
@@ -29,48 +24,14 @@ fn item(job: &Job) -> StudioItem {
     }
 }
 
-fn recipe(studio: &Studio<'_>) -> Result<Recipe> {
-    let area = studio.get_area();
-    Ok(match area.as_str() {
-        "Images" if studio.get_image_mode() == 3 => Recipe::Texture {
-            material: ["Moss", "Basalt", "Sand"][studio.get_material() as usize].into(),
-            seed: studio
-                .get_seed()
-                .trim()
-                .parse()
-                .context("Enter a seed between 0 and 4294967295.")?,
-        },
-        "Images" => Recipe::Image {
-            brief: studio.get_brief().to_string(),
-            style: IMAGE_STYLES
-                .get(studio.get_image_mode() as usize)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| studio.get_custom_style().to_string()),
-        },
-        "Models" if studio.get_model_mode() == 0 => Recipe::ModelBrief {
-            brief: studio.get_model_brief().to_string(),
-        },
-        "Models" if studio.get_model_mode() == 4 => Recipe::Blend {
-            source: PathBuf::from(studio.get_scene_path().as_str()),
-        },
-        "Models" => Recipe::Model {
-            template: ["Crystal", "Barrel", "Planter"][(studio.get_model_mode() - 1) as usize]
-                .into(),
-            name: studio.get_model_name().to_string(),
-        },
-        "Ghidra" => Recipe::Decompile {
-            binary: PathBuf::from(studio.get_binary_path().as_str()),
-            filter: studio.get_filter().to_string(),
-        },
-        _ => bail!("Select a studio area."),
-    })
-}
 impl App {
     pub(super) fn close_inspector(&self) {
         self.inspector.take();
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
         studio.set_inspecting(false);
+        studio.set_inspect_id(0);
+        studio.set_inspect_title("".into());
         studio.set_inspect_image(Default::default());
         studio.set_inspect_ready(false);
         studio.set_inspect_result("".into());
@@ -147,7 +108,7 @@ impl App {
         }
         Ok(())
     }
-    fn studio_command(&self, cmd: &str) -> Result<()> {
+    fn studio_command(&self, cmd: &str, asset: Option<i64>) -> Result<()> {
         let ui = self.ui.unwrap();
         if cmd == "close-inspector" {
             self.close_inspector();
@@ -165,7 +126,8 @@ impl App {
         if !studio.get_working() {
             studio.set_message("".into());
         }
-        let selected = || store.studio_job(studio.get_selected().id.into());
+        let selected =
+            || store.studio_job(asset.unwrap_or_else(|| studio.get_selected().id.into()));
         match cmd {
             "edit-task" => {
                 ui.global::<TaskControls>()
@@ -200,12 +162,14 @@ impl App {
                         &ui,
                         job.folder(&store).join(job.filename()),
                     )));
+                studio.set_inspect_id(job.id as i32);
+                studio.set_inspect_title(job.title.into());
                 studio.set_inspecting(true);
             }
             "refresh" | "search" => {
                 self.refresh_studio(&store, Some(studio.get_selected().id.into()))?
             }
-            "run" | "retry" | "rebuild" | "fresh" => {
+            "run" | "retry" | "fresh" => {
                 ensure!(
                     !studio.get_working(),
                     "Wait for the active run or cancel it."
@@ -217,10 +181,10 @@ impl App {
                 };
                 let request = match &previous {
                     Some(job) => job.recipe.clone(),
-                    None if cmd == "rebuild" => Recipe::Blend {
-                        source: selected()?.folder(&store).join("model.blend"),
+                    None => Recipe::Decompile {
+                        binary: PathBuf::from(studio.get_binary_path().as_str()),
+                        filter: studio.get_filter().to_string(),
                     },
-                    _ => recipe(&studio)?,
                 };
                 let settings = previous.as_ref().map(|j| j.settings.clone()).or_else(|| {
                     if request.uses_task_settings() {
@@ -237,17 +201,7 @@ impl App {
                 let (stop, cancel) = tokio::sync::oneshot::channel();
                 self.studio_cancel.replace(Some(stop));
                 studio.set_working(true);
-                studio.set_message(
-                    match request {
-                        Recipe::Image { .. } => "Generating an image…",
-                        Recipe::Texture { .. } => "Generating a texture…",
-                        Recipe::ModelBrief { .. } => "Designing the model…",
-                        Recipe::Model { .. } => "Building the model…",
-                        Recipe::Blend { .. } => "Exporting the scene…",
-                        Recipe::Decompile { .. } => "Decompiling the binary…",
-                    }
-                    .into(),
-                );
+                studio.set_message("Decompiling the binary…".into());
                 let tx = self.updates.clone();
                 let worker = Arc::clone(&store);
                 let fresh = cmd == "fresh";
@@ -271,61 +225,22 @@ impl App {
                         .insert(job.recipe.area().into(), job.settings);
                     studio.set_custom_task(true);
                 }
-                match job.recipe {
-                    Recipe::Image { brief, style } => {
-                        if let Some(i) = IMAGE_STYLES.iter().position(|s| *s == style) {
-                            studio.set_image_mode(i as i32);
-                        } else {
-                            studio.set_custom_style(style.into());
-                            studio.set_image_mode(4);
-                        }
-                        studio.set_brief(brief.into());
-                    }
-                    Recipe::Texture { material, seed } => {
-                        studio.set_image_mode(3);
-                        studio.set_material(match material.as_str() {
-                            "Basalt" => 1,
-                            "Sand" => 2,
-                            _ => 0,
-                        });
-                        studio.set_seed(seed.to_string().into());
-                    }
-                    Recipe::ModelBrief { brief } => {
-                        studio.set_model_mode(0);
-                        studio.set_model_brief(brief.into());
-                    }
-                    Recipe::Model { template, name } => {
-                        studio.set_model_mode(match template.as_str() {
-                            "Barrel" => 2,
-                            "Planter" => 3,
-                            _ => 1,
-                        });
-                        studio.set_model_name(name.into());
-                    }
-                    Recipe::Blend { source } => {
-                        studio.set_model_mode(4);
-                        studio.set_scene_path(source.to_string_lossy().as_ref().into());
-                    }
-                    Recipe::Decompile { binary, filter } => {
-                        studio.set_binary_path(binary.to_string_lossy().as_ref().into());
-                        studio.set_filter(filter.into());
-                    }
+                if let Recipe::Decompile { binary, filter } = job.recipe {
+                    studio.set_binary_path(binary.to_string_lossy().as_ref().into());
+                    studio.set_filter(filter.into());
                 }
             }
             "pick" => {
-                let dialog = rfd::FileDialog::new().set_directory(&store.project);
-                if studio.get_area() == "Models" {
-                    if let Some(path) = dialog.add_filter("Blender scene", &["blend"]).pick_file() {
-                        studio.set_scene_path(path.to_string_lossy().as_ref().into());
-                    }
-                } else if let Some(path) =
-                    dialog.set_title("Choose a local game binary").pick_file()
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_directory(&store.project)
+                    .set_title("Choose a local game binary")
+                    .pick_file()
                 {
                     studio.set_binary_path(path.to_string_lossy().as_ref().into());
                 }
             }
             "locate" => {
-                let (name, path) = if studio.get_area() == "Models" {
+                let (name, path) = if studio.get_area() == "Assets" {
                     (
                         "Blender",
                         rfd::FileDialog::new()
@@ -366,7 +281,7 @@ impl App {
                             .take(55)
                             .collect();
                         if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Save studio asset")
+                            .set_title("Save asset")
                             .set_directory(&store.project)
                             .set_file_name(format!("{}.{}", stem.trim(), extension))
                             .add_filter(extension, &[extension])
@@ -419,10 +334,18 @@ pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
         });
     let a = app.clone();
     ui.global::<Studio>().on_command(move |cmd| {
-        if let Err(e) = a.studio_command(&cmd) {
+        if let Err(e) = a.studio_command(&cmd, None) {
             a.ui.unwrap()
                 .global::<Studio>()
                 .set_message(format!("{e:#}").into());
+        }
+    });
+    let a = app.clone();
+    ui.global::<Studio>().on_asset_action(move |id, cmd| {
+        if let Err(e) = a.studio_command(&cmd, Some(i64::from(id))) {
+            let ui = a.ui.unwrap();
+            ui.set_notice(format!("{e:#}").into());
+            ui.global::<Studio>().set_message(format!("{e:#}").into());
         }
     });
     let a = app.clone();
