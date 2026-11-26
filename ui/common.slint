@@ -78,6 +78,8 @@ export component Action inherits Rectangle {
     in property <color> glyph-color: root.selected ? Theme.accent : Theme.muted;
     in property <string> label-font: "Segoe UI";
     in property <bool> enabled: true;
+    out property <bool> hovered: area.has-hover;
+    out property <bool> focused: focus.has-focus;
     callback activate();
     height: 36px;
     border-radius: primary ? 18px : 9px;

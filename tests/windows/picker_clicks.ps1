@@ -1,9 +1,10 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$HarnessOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$DeleteChatsOnly, [switch]$HarnessOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
     if ($GoalOnly) { $parameters.GoalOnly = $true }
+    if ($DeleteChatsOnly) { $parameters.DeleteChatsOnly = $true }
     if ($HarnessOnly) { $parameters.HarnessOnly = $true }
     if ($NavigationOnly) { $parameters.NavigationOnly = $true }
     if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
@@ -388,6 +389,54 @@ function Test-NavigationLayout {
         Click 'Chats'
     }
     Write-Output "Navigation and responsive layouts passed. Screenshots in $root"
+}
+
+function Test-DeleteChats {
+    [void](New-Item -ItemType File -Path (Join-Path $root 'small-talk'))
+    foreach ($title in @('Sample to remove','Conversation to keep')) {
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($title)
+        Click 'Send message'
+        Wait-For { (Named 'Chat options') -and (Named 'New chat').Current.IsEnabled } 'fixture conversation to finish' 30
+        Click 'New chat'
+    }
+    $draft = 'Unsent draft to keep'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($draft)
+    Click ('Delete chat ' + [char]0x201C + 'Conversation to keep' + [char]0x201D)
+    Wait-For { Named 'Cancel' } 'confirmation from the main chat list'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,13,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,13,1)
+    Wait-For { !(Named 'Delete chat?') -and (Named 'Conversation to keep') } 'Enter defaults to Cancel'
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('Sample')
+    $remove = 'Delete chat ' + [char]0x201C + 'Sample to remove' + [char]0x201D
+    Wait-For { (Named $remove) -and !(Named 'Conversation to keep') } 'filtered chat list'
+    $trashBounds = (Named $remove).Current.BoundingRectangle
+    $searchBounds = (Named 'Search chats').Current.BoundingRectangle
+    if ($trashBounds.Width -le 0 -or $trashBounds.Left -lt $searchBounds.Left -or $trashBounds.Right -gt $searchBounds.Right + 1) {
+        throw "Trash button falls outside the chat list. Trash $trashBounds, search $searchBounds"
+    }
+    Save-PrivateWindow (Join-Path $root 'chat-list.png')
+    Click $remove
+    Wait-For { Named 'Delete chat?' } 'confirmation for the search result'
+    Save-PrivateWindow (Join-Path $root 'delete-chat.png')
+    Click 'Cancel'
+    Wait-For { !(Named 'Delete chat?') -and (Named $remove) } 'cancel keeps the search result'
+    Click $remove
+    Wait-For { Named 'Cancel' } 'confirmation to reopen'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,27,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,27,1)
+    Wait-For { !(Named 'Delete chat?') -and (Named $remove) } 'Escape cancels deletion'
+    Click $remove
+    Click 'Delete chat'
+    Wait-For { Named 'No matching chats' } 'search refresh after deletion'
+    if ((Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -ne $draft) { throw 'Deleting from search discarded the current draft' }
+    (Named 'Search chats').GetCurrentPattern($valuePattern).SetValue('')
+    Click 'Conversation to keep'
+    Click 'Chat options'
+    Click ('Delete chat' + [char]0x2026)
+    Click 'Delete chat'
+    Wait-For { (Named 'Your conversations appear here.') -and !(Named 'Chat options') } 'deleting the open chat returns to the composer'
+    if ((Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -ne $draft) { throw 'Deleting the last chat lost the new-chat draft' }
+    Write-Output "Chat deletion, cancellation, search and draft preservation passed. Screenshot in $root"
 }
 
 function Test-ChatGoals {
@@ -1062,6 +1111,7 @@ try {
         return
     }
     if ($NavigationOnly) { Test-NavigationLayout; return }
+    if ($DeleteChatsOnly) { Test-DeleteChats; return }
     if ($StudioOnly) { Test-ChatAssets; return }
     if ($GoalOnly) { Test-ChatGoals; return }
     if ($ProviderTasksOnly) {

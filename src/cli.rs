@@ -48,6 +48,10 @@ enum Action {
         action: StudioAction,
     },
     List,
+    /// Permanently remove one chat and its private working copy from this project.
+    DeleteChat {
+        id: i64,
+    },
     /// Show actionable project work, including while the desktop has the project open.
     Status {
         #[arg(long)]
@@ -545,6 +549,16 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
         | Action::Models { .. }
         | Action::Status { .. }
         | Action::BlenderMcp { .. } => unreachable!(),
+        Action::DeleteChat { id } => {
+            store.delete_chat(id)?;
+            if store.clean_deleted_workspaces()? {
+                println!(
+                    "Chat deleted. Workshop will retry cleaning up its working files on the next project open."
+                );
+            } else {
+                println!("Chat deleted.");
+            }
+        }
         Action::GeminiTrust { enabled } => {
             store.set_gemini_project_trusted(enabled)?;
             println!("Gemini project trust override: {enabled}");

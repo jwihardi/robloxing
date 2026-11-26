@@ -11,7 +11,7 @@ import { Comparison, ComparisonPage } from "comparison.slint";
 export { Comparison } from "comparison.slint";
 export { Sketch } from "sketch.slint";
 export { Appearance, ThemeChoice } from "appearance.slint";
-import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
+import { RailAction, WorkshopMark, StudioNavigation, ChatHistoryRow, DeleteChatDialog } from "navigation.slint";
 import { PackPage } from "asset-packs.slint";
 export { AssetPacks, PackRow, PackMember } from "asset-packs.slint";
 import { Studio, StudioPage, ModelInspector } from "studio.slint";
@@ -550,7 +550,7 @@ export component Desk inherits Window {
     preferred-width: 1080px; preferred-height: 740px; min-width: 740px; min-height: 530px;
     background: Theme.canvas; default-font-family: "Segoe UI";
     in property <string> project;
-    in property <[string]> rows;
+    in property <[PickerOption]> rows;
     in-out property <bool> work-open;
     in property <[WorkRow]> work-items;
     in-out property <int> work-offset;
@@ -699,8 +699,20 @@ export component Desk inherits Window {
     private property <[PickerOption]> search-hits;
     callback find-chats(string) -> [PickerOption];
     callback select-hit(string);
-    changed chat-query => {root.search-hits = root.find-chats(root.chat-query);}
+    callback delete-chat(string);
+    private property <string> delete-id;
+    private property <string> delete-title;
+    private property <string> restore-delete;
+    private property <bool> delete-from-menu;
+    function ask-delete(chat: PickerOption, from-menu: bool) {
+        if root.busy || chat.value == "" { return; }
+        root.open-panel = OpenPanel.closed; root.restore-delete = ""; root.delete-from-menu = from-menu;
+        root.delete-title = chat.label; root.delete-id = chat.value;
+    }
+    public function refresh-chat-search() { root.search-hits = root.find-chats(root.chat-query); }
+    changed chat-query => {root.refresh-chat-search();}
     public function reset-chat-navigation() {
+        root.delete-id = ""; root.restore-delete = "";
         root.chat-query = ""; root.compact-context = false; root.work-open = false; root.clear-recipient();
         root.settings-origin = "chat"; root.settings-origin-shot = ""; root.editing-goal = false;
     }
@@ -779,7 +791,7 @@ export component Desk inherits Window {
         Rectangle { y:55px; width:parent.width; height:1px; background: Theme.line; visible:root.project!=""; }
         toolbar := HorizontalLayout {
             visible: root.project != ""; x: 24px; y: 10px; width: parent.width - 48px; height: 40px; spacing: 14px;
-            Text { text: root.selection >= 0 ? root.rows[root.selection] : "New conversation";
+            Text { text: root.selection >= 0 ? root.rows[root.selection].label : "New conversation";
                 color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; min-width: 0px; horizontal-stretch: 1; vertical-alignment: center; }
             if !root.writable && root.model-name != "" && pane.width > 720px: Text { text: root.model-name; color: Theme.muted;
                 font-size: 13px; vertical-alignment: center; }
@@ -1206,12 +1218,16 @@ export component Desk inherits Window {
             if root.chat-query != "" && root.search-hits.length == 0: Text { text:"No matching chats"; color:Theme.muted; font-size:13px; wrap:word-wrap; }
             if root.project != "" && root.chat-query == "" && root.rows.length == 0: Text { text:"Your conversations appear here."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
             if root.chat-query == "": ListView { vertical-stretch: 1;
-                for chat[i] in root.rows: RowAction { label: chat; selected: i == root.selection;
-                    enabled: !root.busy; activate => {root.compact-context=false; root.select-row(i);} }
+                for chat[i] in root.rows: ChatHistoryRow { title: chat.label; selected: i == root.selection;
+                    enabled: !root.busy; restore-delete-focus: root.restore-delete == chat.value;
+                    open => {root.compact-context=false; root.select-row(i);} remove => {root.ask-delete(chat, false);} }
             }
             if root.chat-query != "": ListView { vertical-stretch: 1;
-                for hit in root.search-hits: RowAction { label: hit.label; enabled: !root.busy;
-                    activate => {root.select-hit(hit.value); root.chat-query=""; root.compact-context=false;} }
+                for hit in root.search-hits: ChatHistoryRow { title: hit.label; enabled: !root.busy;
+                    selected: root.selection >= 0 && root.rows[root.selection].value == hit.value;
+                    restore-delete-focus: root.restore-delete == hit.value;
+                    open => {root.select-hit(hit.value); root.chat-query=""; root.compact-context=false;}
+                    remove => {root.ask-delete(hit, false);} }
             }
             if root.chat-query != "" && root.search-hits.length == 40: Text { text: "Showing the newest 40 matches."; color: Theme.muted; wrap:word-wrap; font-size:12px; }
             if root.chat-query == "" && (root.older-chats || root.newer-chats): HorizontalLayout {
@@ -1343,6 +1359,9 @@ export component Desk inherits Window {
             if root.can-review: RowAction { label: root.checkpoint-only ? "Accept decisions" : "Accept change"; activate => {root.operate("accept"); root.open-panel = OpenPanel.closed;} }
             if root.can-retry: RowAction { label: "Retry in new chat"; activate => {root.operate("retry"); root.open-panel = OpenPanel.closed;} }
             if root.can-discard: RowAction { label: "Discard change"; activate => {root.operate("discard"); root.open-panel = OpenPanel.closed;} }
+            Rectangle { height: 1px; background: Theme.line; }
+            RowAction { label: "Delete chat…"; glyph: "\u{e74d}"; glyph-color: Theme.scarce;
+                activate => {root.ask-delete(root.rows[root.selection], true);} }
         }
     }
     if root.open-panel == OpenPanel.effort: Flyout {
@@ -1439,5 +1458,13 @@ export component Desk inherits Window {
                 activate=>{root.choose-providers();} }
         }
     }
-
+    if root.delete-id != "": DeleteChatDialog {
+        width: root.width; height: root.height; chat-title: root.delete-title;
+        cancel => {
+            root.restore-delete = root.delete-from-menu ? "" : root.delete-id;
+            root.delete-id = "";
+            if root.delete-from-menu { options.focus(); }
+        }
+        confirm => { root.delete-chat(root.delete-id); root.delete-id = ""; }
+    }
 }

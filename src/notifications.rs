@@ -227,6 +227,10 @@ impl App {
         ui.show()?;
         match target.destination {
             Destination::Chat(id) => {
+                if store.is_deleted_chat(id)? {
+                    ui.set_notice("This chat was deleted.".into());
+                    return Ok(());
+                }
                 self.chat_offset.set(store.chat_position(id)? / 40 * 40);
                 ui.invoke_show_destination(false);
                 self.select_chat(Some(id));

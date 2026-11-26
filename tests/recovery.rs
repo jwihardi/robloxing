@@ -37,6 +37,166 @@ impl Case {
     }
 }
 #[test]
+fn delete_chat_removes_only_its_history_and_private_workspaces() -> Result<()> {
+    let case = Case::new()?;
+    let store = case.open()?;
+    let file = case.project.join("score.txt");
+    let first =
+        store.prepare_with_files("Shared task", "", None, None, std::slice::from_ref(&file))?;
+    store.status(first.id, "review", "")?;
+    let other = store.prepare("Keep this chat", "", None)?;
+    store.status(other.id, "accepted", "")?;
+    let retry = store.prepare("Shared task", "", Some(first.id))?;
+    assert!(store.delete_chat(retry.id).is_err());
+    store.status(retry.id, "review", "")?;
+    store.post_screenshot(Some(retry.id), "remember-in-album")?;
+    let db = rusqlite::Connection::open(store.dir.join("workshop.sqlite"))?;
+    db.execute_batch("PRAGMA foreign_keys=ON")?;
+    db.execute(
+        "INSERT INTO workers(id,lead,name,spec,state) VALUES(17,?1,'draw','{}','running')",
+        [retry.id],
+    )?;
+    assert!(store.delete_chat(retry.id).is_err());
+    assert!(!store.is_deleted_chat(retry.id)?);
+    // An integrated worker can remain in this state after recovery, awaiting a future lead turn.
+    db.execute("UPDATE workers SET state='checking' WHERE id=17", [])?;
+    db.execute(
+        "INSERT INTO events(attempt,kind,summary) VALUES(?1,'workshop/image','test')",
+        [retry.id],
+    )?;
+    let event = db.last_insert_rowid();
+    db.execute(
+        "INSERT INTO pending_worker_directions VALUES(?1,17)",
+        [event],
+    )?;
+    db.execute("INSERT INTO event_images VALUES(?1,'image.png')", [event])?;
+    db.execute("INSERT INTO event_files VALUES(?1,'notes.txt')", [event])?;
+    db.execute("INSERT INTO studio_jobs(id,area,title,request,state) VALUES(8,'Assets','Drawing','{}','Finished')", [])?;
+    db.execute("INSERT INTO event_assets VALUES(?1,8,'lead')", [event])?;
+    db.execute(
+        "INSERT INTO queued_messages(attempt,body,files) VALUES(?1,'test','[]')",
+        [retry.id],
+    )?;
+    db.execute(
+        "INSERT INTO chat_goals(attempt,objective,status) VALUES(?1,'goal','paused')",
+        [retry.id],
+    )?;
+    db.execute(
+        "INSERT INTO checkpoints VALUES(?1,'decision','task')",
+        [retry.id],
+    )?;
+    db.execute("INSERT INTO usage VALUES(?1,10)", [retry.id])?;
+    db.execute(
+        "UPDATE attempts SET session='shared-session' WHERE task=?1",
+        [first.task],
+    )?;
+    db.execute(
+        "INSERT INTO codex_asset_sessions(session) VALUES('shared-session')",
+        [],
+    )?;
+    let worker_dir = store.dir.join("workers/17");
+    fs::create_dir_all(&worker_dir)?;
+    fs::write(worker_dir.join("private.txt"), "worker")?;
+
+    store.delete_chat(retry.id)?;
+    store.delete_chat(retry.id)?;
+    assert!(!store.clean_deleted_workspaces()?);
+    assert!(store.is_deleted_chat(retry.id)?);
+    assert!(!store.folder(retry.id).exists());
+    assert!(!worker_dir.exists());
+    assert!(store.work(first.id).is_dir());
+    assert!(store.work(other.id).is_dir());
+    assert_eq!(
+        store.search_chats("Shared")?,
+        [(first.id, "Shared task".to_owned())]
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT path FROM task_attachments WHERE task=?1",
+            [first.task],
+            |r| r.get::<_, String>(0)
+        )?,
+        file.to_string_lossy()
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT attempt FROM task_heads WHERE task=?1",
+            [first.task],
+            |r| r.get::<_, i64>(0)
+        )?,
+        first.id
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM codex_asset_sessions", [], |r| r
+            .get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM studio_jobs", [], |r| r
+            .get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        workshop::screenshots::album(&case.home)?[0].key,
+        "remember-in-album"
+    );
+    let fresh = store.prepare("New after deletion", "", None)?;
+    assert!(fresh.id > retry.id);
+    assert!(store.chat_screenshots(Some(fresh.id))?.is_empty());
+    assert!(store.chat_screenshots(None)?.is_empty());
+
+    store.delete_chat(first.id)?;
+    assert!(!store.clean_deleted_workspaces()?);
+    assert!(store.search_chats("Shared")?.is_empty());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM task_attachments WHERE task=?1",
+            [first.task],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM codex_asset_sessions", [], |r| r
+            .get::<_, i64>(0))?,
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, i64>(
+            0
+        ))?,
+        0
+    );
+    assert_eq!(fs::read_to_string(file)?, "Score: 0\n");
+    Ok(())
+}
+
+#[test]
+fn reopening_retries_private_directory_cleanup_safely() -> Result<()> {
+    let case = Case::new()?;
+    let store = case.open()?;
+    let chat = store.prepare("Delete me", "", None)?;
+    store.status(chat.id, "cancelled", "")?;
+    let dir = store.folder(chat.id);
+    let held = dir.with_file_name("held-for-test");
+    fs::rename(&dir, &held)?;
+    fs::write(&dir, "unexpected file")?;
+    store.delete_chat(chat.id)?;
+    assert!(store.clean_deleted_workspaces()?);
+    assert_eq!(fs::read_to_string(&dir)?, "unexpected file");
+    assert!(store.search_chats("Delete me")?.is_empty());
+    fs::remove_file(&dir)?;
+    fs::rename(held, &dir)?;
+    drop(store);
+    let reopened = case.open()?;
+    assert!(reopened.is_deleted_chat(chat.id)?);
+    assert!(!dir.exists());
+    assert!(reopened.prepare("Another conversation", "", None)?.id > chat.id);
+    Ok(())
+}
+
+#[test]
 fn chat_search_can_reopen_a_match_beyond_the_current_history_page() -> Result<()> {
     let case = Case::new()?;
     let store = case.open()?;

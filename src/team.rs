@@ -306,13 +306,14 @@ impl Store {
         let tx = db.transaction()?;
         let mut dispatched = Vec::new();
         for a in assignments {
+            let next_id = crate::chat_history::next_worker_id(&tx)?;
             let id = tx
                 .query_row(
-                    "INSERT INTO workers(lead,name,spec,state) VALUES(?1,?2,?3,'queued')
+                    "INSERT INTO workers(lead,name,spec,state,id) VALUES(?1,?2,?3,'queued',?4)
                  ON CONFLICT(lead,name) DO UPDATE SET state='queued',spec=excluded.spec
                  WHERE workers.state='blocked' AND workers.repeats<2 AND workers.tries<4
                  RETURNING id",
-                    params![lead, a.key, serde_json::to_string(a)?],
+                    params![lead, a.key, serde_json::to_string(a)?, next_id],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;

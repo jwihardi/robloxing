@@ -5,6 +5,7 @@ pub mod goals;
 mod image_comparison;
 mod message_queue;
 pub use image_comparison::ImageComparison;
+mod chat_history;
 pub mod provider;
 pub mod provider_permissions;
 mod run_state;
@@ -62,6 +63,7 @@ pub struct Store {
     archive_dir: PathBuf,
     preferences_home: PathBuf,
     db: Mutex<Connection>,
+    workspace_cleanup: Mutex<()>,
     _lock: File,
     worker: bool,
     worker_catalog: Mutex<std::sync::Arc<provider::CatalogSources>>,
@@ -284,17 +286,20 @@ impl Store {
             [project.to_string_lossy()],
         )?;
         db.execute("INSERT OR IGNORE INTO milestones(id,project,name) VALUES(1,1,'One recoverable change')", [])?;
+        db.execute_batch(include_str!("chat_history.sql"))?;
         let store = Self {
             project,
             archive_dir: dir.clone(),
             preferences_home: home,
             dir,
             db: Mutex::new(db),
+            workspace_cleanup: Default::default(),
             _lock: lock,
             worker,
             worker_catalog: Default::default(),
             controls: Default::default(),
         };
+        store.clean_deleted_workspaces()?;
         store.recover_workers()?;
         store.finish_pending_directions(None)?;
         store.db.lock().unwrap().execute(
@@ -559,8 +564,8 @@ impl Store {
                 }
                 (task, false)
             };
-            tx.execute("INSERT INTO attempts(task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,'preparing','Creating isolated copy')",params![task,head,model,effort,provider::provider_for(model)])?;
-            let id = tx.last_insert_rowid();
+            let id = chat_history::next_chat_id(&tx)?;
+            tx.execute("INSERT INTO attempts(id,task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,?6,'preparing','Creating isolated copy')",params![id,task,head,model,effort,provider::provider_for(model)])?;
             if inherit_queue && let Some(previous) = retry {
                 tx.execute(
                     "UPDATE queued_messages SET attempt=?1 WHERE attempt=?2 AND sending=0 AND steering=0",

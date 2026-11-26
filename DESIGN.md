@@ -35,6 +35,8 @@ The far-left rail holds the destinations that apply across the project. A second
 
 ## Conversations
 
+Each chat row exposes a trailing trash button on hover, focus or selection. Search results and Chat options open the same confirmation. Show the conversation title, give Cancel initial keyboard focus and return to the current draft after deletion.
+
 Keep the composer at the bottom in a new chat and throughout a conversation. The two shortcuts on the welcome screen fill in editable drafts. The project navigator searches saved chat prompts across history pages. The reading column tops out at 760 logical pixels. Right-align the user's messages on a raised surface and place selectable assistant replies directly on the canvas.
 
 Keep the model and stepped effort selector beside Send. Attachments and subagent settings belong on the left of the composer. Show dispatch receipts where the work happened. Activity in the chat header opens the session state, workers and project handoff. Open a worker to read its assignment, criteria, dependencies, scope and latest activity. Keep the review action in the transcript when a change is ready. Outputs lists the media from this chat and links to the screenshot album. The contextual session panel takes inspiration from Claude Code’s desktop layout. [Claude Code desktop](https://code.claude.com/docs/en/desktop)

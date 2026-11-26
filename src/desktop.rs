@@ -38,6 +38,8 @@ enum Update {
     Attention(notifications::Target, &'static str, String),
     NotificationClicked(notifications::Target),
     NotificationError(String),
+    ChatDeleted(PathBuf, i64, Result<()>),
+    ChatCleanupPending(PathBuf),
     StudioFinished(PathBuf, i64, Result<()>),
     PackExported(PathBuf, String, Result<PathBuf>),
     PackImported(PathBuf, Result<String>),
@@ -1057,6 +1059,52 @@ impl App {
             .set(self.session_generation.get() + 1);
         self.warm_sessions.borrow_mut().clear();
     }
+    fn delete_chat(&self, id: i64) {
+        let ui = self.ui.unwrap();
+        if ui.get_busy() {
+            return;
+        }
+        let Some(store) = self.store.borrow().clone() else {
+            return;
+        };
+        ui.set_busy(true);
+        self.warm_sessions
+            .borrow_mut()
+            .retain(|(chat, _, _)| *chat != id);
+        let updates = self.updates.clone();
+        std::thread::spawn(move || {
+            let result = store.delete_chat(id);
+            let deleted = result.is_ok();
+            let _ = updates.send(Update::ChatDeleted(store.project.clone(), id, result));
+            if deleted && !matches!(store.clean_deleted_workspaces(), Ok(false)) {
+                let _ = updates.send(Update::ChatCleanupPending(store.project.clone()));
+            }
+        });
+    }
+
+    fn chat_deleted(&self, store: &Store, id: i64) -> Result<()> {
+        let ui = self.ui.unwrap();
+        let selected = self.id.get().filter(|current| *current != id);
+        let offset = match selected {
+            Some(current) => store.chat_position(current)? / 40 * 40,
+            None => self
+                .chat_offset
+                .get()
+                .min(store.chat_position(0)?.saturating_sub(1) / 40 * 40),
+        };
+        self.chat_offset.set(offset);
+        if self.id.get() == Some(id) {
+            self.select_chat(None);
+            ui.invoke_focus_draft();
+        } else {
+            self.render()?;
+        }
+        self.drafts.borrow_mut().remove(&Some(id));
+        self.sketches.borrow_mut().remove(&Some(id));
+        self.attachments.borrow_mut().remove(&Some(id));
+        ui.invoke_refresh_chat_search();
+        Ok(())
+    }
     fn select_chat(&self, selected: Option<i64>) {
         if selected == self.id.get() {
             return;
@@ -1087,7 +1135,10 @@ impl App {
         rows.truncate(40);
         ui.set_rows(ModelRc::new(VecModel::from(
             rows.iter()
-                .map(|a| a.prompt.lines().next().unwrap_or("Untitled chat").into())
+                .map(|a| PickerOption {
+                    value: a.id.to_string().into(),
+                    label: a.prompt.lines().next().unwrap_or("Untitled chat").into(),
+                })
                 .collect::<Vec<_>>(),
         )));
         let selected = rows.iter().position(|a| Some(a.id) == self.id.get());
@@ -1162,10 +1213,31 @@ impl App {
                 Update::Started(..)
                     | Update::Activity(..)
                     | Update::WorkersChanged
+                    | Update::ChatDeleted(..)
                     | Update::TranscriptChanged
                     | Update::Finished(_)
             );
             match update {
+                Update::ChatDeleted(project, id, result) => {
+                    ui.set_busy(false);
+                    if let Some(store) =
+                        self.store.borrow().clone().filter(|s| s.project == project)
+                        && let Err(error) = result.and_then(|()| self.chat_deleted(&store, id))
+                    {
+                        ui.set_notice(format!("{error:#}").into());
+                    }
+                    self.open_notification()?;
+                }
+                Update::ChatCleanupPending(project) => {
+                    if self
+                        .store
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|s| s.project == project)
+                    {
+                        ui.set_notice("Workshop will retry cleaning up deleted chats’ private files the next time you open this project.".into());
+                    }
+                }
                 Update::Attention(target, title, detail) => self.notify(target, title, &detail),
                 Update::NotificationError(error) => ui.set_notice(error.into()),
                 Update::NotificationClicked(target) => {
@@ -2175,6 +2247,12 @@ fn main() -> Result<()> {
                 a.ui.unwrap().set_notice(error.to_string().into());
                 Default::default()
             }
+        }
+    });
+    let a = app.clone();
+    ui.on_delete_chat(move |value| {
+        if let Ok(id) = value.parse() {
+            a.delete_chat(id);
         }
     });
     let a = app.clone();

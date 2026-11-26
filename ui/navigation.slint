@@ -3,6 +3,69 @@ import { ListView, LineEdit } from "std-widgets.slint";
 import { AssetPacks } from "asset-packs.slint";
 import { Studio } from "studio.slint";
 
+export component ChatHistoryRow inherits Rectangle {
+    in property <string> title;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <bool> restore-delete-focus;
+    callback open();
+    callback remove();
+    height: 36px;
+    background: root.selected ? Theme.selected : entry.hovered || trash.hovered ? Theme.surface : transparent;
+    border-radius: 9px;
+    changed restore-delete-focus => { if root.restore-delete-focus { trash.focus(); } }
+    entry := RowAction {
+        x: 0px; width: parent.width - trash.width; height: parent.height; label: root.title; enabled: root.enabled;
+        activate => { root.open(); }
+    }
+    trash := Action {
+        x: entry.width; y: 2px; width: 32px; height: parent.height - 4px;
+        icon-only: true; glyph: "\u{e74d}"; label: "Delete chat “" + root.title + "”"; enabled: root.enabled;
+        opacity: root.selected || entry.hovered || entry.focused || self.hovered || self.focused ? 1 : 0;
+        glyph-color: self.hovered || self.focused ? Theme.scarce : Theme.muted;
+        activate => { root.remove(); }
+    }
+}
+
+export component DeleteChatDialog inherits FocusScope {
+    in property <string> chat-title;
+    callback cancel();
+    callback confirm();
+    focus-on-click: false;
+    init => { keep.focus(); }
+    capture-key-pressed(e) => {
+        if e.text == Key.Escape { root.cancel(); return accept; }
+        if e.text == Key.Tab || e.text == Key.Backtab {
+            if keep.focused { remove.focus(); } else { keep.focus(); }
+            return accept;
+        }
+        return reject;
+    }
+    Rectangle { background: #0009; }
+    TouchArea {}
+    Rectangle {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        width: min(394px, parent.width - 32px); height: body.preferred-height;
+        border-radius: 18px; background: Theme.popup; border-color: Theme.line; border-width: 1px;
+        accessible-role: groupbox; accessible-label: "Delete chat?";
+        body := VerticalLayout {
+            padding: 22px; spacing: 10px;
+            Text { text: "Delete chat?"; color: Theme.text; font-size: 20px; font-weight: 600; }
+            Text { text: "“" + root.chat-title + "”"; color: Theme.text; font-size: 14px;
+                wrap: word-wrap; overflow: elide; max-height: 56px; }
+            Text { text: "This permanently removes the conversation and its unaccepted changes.";
+                color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            HorizontalLayout {
+                padding-top: 8px; spacing: 8px; alignment: end;
+                keep := Action { label: "Cancel"; width: 76px; outlined: true; activate => { root.cancel(); } }
+                remove := Action { label: "Delete chat"; width: 100px; primary: true;
+                    background: self.hovered ? Theme.scarce.brighter(0.12) : Theme.scarce;
+                    activate => { root.confirm(); } }
+            }
+        }
+    }
+}
+
 export component RailAction inherits Action {
     in property <string> caption;
     icon-only: true;
