@@ -102,10 +102,10 @@ pub(crate) fn chat_reason(
         .last_asset_output(end.id)?
         .filter(|(event, _)| *event > previous_output)
     {
-        return Ok(Some(if kind == "workshop/model" {
-            "3D model ready for review"
-        } else {
-            "Image ready for review"
+        return Ok(Some(match kind.as_str() {
+            "workshop/model" => "3D model ready for review",
+            "workshop/sound" => "Sound effect ready for review",
+            _ => "Image ready for review",
         }));
     }
     let changes =

@@ -206,6 +206,24 @@ pub(super) fn generated_image(item: &Value, cwd: &Path) -> Result<image::Dynamic
     Ok(decoded)
 }
 
+pub(crate) async fn design_sound(
+    dir: &Path,
+    brief: &str,
+    inference: &(String, String),
+) -> Result<Value> {
+    let number = json!({"type":"number"});
+    let schema = json!({"type":"object","additionalProperties":false,"required":["layers"],"properties":{
+        "layers":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","additionalProperties":false,
+            "required":["wave","start","duration","from_hz","to_hz","gain","attack","release"],
+            "properties":{"wave":{"type":"string","enum":["sine","triangle","pulse","noise"]},
+                "start":number,"duration":number,"from_hz":number,"to_hz":number,
+                "gain":number,"attack":number,"release":number}}}}});
+    let item = art_turn(dir, "Design a game sound effect as 1 to 16 overlapping synthesizer layers. Return only the requested JSON. Use seconds for start, duration (at least 0.01), attack and release (each 0 to duration). Each layer must finish by 12 seconds. Frequencies sweep linearly from from_hz to to_hz, 20 to 16000 Hz. For noise these are low-pass cutoffs. Gain is 0 to 1. Shape the timing, pitch and timbre to the brief. Use no tools.", &Message::from(brief), schema, "agentMessage", inference).await?;
+    Ok(serde_json::from_str(
+        item["text"].as_str().context("Missing sound design")?,
+    )?)
+}
+
 pub(crate) async fn design_model(
     dir: &Path,
     brief: &str,

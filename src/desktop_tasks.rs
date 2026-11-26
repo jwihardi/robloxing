@@ -17,6 +17,7 @@ fn task_role(area: &str) -> Result<TaskRole> {
         "Workers" => TaskRole::Workers,
         "Images" => TaskRole::Images,
         "Models" => TaskRole::Models,
+        "Sounds" => TaskRole::Sounds,
         "Ghidra" => TaskRole::Summaries,
         _ => bail!("Unknown task settings."),
     })
@@ -180,6 +181,7 @@ impl App {
                 }
                 "customize" if run => {}
                 "model" | "effort" => setting.agent.edit(field, value)?,
+                "elevenlabs" if role == TaskRole::Sounds => setting.elevenlabs = value == "true",
                 "summary" if area == "Ghidra" => setting.summarize = value == "true",
                 "functions" if area == "Ghidra" => setting.function_limit = value.parse()?,
                 "seconds" if area == "Ghidra" => setting.seconds_per_function = value.parse()?,
@@ -209,6 +211,9 @@ impl App {
         controls.set_function_limit(i32::from(setting.function_limit));
         controls.set_seconds(i32::from(setting.seconds_per_function));
         controls.set_summary(setting.summarize);
+        controls.set_elevenlabs(setting.elevenlabs);
+        controls
+            .set_sound_key(std::env::var("ELEVENLABS_API_KEY").is_ok_and(|s| !s.trim().is_empty()));
         controls.set_error("".into());
         if self.store.borrow().is_none()
             && (area != "Ghidra" || setting.summarize)

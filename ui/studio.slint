@@ -4,6 +4,7 @@ import { Action, Theme, ActivityLine } from "common.slint";
 export struct StudioItem { id: int, title: string, state: string, detail: string, date: string, area: string }
 
 export global Studio {
+    in property <int> playing-sound;
     in-out property <string> area: "Assets";
     in-out property <string> binary-path;
     in-out property <string> filter;
@@ -169,7 +170,7 @@ export component StudioPage inherits Rectangle {
             if !root.binary: Action { label: "Locate Blender"; width: 116px; activate => {Studio.command("locate");} }
             if root.navigation-hidden: Action { label: "Tools and history"; width: 162px; glyph: "\u{e700}"; activate => { root.browse(); } }
         }
-        Text { text: root.binary ? "Recover functions from a local game binary with Ghidra." : "Images and 3D models from chats in this project.";
+        Text { text: root.binary ? "Recover functions from a local game binary with Ghidra." : "Sounds, images and 3D models from chats in this project.";
             color: Theme.muted; font-size: 14px; wrap:word-wrap; }
         Rectangle { height: 1px; background: Theme.line; }
         if root.binary: HorizontalLayout { height: 36px; spacing: 8px;
@@ -188,7 +189,7 @@ export component StudioPage inherits Rectangle {
         if root.binary: Rectangle { height: 1px; background: Theme.line; }
         if Studio.jobs.length == 0: VerticalLayout { alignment: center; spacing: 8px; vertical-stretch: 1;
             Text { text: root.binary ? "Report preview" : Studio.query != "" ? "No matching assets" : "No saved assets yet"; horizontal-alignment:center; color:Theme.text; font-size:18px; font-weight:600; }
-            Text { text: Studio.query != "" ? "Choose a different search in the run history." : root.binary ? "Choose a binary and run decompilation to read its report." : "Ask for an image or a 3D model in chat.";
+            Text { text: Studio.query != "" ? "Choose a different search in the run history." : root.binary ? "Choose a binary and run decompilation to read its report." : "Ask for a sound effect, image or 3D model in chat.";
                 horizontal-alignment:center; wrap:word-wrap; color: Theme.muted; font-size: 14px; }
         }
         if Studio.jobs.length > 0: HorizontalLayout { height: 30px; spacing: 10px;
@@ -227,6 +228,7 @@ export component StudioPage inherits Rectangle {
         }
         if !root.binary && Studio.message != "": Text { text: Studio.message; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
         if Studio.jobs.length > 0: HorizontalLayout { height: 36px; spacing: 3px; alignment: start;
+            if root.ready && Studio.selected.area == "Sounds": Action { label: Studio.playing-sound == Studio.selected.id ? "Stop sound" : "Play sound"; width: 92px; activate => {Studio.command("play");} }
             if root.ready: Action { label: "Save as…"; width: 78px; selected: true; activate => {Studio.command("export");} }
             if root.ready: Action { label: "Attach to chat"; width: 110px; enabled: root.can-attach; activate => {Studio.command("attach");} }
             if root.ready && root.images: Action { label: "Annotate"; width: 88px; enabled: root.can-attach; activate => {Studio.command("annotate");} }

@@ -9,6 +9,7 @@ use std::{fs, path::Path};
 pub struct TaskSettings {
     pub agent: WorkerPolicy,
     pub summarize: bool,
+    pub elevenlabs: bool,
     pub function_limit: u16,
     pub seconds_per_function: u16,
 }
@@ -17,6 +18,7 @@ impl Default for TaskSettings {
         Self {
             agent: WorkerPolicy::default(),
             summarize: false,
+            elevenlabs: false,
             function_limit: 64,
             seconds_per_function: 12,
         }
@@ -37,7 +39,7 @@ impl TaskSettings {
     }
     fn preferences(home: &Path, area: &str) -> Result<Connection> {
         ensure!(
-            matches!(area, "Images" | "Models" | "Ghidra"),
+            matches!(area, "Images" | "Models" | "Sounds" | "Ghidra"),
             "Unknown Studio task."
         );
         fs::create_dir_all(home)?;

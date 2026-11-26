@@ -19,17 +19,25 @@ pub enum TaskRole {
     Workers,
     Images,
     Models,
+    Sounds,
     Summaries,
 }
 
 impl TaskRole {
-    pub const ALL: [Self; 4] = [Self::Workers, Self::Images, Self::Models, Self::Summaries];
+    pub const ALL: [Self; 5] = [
+        Self::Workers,
+        Self::Images,
+        Self::Models,
+        Self::Sounds,
+        Self::Summaries,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Workers => "workers",
             Self::Images => "images",
             Self::Models => "models",
+            Self::Sounds => "sounds",
             Self::Summaries => "summaries",
         }
     }
@@ -39,6 +47,7 @@ impl TaskRole {
             Self::Workers => "Workers",
             Self::Images => "Image generation",
             Self::Models => "Model design",
+            Self::Sounds => "Sound effects",
             Self::Summaries => "Decompilation summaries",
         }
     }

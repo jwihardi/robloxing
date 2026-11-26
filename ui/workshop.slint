@@ -23,8 +23,8 @@ export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
-export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-model: bool, maker: string }
-export struct OutputItem { title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
+export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
+export struct OutputItem { sound: bool, title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
 export enum PluginSection { recommended, installed, marketplace }
@@ -670,18 +670,19 @@ export component Desk inherits Window {
                         visible: turn.asset-id > 0; x: 0px; y: 0px; width: min(360px, parent.width); spacing: 5px;
                         Action {
                             height: min(218px, self.width * max(1,turn.sketch.height) / max(1,turn.sketch.width)); icon-only: true;
-                            label: turn.asset-model ? "Open model preview" : "Enlarge image"; background: Theme.sidebar; border-radius: 12px; clip: true;
+                            label: turn.asset-sound ? (Studio.playing-sound == turn.asset-id ? "Stop sound preview" : "Play sound preview") : turn.asset-model ? "Open model preview" : "Enlarge image"; background: Theme.sidebar; border-radius: 12px; clip: true;
                             Image { width: parent.width; height: parent.height; source: turn.sketch; image-fit: contain; }
-                            activate => {if turn.asset-model {Studio.asset-action(turn.asset-id,"inspect");} else {root.view-image(turn.image-path,turn.asset-id);}}
+                            activate => {if turn.asset-sound {Studio.asset-action(turn.asset-id,"play");} else if turn.asset-model {Studio.asset-action(turn.asset-id,"inspect");} else {root.view-image(turn.image-path,turn.asset-id);}}
                         }
                         Text { text: turn.body; color: Theme.text; font-size: 16px; font-weight: 600; wrap: word-wrap; }
-                        Text { text: (turn.asset-model ? "3D model · GLB" : "Image · PNG") + "  ·  " + turn.maker; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: (turn.asset-sound ? "Sound effect · WAV" : turn.asset-model ? "3D model · GLB" : "Image · PNG") + "  ·  " + turn.maker; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout { height: 32px; spacing: 3px; alignment: start;
+                            if turn.asset-sound: Action { width: 100px; label: Studio.playing-sound == turn.asset-id ? "Stop sound" : "Play sound"; glyph: Studio.playing-sound == turn.asset-id ? "\u{e71a}" : "\u{e768}"; activate => {Studio.asset-action(turn.asset-id,"play");} }
                             if turn.asset-model: Action { width: 112px; label: "Inspect model"; activate => {Studio.asset-action(turn.asset-id,"inspect");} }
-                            if !turn.asset-model: Action { width: 92px; label: "Annotate"; enabled: !root.busy || root.running; activate => {Sketch.annotate(turn.image-path,false);} }
+                            if !turn.asset-model && !turn.asset-sound: Action { width: 92px; label: "Annotate"; enabled: !root.busy || root.running; activate => {Sketch.annotate(turn.image-path,false);} }
                             if turn.original-path != "": Action { width: 81px; label: "Compare";
                                 activate => {Comparison.open(turn.original-path,turn.markup-path,turn.image-path,turn.previous-output);} }
-                            Action { width: 99px; label: turn.asset-model ? "Save model" : "Save image"; activate => {Studio.asset-action(turn.asset-id,"export");} }
+                            Action { width: 99px; label: turn.asset-sound ? "Save sound" : turn.asset-model ? "Save model" : "Save image"; activate => {Studio.asset-action(turn.asset-id,"export");} }
                         }
                     }
                     reply-view := ReplyView { visible: message.reply; width: parent.width;
@@ -1094,7 +1095,7 @@ export component Desk inherits Window {
             HorizontalLayout { height: 36px; padding-left: 8px;
                 Text { text: "Outputs"; vertical-alignment: center; font-weight: 600; font-size: 15px; color: Theme.text; } }
             if root.outputs.length == 0: HorizontalLayout { padding-left: 8px; padding-right: 8px; vertical-stretch: 1;
-                Text { text: "Images, 3D models and screenshots from this chat appear here."; wrap: word-wrap; font-size: 13px; color: Theme.muted; } }
+                Text { text: "Sound effects, images, 3D models and screenshots from this chat appear here."; wrap: word-wrap; font-size: 13px; color: Theme.muted; } }
             if root.outputs.length > 0: output-list := ListView {
                 vertical-stretch: 1;
                 for item in root.outputs: output-row := Action {
@@ -1106,7 +1107,7 @@ export component Desk inherits Window {
                         Text { text: item.title; color: Theme.text; font-size: 14px; overflow: elide; }
                         Text { text: item.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
                     }
-                    activate => {if item.shot != "" {root.view-shot(item.shot);} else if item.path != "" {root.view-image(item.path,item.asset-id);} else {root.dismiss-panel(); Studio.asset-action(item.asset-id,"inspect");}}
+                    activate => {if item.shot != "" {root.view-shot(item.shot);} else if item.path != "" {root.view-image(item.path,item.asset-id);} else {root.dismiss-panel(); Studio.asset-action(item.asset-id,item.sound ? "play" : "inspect");}}
                 }
             }
             Rectangle { height: 1px; background: Theme.line; }

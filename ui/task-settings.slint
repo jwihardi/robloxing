@@ -16,6 +16,8 @@ export global TaskControls {
     in property <int> function-limit;
     in property <int> seconds;
     in property <bool> summary;
+    in property <bool> elevenlabs;
+    in property <bool> sound-key;
     in property <string> error;
     callback change(string,string);
     callback set-provider(string,bool);
@@ -32,9 +34,9 @@ component TaskTabs inherits Rectangle {
     accessible-item-index: root.current; accessible-item-count: root.tabs.length; forward-focus: keys;
     private property <[PickerOption]> tabs: [
         {value:"Workers",label:"Workers"}, {value:"Images",label:"Image generation"},
-        {value:"Models",label:"Model design"}, {value:"Ghidra",label:"Decompilation"}
+        {value:"Models",label:"Model design"}, {value:"Sounds",label:"Sound effects"}, {value:"Ghidra",label:"Decompilation"}
     ];
-    private property <int> current: TaskControls.area == "Workers" ? 0 : TaskControls.area == "Images" ? 1 : TaskControls.area == "Models" ? 2 : 3;
+    private property <int> current: TaskControls.area == "Workers" ? 0 : TaskControls.area == "Images" ? 1 : TaskControls.area == "Models" ? 2 : TaskControls.area == "Sounds" ? 3 : 4;
     function select-tab(i: int) {
         if i != root.current { TaskControls.open(false,root.tabs[i].value); }
     }
@@ -51,7 +53,7 @@ component TaskTabs inherits Rectangle {
     Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.line; }
     HorizontalLayout { alignment: start; spacing: 3px;
         for task[i] in root.tabs: Action {
-            width: [82px,138px,112px,130px][i]; height: parent.height;
+            width: [78px,132px,106px,106px,124px][i]; height: parent.height;
             label: task.label; selected: i == root.current;
             accessible-role: tab; accessible-item-index: i; accessible-item-selectable: true; accessible-item-selected: self.selected;
             background: self.hovered ? Theme.surface : transparent;
@@ -165,8 +167,9 @@ export component TaskEditor inherits VerticalLayout {
     private property <bool> local: TaskControls.area == "Ghidra";
     private property <bool> inherited: TaskControls.for-run && TaskControls.inherited;
     private property <string> task-name: root.workers ? "Workers" : root.local ? "Decompilation"
-        : TaskControls.area == "Models" ? "Model design" : "Image generation";
-    private property <bool> uses-models: !root.local || TaskControls.summary;
+        : TaskControls.area == "Models" ? "Model design" : TaskControls.area == "Sounds" ? "Sound effects" : "Image generation";
+    private property <bool> hosted-sound: TaskControls.area == "Sounds" && TaskControls.elevenlabs;
+    private property <bool> uses-models: !root.hosted-sound && (!root.local || TaskControls.summary);
     spacing: 10px; min-height: 0px;
     if !TaskControls.for-run: TaskTabs {}
     if TaskControls.for-run: HorizontalLayout { height: 38px;
@@ -174,6 +177,13 @@ export component TaskEditor inherits VerticalLayout {
             vertical-alignment: center; horizontal-stretch: 1; }
         CheckBox { text: "Use task defaults"; checked: TaskControls.inherited;
             toggled => { TaskControls.change(self.checked ? "inherit" : "customize",""); } }
+    }
+    if TaskControls.area == "Sounds": VerticalLayout { spacing: 4px;
+        CheckBox { text: "Use ElevenLabs SFX v3"; checked: TaskControls.elevenlabs;
+            toggled => { TaskControls.change("elevenlabs", self.checked ? "true" : "false"); } }
+        Text { text: root.hosted-sound ? (TaskControls.sound-key ? "Sound prompts go to ElevenLabs and use your account credits." : "Set ELEVENLABS_API_KEY and restart Workshop to generate with ElevenLabs. Each request uses account credits.")
+              : "The models below design effects for local rendering. ElevenLabs uses its own model and credits.";
+            color: Theme.muted; font-size: 13px; wrap: word-wrap; }
     }
     if root.local: VerticalLayout { spacing: 6px;
         Text { text: "Local analysis"; font-size: 18px; font-weight: 600; color: Theme.text; height: 26px; }

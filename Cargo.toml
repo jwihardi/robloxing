@@ -1,6 +1,6 @@
 [package]
 name = "workshop"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 default-run = "workshop"
 
@@ -31,7 +31,7 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "regex-fancy"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"], optional = true }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Media_Audio"], optional = true }
 
 [[bin]]
 name = "workshop"

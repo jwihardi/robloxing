@@ -112,7 +112,7 @@ export component StudioNavigation inherits VerticalLayout {
     if Studio.area != "Packs" && Studio.jobs.length == 0: Text { text: Studio.query != "" ? (Studio.area == "Ghidra" ? "No matching reports." : "No matching assets.") : (Studio.area == "Ghidra" ? "No runs yet" : "No assets yet"); color: Theme.muted; font-size: 13px; height: 36px; vertical-alignment: center; }
     if Studio.area != "Packs": history := ListView { vertical-stretch: 1;
         for job in Studio.jobs: RowAction {
-            width: history.visible-width; height: 52px; label: job.title; detail: (Studio.area == "Ghidra" ? "#" + job.id + " · " : "") + (Studio.area == "Assets" ? (job.area == "Models" ? "3D model · " : "Image · ") : "") + (job.state == "Ready" ? job.date : job.state);
+            width: history.visible-width; height: 52px; label: job.title; detail: (Studio.area == "Ghidra" ? "#" + job.id + " · " : "") + (Studio.area == "Assets" ? (job.area == "Models" ? "3D model · " : job.area == "Sounds" ? "Sound effect · " : "Image · ") : "") + (job.state == "Ready" ? job.date : job.state);
             selected: Studio.selected.id == job.id; accessible-description: job.state + " " + job.date;
             activate => {Studio.editing-run = false; Studio.select(job.id); root.picked();}
         }

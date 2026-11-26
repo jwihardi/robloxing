@@ -40,7 +40,7 @@ Type `/goal Add a dark theme and verify it at both window sizes` to give the cur
 
 Open the model and effort pill beside Send. Select the header showing the effort and model to open the model list. Drag the slider or use the arrow keys to choose an effort level. New-chat choices set the project defaults. Changes within an existing chat apply to its next message. Workshop gets the available models and effort levels from each installed CLI. Choose a Claude model for a Claude lead. Start a new chat to switch providers, or change models from the same provider between turns.
 
-In **Settings → Tasks**, open **Workers**, **Image generation**, **Model design** or **Decompilation**. Switch providers on or off for that task and select models beneath their names. **Allow any model** clears an explicit selection. The model grid uses the full page. If a catalog is too large for the window, use the previous and next arrows to see the rest. Turn on **Generate an AI summary** to choose a model for a local decompilation report.
+In **Settings → Tasks**, open **Workers**, **Image generation**, **Model design**, **Sound effects** or **Decompilation**. Switch providers on or off for that task and select models beneath their names. **Allow any model** clears an explicit selection. The model grid uses the full page. If a catalog is too large for the window, use the previous and next arrows to see the rest. Turn on **Generate an AI summary** to choose a model for a local decompilation report.
 
 The same task permissions appear under **Settings → Providers**. Expand a provider to change its permitted tasks across projects. Codex and Antigravity support image generation. Turning off every provider for a task disables its AI routing.
 
@@ -112,6 +112,8 @@ After a shutdown interrupts an active goal, open the chat’s **Goal paused → 
 
 ## Recommended game development skills
 
+For game audio, **Game Audio Design** covers mixing and effect variation. **ElevenLabs Sound Effects** adds hosted text-to-audio for Foley and ambience and requires an ElevenLabs API key and credits. Both are available under **Settings → Plugins → Recommended**. [Game Audio Design](https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/disciplines/audio-design) · [ElevenLabs Sound Effects](https://github.com/elevenlabs/skills/tree/main/sound-effects)
+
 The install counts below are rounded figures reported by the skills.sh directory for each individual skill on November 25, 2026.
 
 | Skill | When to use it | Recorded installs |
@@ -126,17 +128,18 @@ The install counts below are rounded figures reported by the skills.sh directory
 | Gameplay Prototyping | Build and playtest one mechanic to decide whether to keep it. | [15K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/prototype-fast) |
 | Game Feel | Give actions more impact with timing, hit-stop, shake and squash-and-stretch. | [21K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/game-feel) |
 
-## Images and 3D models in chat
+## Images, sound effects and 3D models in chat
 
 Describe what you want in the composer. For example, ask “Draw a moonlit harbor icon” or “Build a low-poly copper lantern I can rotate.” The lead chooses a generator, uses the providers allowed in Settings and posts the result in the conversation. **Stop response** also stops the active generation.
 
 - **Images** arrive as PNGs. Enlarge, save or annotate an image and send feedback in the same chat. Prompted artwork uses Codex or Antigravity. Seamless moss, basalt and sand tiles can use the local generator with a repeatable seed.
+- **Sound effects** arrive as playable WAVs with a waveform. Try “Make a coin pickup with two rising chimes,” then “Make the second chime softer.” The lead can pass the first sound’s asset ID to revise its design. **Settings → Tasks → Sound effects** controls the designer’s provider, model and maximum effort. By default Workshop synthesizes up to 12 seconds of layered tones and filtered noise locally. For hosted Foley and ambience, set `ELEVENLABS_API_KEY` in Workshop’s environment, restart, and enable **Use ElevenLabs SFX v3** on that tab. This sends the sound brief to ElevenLabs and uses your credits. You can save a WAV from chat, replay it in Outputs, or reuse it from Saved assets.
 - **3D models** arrive with a preview, **Inspect model** and **Save model**. The lead can commission a design, use a crystal, barrel or planter starter, or export an attached Blender scene. Ask for a variation to create a new version. Blender builds each GLB and its editable scene.
-- **Outputs** collects the images, models and screenshots for the current chat. **Tools → Saved assets** searches generated assets across chats in the project, including work made in earlier versions. Ask the lead to add an asset to the project when it should be included in a reviewed change.
+- **Outputs** collects the sound effects, images, models and screenshots for the current chat. **Tools → Saved assets** searches generated assets across chats in the project, including work made in earlier versions. Ask the lead to add an asset to the project when it should be included in a reviewed change.
 
 In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/− also work. **Wireframe** shows triangle edges. **Overlaps** highlights coplanar faces that share surface area in orange, even behind another surface. The inspector reads static geometry and base material colors from GLB exports up to 64 MiB and 150,000 triangles. Dense models can show a partial overlap count when the comparison budget is reached.
 
-**Settings → Providers** controls which tasks each provider can handle. **Settings → Tasks** sets allowed models and maximum reasoning effort for image generation and model design. You can request a particular model or effort in your message. The lead stays within those settings.
+**Settings → Providers** controls which tasks each provider can handle. **Settings → Tasks** sets allowed models and maximum reasoning effort for image generation, model design and local sound effect design. You can request a particular model or effort in your message. The lead stays within those settings.
 
 ### Reusable Blender asset packs
 
@@ -182,7 +185,7 @@ $cli = ".\target\debug\workshop-cli.exe"
 
 The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
 
-`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. Set `--function-limit` and `--seconds-per-function` to change local limits. Use `--summary` or `--summary=false` to override the saved summary preference. Image generation, prop design and enabled summaries accept `--model` and `--max-effort` for a single run. The read-only commands below also work while the desktop project is open. Leads and workers from either provider can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
+`studio decompile` streams progress to stderr and prints the completed run as JSON on stdout. Pass `--fresh` to bypass reuse. Set `--function-limit` and `--seconds-per-function` to change local limits. Use `--summary` or `--summary=false` to override the saved summary preference. Use `studio sound "Two rising coin chimes"` for headless sound generation. Image generation, sound effects, prop design and enabled summaries accept `--model` and `--max-effort` for a single run. The read-only commands below also work while the desktop project is open. Leads and workers from either provider can perform the same lookups using `workshop_find_reports` and `workshop_read_report`.
 
 ```text
 workshop-cli --project . studio reports tile_cost

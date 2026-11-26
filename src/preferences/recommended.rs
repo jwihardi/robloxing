@@ -121,6 +121,22 @@ const PICKS: &[Pick] = &[
         claude: None,
     },
     Pick {
+        key: "sound-effects",
+        title: "ElevenLabs Sound Effects",
+        publisher: "ElevenLabs",
+        description: "Generate Foley, ambience and loops from text with your ElevenLabs API key. Uses ElevenLabs credits.",
+        skill_url: "https://github.com/elevenlabs/skills/tree/main/sound-effects",
+        claude: None,
+    },
+    Pick {
+        key: "audio-design",
+        title: "Game Audio Design",
+        publisher: "gamedev-skills",
+        description: "Vary repeated effects, balance loudness and duck music so gameplay cues stay audible.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/disciplines/audio-design",
+        claude: None,
+    },
+    Pick {
         key: "game-feel",
         title: "Game Feel",
         publisher: "gamedev-skills",

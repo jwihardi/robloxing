@@ -71,6 +71,7 @@ pub struct Store {
 }
 
 pub struct ChatMessage {
+    pub sound: bool,
     pub screenshot: bool,
     pub asset: Option<i64>,
     pub maker: Option<String>,
@@ -96,7 +97,7 @@ impl Store {
     }
     pub fn last_asset_output(&self, attempt: i64) -> Result<Option<(i64, String)>> {
         Ok(self.db.lock().unwrap().query_row(
-            "SELECT id,kind FROM events WHERE attempt=?1 AND kind IN ('workshop/image','workshop/model') ORDER BY id DESC LIMIT 1",
+            "SELECT id,kind FROM events WHERE attempt=?1 AND kind IN ('workshop/image','workshop/model','workshop/sound') ORDER BY id DESC LIMIT 1",
             [attempt], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?)
     }
@@ -131,7 +132,7 @@ impl Store {
             LEFT JOIN event_assets ON event_assets.event=events.id
             WHERE attempt=?1 AND events.id>?2 AND events.id<?3 AND summary IS NOT NULL
             AND kind IN ('agent/message','item/completed','steer/sent','user/followup',
-                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/model','workshop/image_error')
+                         'steer/error','steer/unavailable','worker/direction','worker/delivery_error','workshop/dispatch','workshop/screenshot','workshop/repair','workshop/image','workshop/model','workshop/sound','workshop/image_error')
             ORDER BY id {order} LIMIT ?4"
         ))?;
         let mut rows = stmt.query(params![attempt, after, before, limit])?;
@@ -149,6 +150,7 @@ impl Store {
                 );
             }
             messages.push(ChatMessage {
+                sound: kind == "workshop/sound",
                 asset: row.get(4)?,
                 maker: row.get(5)?,
                 comparison: if kind == "workshop/image" {

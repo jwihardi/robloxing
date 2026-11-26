@@ -25,6 +25,74 @@ fn item(job: &Job) -> StudioItem {
 }
 
 impl App {
+    pub(super) fn stop_sound(&self) {
+        let ui = self.ui.unwrap();
+        let studio = ui.global::<Studio>();
+        if studio.get_playing_sound() != 0 {
+            self.sound_timer.stop();
+            #[cfg(windows)]
+            unsafe {
+                windows_sys::Win32::Media::Audio::PlaySoundW(
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            studio.set_playing_sound(0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn play_sound(&self, job: &Job, store: &Store) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Media::Audio::{
+            PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT,
+        };
+        ensure!(
+            job.state == "Ready" && matches!(job.recipe, Recipe::Sound { .. }),
+            "Select a finished sound effect."
+        );
+        let ui = self.ui.unwrap();
+        let stopping = ui.global::<Studio>().get_playing_sound() == job.id as i32;
+        self.stop_sound();
+        if stopping {
+            return Ok(());
+        }
+        let file = job.folder(store).join(job.filename());
+        let mut audio = fs::File::open(&file)?;
+        let mut header = [0u8; 44];
+        audio.read_exact(&mut header)?;
+        let bytes = u32::from_le_bytes(header[40..44].try_into()?);
+        let bytes_per_second = u32::from_le_bytes(header[28..32].try_into()?);
+        ensure!(
+            bytes_per_second > 0 && &header[8..12] == b"WAVE",
+            "Invalid WAV preview."
+        );
+        // Workshop renders mono, 16-bit PCM with a 44-byte header.
+        let duration =
+            std::time::Duration::from_secs_f64(f64::from(bytes) / f64::from(bytes_per_second));
+        let name: Vec<_> = file.as_os_str().encode_wide().chain(Some(0)).collect();
+        ensure!(
+            unsafe {
+                PlaySoundW(
+                    name.as_ptr(),
+                    std::ptr::null_mut(),
+                    SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
+                )
+            } != 0,
+            "Windows could not play this sound. Check your audio output."
+        );
+        ui.global::<Studio>().set_playing_sound(job.id as i32);
+        let weak = ui.as_weak();
+        self.sound_timer
+            .start(slint::TimerMode::SingleShot, duration, move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<Studio>().set_playing_sound(0);
+                }
+            });
+        Ok(())
+    }
+
     pub(super) fn close_inspector(&self) {
         self.inspector.take();
         let ui = self.ui.unwrap();
@@ -132,6 +200,10 @@ impl App {
         let selected =
             || store.studio_job(asset.unwrap_or_else(|| studio.get_selected().id.into()));
         match cmd {
+            #[cfg(windows)]
+            "play" => self.play_sound(&selected()?, &store)?,
+            #[cfg(not(windows))]
+            "play" => bail!("Save the WAV and open it in your audio player."),
             "edit-task" => {
                 ui.global::<TaskControls>()
                     .invoke_open(true, studio.get_area());

@@ -85,6 +85,7 @@ impl Updates {
 }
 struct App {
     pending_notification: RefCell<Option<notifications::Target>>,
+    sound_timer: slint::Timer,
     inspector: RefCell<Option<inspector::Inspector>>,
     task_overrides:
         RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
@@ -555,6 +556,7 @@ impl App {
                         .unwrap_or_default()
                 };
                 OutputItem {
+                    sound: item.sound,
                     open_label: format!(
                         "Open {}",
                         if item.shot.is_empty() {
@@ -645,7 +647,8 @@ impl App {
             };
             if let Some(asset) = message.asset {
                 turn.asset_id = asset as i32;
-                turn.asset_model = message.image.is_none();
+                turn.asset_sound = message.sound;
+                turn.asset_model = !message.sound && message.image.is_none();
                 if let Some(maker) = message.maker {
                     let (model, effort) = maker.split_once(" · ").unwrap_or((&maker, ""));
                     let label = model_label(&self.catalog.borrow(), model);
@@ -656,7 +659,7 @@ impl App {
                     }
                     .into();
                 }
-                if turn.asset_model {
+                if turn.asset_model || turn.asset_sound {
                     let preview = store
                         .dir
                         .join("studio")
@@ -1452,6 +1455,7 @@ impl App {
                     if target.is_some() {
                         self.pending_notification.replace(target);
                     }
+                    self.stop_sound();
                     self.task_overrides.borrow_mut().clear();
                     self.close_inspector();
                     self.studio_cancel.take();
@@ -2011,6 +2015,7 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::sync_channel(256);
     let app = Rc::new(App {
         pending_notification: Default::default(),
+        sound_timer: Default::default(),
         inspector: Default::default(),
         task_overrides: Default::default(),
         studio_cancel: Default::default(),

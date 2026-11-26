@@ -98,10 +98,12 @@ function New-SkillFixture([string]$repo, [hashtable]$files) {
     [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$idx", "https://github.com/$repo.git")
     $env:GIT_CONFIG_COUNT = $idx + 1
 }
+New-SkillFixture 'elevenlabs/skills' @{ 'sound-effects/SKILL.md' = 'Sound effects fixture' }
 New-SkillFixture 'gokayfem/image-to-sculpt' @{ 'skills/image-to-sculpt/SKILL.md' = 'Image to Sculpt fixture' }
 New-SkillFixture 'gamedev-skills/awesome-gamedev-agent-skills' @{
     'skills/other-engines/roblox-networking/SKILL.md' = 'Networking fixture'
     'skills/other-engines/roblox-networking/references/validation-and-testing.md' = 'Two-client test'
+    'skills/disciplines/audio-design/SKILL.md' = 'Game audio fixture'
     'skills/disciplines/game-feel/SKILL.md' = 'Game feel fixture'
 }
 $localLuau = Join-Path $env:CODEX_HOME 'skills/roblox-luau'
@@ -333,6 +335,15 @@ function Test-TaskModelLayout {
     [void][WorkshopPointer]::PostMessage($appWindow,0x100,35,1)
     [void][WorkshopPointer]::PostMessage($appWindow,0x101,35,1)
     Wait-For { Named 'Functions per run' } 'End selects the decompilation tab'
+    Click 'Sound effects'
+    Wait-For { (Named 'Claude Code for Sound effects') -and (Named 'Maximum task effort') } 'sound designer permissions and effort'
+    Click 'Use ElevenLabs SFX v3'
+    Wait-For { !(Named 'Maximum task effort') -and !(Named 'Claude Code for Sound effects') } 'hosted sound renderer selected'
+    Click 'Workers'
+    Click 'Sound effects'
+    Wait-For { (Named 'Use ElevenLabs SFX v3').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'sound engine persisted'
+    Click 'Use ElevenLabs SFX v3'
+    Click 'Decompilation'
     Click 'Generate an AI summary'
     Wait-For { (Named 'Summary models') -and (Named 'Maximum summary effort') } 'independent AI summary controls'
     Click 'Close settings'
@@ -617,6 +628,11 @@ function Test-Recommendations {
         $filter.SetValue($item.Key)
         Wait-For { (Named $item.Value) -and !(Named 'Roblox Studio Workflow') } "search for $($item.Key)"
     }
+    foreach ($pick in @(@('Foley','ElevenLabs Sound Effects','sound-effects'),@('duck music','Game Audio Design','audio-design'))) {
+        $filter.SetValue($pick[0])
+        Click ("Install skill " + $pick[1])
+        Wait-For { (Named 'Installed') -and (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME ("skills/" + $pick[2] + "/SKILL.md"))) } 'audio skill installed for Codex'
+    }
     $filter.SetValue('roblox-luau')
     Wait-For { (Named 'In Skills') -and !(Named 'Install skill Roblox Luau') } 'existing skill with the same name'
     $filter.SetValue('multiplayer')
@@ -696,7 +712,7 @@ function Test-Recommendations {
     Wait-For { (Named 'Calendar') -and !(Named 'Show more') -and !(Named 'Codex plugin catalog: Fixture marketplace offline') } 'retry updates the catalog'
     Click 'Recommended'
     Wait-For { Named 'Roblox Studio Workflow' } 'return to recommendations'
-    'Game skill discovery, existing skills, provider installs and marketplace browsing passed'
+    'Game and audio skill discovery, provider installs and marketplace browsing passed'
 }
 function Test-Delivery {
     function Draft($text) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($text) }
@@ -892,8 +908,34 @@ function Test-ChatAssets {
     Click 'Remove image.png'
     Click 'New chat'
     Click 'Outputs'
-    Wait-For { Named 'Images, 3D models and screenshots from this chat appear here.' } 'outputs scoped to the new chat'
+    Wait-For { Named 'Sound effects, images, 3D models and screenshots from this chat appear here.' } 'outputs scoped to the new chat'
     Click 'Outputs'
+    Click 'Settings'
+    Click 'Tasks'
+    Click 'Sound effects'
+    Click 'fixture-deep'
+    Click 'Maximum task effort' 0.05
+    Click 'Close settings'
+    Wait-For { Named 'Message Codex' } 'sound generator configured'
+    (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Make a pickup sound')
+    Click 'Send message'
+    Wait-For { (Named 'Play sound') -and (Named 'Save sound') -and (Named 'New chat').Current.IsEnabled } 'sound delivered in chat' 45
+    $designer = Get-ChildItem $root -Filter 'studio-sound-*.json' | Select-Object -Last 1 | Get-Content -Raw | ConvertFrom-Json
+    if ($designer.model -ne 'fixture-deep' -or $designer.effort -ne 'low') { throw 'Sound generation did not honor the selected model and effort' }
+    Click 'Save sound'
+    $wav = Join-Path $project 'pickup.wav'
+    Choose-Attachment 'Save asset' $wav
+    Wait-For { Test-Path -LiteralPath $wav } 'exported sound'
+    $pcm = [IO.File]::ReadAllBytes($wav)
+    if ($pcm.Length -le 44 -or [Text.Encoding]::ASCII.GetString($pcm,8,4) -ne 'WAVE') { throw 'Sound export is not a WAV file' }
+    Click 'Outputs'
+    Wait-For { Named 'Open Coin pickup' } 'sound in Outputs'
+    Click 'Outputs'
+    Click 'Project tools'
+    (Named 'Search assets').GetCurrentPattern($valuePattern).SetValue('Coin pickup')
+    Wait-For { (Named 'Play sound') -and (Named 'Save as…') } 'sound in the project library'
+    Click 'New chat'
+    Wait-For { Named 'Message Codex' } 'new chat after the sound'
     $steamBlender = Join-Path ${env:ProgramFiles(x86)} 'Steam/steamapps/common/Blender/blender.exe'
     if ($env:WORKSHOP_BLENDER -or (Test-Path -LiteralPath $steamBlender) -or (Get-Command blender -ErrorAction SilentlyContinue)) {
         (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Build a lantern')
@@ -914,7 +956,7 @@ function Test-ChatAssets {
         Save-PrivateWindow (Join-Path $root 'chat-model.png')
     }
     Remove-Item -LiteralPath (Join-Path $root 'record-inference')
-    'Chat image generation, cancellation, marked-up revision, Outputs and the shared asset library passed'
+    'Chat images, sound generation with the selected policy, WAV export, Outputs and the shared asset library passed'
 }
 function Test-Sketch {
     Wait-For { (Named 'New chat').Current.IsEnabled } 'available project'
@@ -1527,7 +1569,7 @@ try {
     }
     $beforeScreenshot = ProviderLogs
     Click 'Outputs'
-    Wait-For { Named 'Images, 3D models and screenshots from this chat appear here.' } 'empty chat outputs'
+    Wait-For { Named 'Sound effects, images, 3D models and screenshots from this chat appear here.' } 'empty chat outputs'
     Click 'Outputs'
     Wait-For { !(Named 'View all screenshots') } 'outputs dismissed'
     (Named 'Message Codex').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('/screenshot')

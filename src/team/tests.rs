@@ -128,6 +128,15 @@ fn generated_assets_stay_with_the_chat_and_respect_provider_permissions() -> Res
             &|_| {},
         ))
     };
+    for provider in crate::provider_permissions::PROVIDERS {
+        ProviderPermissions::set(&home, provider, TaskRole::Sounds, false)?;
+    }
+    assert!(
+        call(json!({"kind":"sound","brief":"A pickup chime"}))
+            .unwrap_err()
+            .to_string()
+            .contains("Enable a provider")
+    );
     for provider in ["codex", "antigravity"] {
         ProviderPermissions::set(&home, provider, TaskRole::Images, false)?;
     }

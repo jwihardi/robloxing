@@ -26,6 +26,9 @@ pub(crate) struct AssetRequest {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatRecipe {
+    Sound {
+        brief: String,
+    },
     Image {
         brief: String,
         #[serde(default)]
@@ -50,6 +53,7 @@ enum ChatRecipe {
 impl Recipe {
     pub(super) fn agent_role(&self) -> Option<TaskRole> {
         match self {
+            Self::Sound { .. } => Some(TaskRole::Sounds),
             Self::Image { .. } => Some(TaskRole::Images),
             Self::ModelBrief { .. } => Some(TaskRole::Models),
             _ => None,
@@ -58,6 +62,7 @@ impl Recipe {
 }
 
 pub struct ChatOutput {
+    pub sound: bool,
     pub title: String,
     pub detail: String,
     pub shot: String,
@@ -161,6 +166,13 @@ impl Store {
             "For an image revision, choose one reference image or one source asset."
         );
         let (recipe, reference) = match recipe {
+            ChatRecipe::Sound { brief } => {
+                let reference = source
+                    .as_ref()
+                    .map(|_| source_file("Sounds", "sound.json"))
+                    .transpose()?;
+                (Recipe::Sound { brief }, reference)
+            }
             ChatRecipe::Image { brief, style } => {
                 let reference = match reference_image.as_deref() {
                     Some("chat") => Some(self.chat_reference_image(lead)?),
@@ -244,13 +256,20 @@ impl Store {
             style_image = preview;
         }
         let area = recipe.area();
-        notify(provider::ReplyUpdate::Activity(if area == "Images" {
-            "Generating an image…"
-        } else {
-            "Building a 3D model…"
+        notify(provider::ReplyUpdate::Activity(match area {
+            "Sounds" => "Generating a sound effect…",
+            "Images" => "Generating an image…",
+            _ => "Building a 3D model…",
         }));
         let settings = TaskSettings::defaults(&self.preferences_home, area)?;
-        let (selection, maker) = if let Some(role) = recipe.agent_role() {
+        let (selection, maker) = if area == "Sounds" && settings.elevenlabs {
+            ensure!(
+                (request.model.is_empty() || request.model == super::sound::HOSTED_MODEL)
+                    && request.effort.is_empty(),
+                "ElevenLabs SFX v3 is selected for Sound effects. Omit the chat model and reasoning effort."
+            );
+            (None, "ElevenLabs SFX v3".to_owned())
+        } else if let Some(role) = recipe.agent_role() {
             let selection = self
                 .policy_inference(
                     role,
@@ -327,10 +346,10 @@ impl Store {
             "INSERT INTO events(attempt,kind,summary) VALUES(?1,?2,?3)",
             params![
                 attempt,
-                if image.is_some() {
-                    "workshop/image"
-                } else {
-                    "workshop/model"
+                match job.recipe.area() {
+                    "Sounds" => "workshop/sound",
+                    "Images" => "workshop/image",
+                    _ => "workshop/model",
                 },
                 job.title
             ],
@@ -358,10 +377,10 @@ impl Store {
                       key AS shot, NULL AS path, NULL AS job, created AS stamp, rowid AS seq
                FROM preferences.screenshots WHERE project=?1 AND attempt IS ?2
                UNION ALL
-               SELECT e.summary, CASE e.kind WHEN 'workshop/model' THEN '3D model' ELSE 'Image' END,
+               SELECT e.summary, CASE e.kind WHEN 'workshop/model' THEN '3D model' WHEN 'workshop/sound' THEN 'Sound effect' ELSE 'Image' END,
                       '', i.path, a.job, e.recorded, e.id
                FROM events e LEFT JOIN event_images i ON i.event=e.id LEFT JOIN event_assets a ON a.event=e.id
-               WHERE e.attempt=?2 AND e.kind IN ('workshop/image','workshop/model')
+               WHERE e.attempt=?2 AND e.kind IN ('workshop/image','workshop/model','workshop/sound')
              ) ORDER BY stamp DESC,seq DESC")?;
         Ok(stmt
             .query_map(params![self.project.to_string_lossy(), attempt], |r| {
@@ -376,6 +395,7 @@ impl Store {
                     })
                     .or_else(|| image.clone());
                 Ok(ChatOutput {
+                    sound: r.get::<_, String>(1)? == "Sound effect",
                     title: r.get(0)?,
                     detail: format!("{} · {}", r.get::<_, String>(1)?, r.get::<_, String>(5)?),
                     shot: r.get(2)?,
@@ -391,6 +411,43 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_receipts_can_be_reopened_revised_and_imported() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = Store::open(&tmp.path().join("project"), &tmp.path().join("data"))?;
+        let lead = store.prepare("A short game cue", "", None)?;
+        let id = store.start_studio_job(&Recipe::Sound {
+            brief: "Chime".into(),
+        })?;
+        let job = store.studio_job(id)?;
+        let folder = job.folder(&store);
+        fs::create_dir_all(&folder)?;
+        let patch = serde_json::json!({"layers":[{"wave":"sine","start":0,"duration":0.2,"from_hz":550,"to_hz":900,"gain":1,"attack":0.01,"release":0.1}]});
+        let detail = super::super::sound::render(&folder, "Chime", &patch)?;
+        store.deliver_chat_asset(&job, lead.id, "sound designer", &detail)?;
+        assert!(store.messages_after(lead.id, 0)?[0].sound);
+        assert!(store.chat_outputs(Some(lead.id))?[0].sound);
+        assert_eq!(
+            store.find_studio_jobs("Sounds", "Chime", true, None)?.len(),
+            1
+        );
+        let (_, reference) = store.chat_recipe(
+            &lead,
+            ChatRecipe::Sound {
+                brief: "Softer".into(),
+            },
+            Some(id),
+            None,
+        )?;
+        assert_eq!(reference, Some(folder.join("sound.json")));
+        store.import_studio_asset(lead.id, id, "Audio/pickup.wav")?;
+        assert_eq!(
+            fs::read(store.work(lead.id).join("Audio/pickup.wav"))?,
+            fs::read(folder.join("sound.wav"))?
+        );
+        Ok(())
+    }
 
     #[test]
     fn revisions_can_read_files_attached_on_followups_only_in_their_own_chat() -> Result<()> {

@@ -4,6 +4,8 @@ pub mod packs;
 pub mod reports;
 pub mod settings;
 use settings::TaskSettings;
+mod sound;
+pub use sound::HOSTED_MODEL as SOUND_MODEL;
 mod textures;
 mod tools;
 
@@ -23,6 +25,7 @@ use tokio::sync::oneshot;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Recipe {
     Image { brief: String, style: String },
+    Sound { brief: String },
     Texture { material: String, seed: u32 },
     Model { template: String, name: String },
     ModelBrief { brief: String },
@@ -34,7 +37,10 @@ impl Recipe {
     pub fn uses_task_settings(&self) -> bool {
         matches!(
             self,
-            Self::Image { .. } | Self::ModelBrief { .. } | Self::Decompile { .. }
+            Self::Image { .. }
+                | Self::Sound { .. }
+                | Self::ModelBrief { .. }
+                | Self::Decompile { .. }
         )
     }
     pub fn area(&self) -> &'static str {
@@ -42,11 +48,14 @@ impl Recipe {
             Self::Image { .. } | Self::Texture { .. } => "Images",
             Self::Model { .. } | Self::ModelBrief { .. } | Self::Blend { .. } => "Models",
             Self::Decompile { .. } => "Ghidra",
+            Self::Sound { .. } => "Sounds",
         }
     }
     fn title(&self) -> String {
         let title = match self {
-            Self::Image { brief, .. } | Self::ModelBrief { brief } => brief.trim(),
+            Self::Image { brief, .. } | Self::Sound { brief } | Self::ModelBrief { brief } => {
+                brief.trim()
+            }
             Self::Texture { material, seed } => return format!("{material} tile · {seed}"),
             Self::Model { name, .. } => name.trim(),
             Self::Blend { source } | Self::Decompile { binary: source, .. } => source
@@ -66,6 +75,9 @@ impl Recipe {
         match self {
             Self::Image { brief, .. } => {
                 ensure!(!brief.trim().is_empty(), "Describe the image to generate.")
+            }
+            Self::Sound { brief } => {
+                ensure!(!brief.trim().is_empty(), "Describe the sound effect.")
             }
             Self::ModelBrief { brief } => {
                 ensure!(!brief.trim().is_empty(), "Describe the model to create.")
@@ -110,6 +122,7 @@ impl Job {
     pub fn filename(&self) -> &'static str {
         match self.recipe.area() {
             "Images" => "image.png",
+            "Sounds" => "sound.wav",
             "Models" => "model.glb",
             _ => "functions.c",
         }
@@ -195,8 +208,8 @@ impl Store {
     ) -> Result<()> {
         let job = self.studio_job(asset)?;
         ensure!(
-            job.state == "Ready" && matches!(job.recipe.area(), "Images" | "Models"),
-            "Choose a ready game image or model."
+            job.state == "Ready" && matches!(job.recipe.area(), "Images" | "Models" | "Sounds"),
+            "Choose a finished image, sound effect or model."
         );
         copy_to_work(
             &self.work(attempt),
@@ -277,7 +290,7 @@ impl Store {
     ) -> Result<Vec<Job>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare("SELECT id,title,state,detail,datetime(created,'localtime'),request FROM studio_jobs
-            WHERE (area=?1 OR (?1='Assets' AND area IN ('Images','Models'))) AND (instr(lower(title),lower(?2))>0 OR (area='Ghidra' AND
+            WHERE (area=?1 OR (?1='Assets' AND area IN ('Images','Models','Sounds'))) AND (instr(lower(title),lower(?2))>0 OR (area='Ghidra' AND
             (instr(lower(json_extract(request,'$.filter')),lower(?2))>0 OR EXISTS(
             SELECT 1 FROM decompile_records r WHERE r.job=id AND (instr(lower(r.symbols),lower(?2))>0 OR instr(r.input_sha,lower(?2))>0)))))
             AND (?3=0 OR state='Ready') ORDER BY id DESC LIMIT ?4")?;
@@ -476,6 +489,11 @@ impl Store {
         context: &BuildContext<'_>,
     ) -> Result<String> {
         let recipe = &job.recipe;
+        if let Recipe::Sound { brief } = recipe
+            && job.settings.elevenlabs
+        {
+            return sound::hosted(folder, brief, context.reference).await;
+        }
         let inference = match (recipe.agent_role(), context.inference) {
             (Some(role), None) => Some(
                 self.policy_inference(role, &job.settings.agent, "", "", "codex")
@@ -493,6 +511,20 @@ impl Store {
                     context.reference,
                 )
                 .await?
+            }
+            Recipe::Sound { brief } => {
+                let mut prompt = brief.clone();
+                if let Some(reference) = context.reference {
+                    prompt.push_str("\nPrevious sound design to revise:\n");
+                    prompt.push_str(&fs::read_to_string(reference)?);
+                }
+                let patch = provider::design_sound(
+                    folder,
+                    &prompt,
+                    inference.as_ref().context("Missing sound designer")?,
+                )
+                .await?;
+                return sound::render(folder, brief, &patch);
             }
             Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,
             Recipe::Model { .. } | Recipe::ModelBrief { .. } | Recipe::Blend { .. } => {

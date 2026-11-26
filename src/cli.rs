@@ -272,6 +272,12 @@ struct StudioAgentOptions {
 }
 #[derive(Subcommand)]
 enum StudioAction {
+    /// Design and render a game sound effect as a WAV file.
+    Sound {
+        brief: String,
+        #[command(flatten)]
+        agent: StudioAgentOptions,
+    },
     Prop {
         brief: String,
         #[command(flatten)]
@@ -338,6 +344,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
     let fresh = matches!(action, StudioAction::Decompile { fresh: true, .. });
     let agent = match &action {
         StudioAction::Image { agent, .. } => Some(("Images", agent)),
+        StudioAction::Sound { agent, .. } => Some(("Sounds", agent)),
         StudioAction::Prop { agent, .. } => Some(("Models", agent)),
         StudioAction::Decompile { agent, .. } => Some(("Ghidra", agent)),
         _ => None,
@@ -366,6 +373,16 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
                 "Enable --summary to use an AI model for a decompilation."
             );
         }
+        if area == "Sounds" && value.elevenlabs {
+            anyhow::ensure!(
+                agent
+                    .model
+                    .as_deref()
+                    .is_none_or(|m| m == crate::studio::SOUND_MODEL)
+                    && agent.max_effort.is_none(),
+                "ElevenLabs SFX v3 is enabled. Omit the chat model and reasoning effort, or select the local renderer in Settings → Tasks → Sound effects."
+            );
+        }
         if let Some(model) = &agent.model {
             value.agent.models = vec![model.clone()];
         }
@@ -375,6 +392,7 @@ fn studio(project: &Path, action: StudioAction) -> Result<()> {
         settings = Some(value);
     }
     let recipe = match action {
+        StudioAction::Sound { brief, .. } => Recipe::Sound { brief },
         StudioAction::Image { brief, style, .. } => Recipe::Image { brief, style },
         StudioAction::Texture { material, seed } => Recipe::Texture { material, seed },
         StudioAction::Model { template, name } => Recipe::Model { template, name },

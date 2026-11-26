@@ -358,7 +358,7 @@ class FixtureProvider {
                 studio=p.ContainsKey("ephemeral") && Object.Equals(p["ephemeral"],true);
                 string instructions = (string)p["developerInstructions"];
                 studioKind = instructions.StartsWith("Summarize the supplied") ? "summary" :
-                    instructions.StartsWith("Design a cohesive") ? "design" : "image";
+                    instructions.StartsWith("Design a game sound effect") ? "sound" : instructions.StartsWith("Design a cohesive") ? "design" : "image";
                 Send(new {id=id,result=new {thread=new {id=session}}});
             }
             if(method=="thread/loaded/list") Send(new {id=id,result=new {data=new[]{session}}});
@@ -377,6 +377,10 @@ class FixtureProvider {
                         if (File.Exists(Path.Combine(Dir,"summary.fail"))) {
                             Send(new {method="turn/completed",@params=new {threadId=session,turn=new {id=turn,status="failed",error=new {message="Summary fixture offline"}}}});
                         } else Done("The sample functions compute tile values.");
+                        continue;
+                    }
+                    if (studioKind == "sound") {
+                        Done(Json.Serialize(new {layers=new[]{new {wave="sine",start=0,duration=0.3,from_hz=550,to_hz=900,gain=0.8,attack=0.01,release=0.2}}}));
                         continue;
                     }
                     if (studioKind == "design") {
@@ -398,6 +402,7 @@ class FixtureProvider {
                 }
                 if (Mode("chat-assets")) {
                     object spec=null;
+                    if(message.StartsWith("Make a pickup sound")) spec=new {kind="sound",title="Coin pickup",brief="Two bright chimes"};
                     if(message.StartsWith("Draw a forest icon")) spec=new {kind="image",brief="Forest icon",model="fixture-deep",effort="high"};
                     if(message.StartsWith("Draw the moonlit harbor")) spec=new {kind="image",brief="Moonlit harbor"};
                     if(message.StartsWith("Refine the marked icon")) spec=new {kind="image",brief="Refined icon",reference_image="chat"};
