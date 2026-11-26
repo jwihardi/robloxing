@@ -233,19 +233,28 @@ function Test-ProviderTasks {
     Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'independent Antigravity image permission'
     Click 'Image generation'
     Click 'Tasks'
-    Wait-For { (Named 'Task defaults') -or (Named 'Worker defaults') } 'task settings opened'
+    Wait-For { Named 'Allowed models' } 'task settings opened'
     Click 'Image generation'
     Wait-For { (Named 'Allowed models') -and !(Named 'Any available model') } 'all image providers disabled'
-    Click 'Choose providers'
-    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Antigravity image permission'
-    Click 'Image generation'
-    Click 'Codex'
-    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered Codex image permission'
-    Click 'Image generation'
-    Click 'Tasks'
-    Wait-For { (Named 'Task defaults') -and (Named 'Workers') } 'worker defaults in task settings'
+    if ((Named 'Claude Code for Image generation') -or (Named 'Gemini CLI for Image generation')) { throw 'Unsupported image providers appeared' }
+    Click 'Antigravity for Image generation'
+    Wait-For { (Named 'Any available model') -and (Named 'Gemini Test') } 'Antigravity models under their provider'
+    Click 'Codex for Image generation'
+    Wait-For { Named 'fixture-deep' } 'Codex models under their provider'
+    Click 'fixture-deep'
+    Wait-For { (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'explicit image model selection'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,32,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,32,1)
+    Wait-For { (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'model focus survives a saved change'
+    Click 'fixture-deep'
+    Click 'Codex for Image generation'
+    Wait-For { !(Named 'fixture-deep') -and (Named 'Codex for Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'disabled provider hides its models'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,32,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,32,1)
+    Wait-For { (Named 'fixture-deep') -and (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'provider switch keeps focus and restores its saved model'
     Click 'Workers'
-    Wait-For { (Named 'Worker defaults') -and (Named 'Maximum worker effort') -and (Named 'fixture-fast') } 'worker model and effort defaults'
+    Wait-For { (Named 'Maximum worker effort') -and (Named 'fixture-fast') } 'worker model and effort defaults'
+    if ((Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -ne 'Off') { throw 'Image allowlist leaked into workers' }
     $auto = 'Auto-delegate project tasks'
     Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
     Click $auto
@@ -255,12 +264,96 @@ function Test-ProviderTasks {
     Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'remembered scheduling preference'
     Click $auto
     Click 'Image generation'
+    Wait-For { (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'image choice after changing tabs'
+    Click 'Antigravity for Image generation'
     Click 'Providers'
-    Wait-For { Named 'Workers' } 'provider details preserved'
+    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'inline permission also saved in provider settings'
+    Click 'Image generation'
+    Click 'Codex'
+    Wait-For { (Named 'Image generation').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'Codex permission shared by both settings pages'
     Click 'Codex'
     Wait-For { !(Named 'Workers') } 'collapsed provider'
     Click 'Close settings'
 }
+function Test-TaskModelLayout {
+    $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+    $toggle = [System.Windows.Automation.TogglePattern]::Pattern
+    $descendants = [System.Windows.Automation.TreeScope]::Descendants
+    $typeProperty = [System.Windows.Automation.AutomationElement]::ControlTypeProperty
+    function WindowSize([int]$w,[int]$h) {
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,8,8,[int]($w*$scale),[int]($h*$scale),0x14)
+    }
+    function PanelControls($type) {
+        (Named 'Image generation models').FindAll($descendants,
+            [System.Windows.Automation.PropertyCondition]::new($typeProperty,$type))
+    }
+    WindowSize 1240 700
+    Click 'Settings'
+    Click 'Tasks'
+    Click 'Image generation'
+    Wait-For { (Named 'fixture-option-28') -and (Named 'Gemini Test') -and !(Named 'Next models') } 'the entire catalog on one wide page'
+    $panel = (Named 'Image generation models').Current.BoundingRectangle
+    if ($panel.Width / $scale -lt 820) { throw "Task settings stopped short of the available width ($panel)" }
+    $first = (Named 'fixture-fast').Current.BoundingRectangle
+    $next = (Named 'fixture-deep').Current.BoundingRectangle
+    $last = (Named 'Gemini Test').Current.BoundingRectangle
+    if ([Math]::Abs($next.Top-$first.Top) -gt 1 -or $next.Left -lt $first.Right-1 -or
+        $last.Bottom -gt (Named 'Maximum task effort').Current.BoundingRectangle.Top) { throw 'Model choices overlap or fail to use columns' }
+    Save-PrivateWindow (Join-Path $root 'task-models-wide.png')
+
+    WindowSize 760 560
+    Wait-For { (Named 'Next models') -and !(Named 'fixture-option-28') } 'catalog reflow in a short window'
+    $seen = @()
+    for ($page = 1; $page -le 40; $page++) {
+        if (@(PanelControls ([System.Windows.Automation.ControlType]::ScrollBar)).Count) { throw 'A model panel has a scrollbar' }
+        $seen += @(PanelControls ([System.Windows.Automation.ControlType]::CheckBox) |
+            ForEach-Object { $_.Current.Name } | Where-Object { $_ -like 'fixture-*' })
+        if (Named 'fixture-option-28') {
+            Click 'fixture-option-28'
+            Wait-For { (Named 'fixture-option-28').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'selecting a late catalog entry'
+        }
+        $advance = Named 'Next models'
+        if (!$advance -or !$advance.Current.IsEnabled) { break }
+        $count = (PanelControls ([System.Windows.Automation.ControlType]::Text) |
+            ForEach-Object { $_.Current.Name } | Where-Object { $_ -match '^\d+ / \d+$' } | Select-Object -First 1).Split('/')[-1].Trim()
+        Click 'Next models'
+        Wait-For { Named ("{0} / {1}" -f ($page+1),$count) } 'next screenful of models'
+    }
+    $expected = @('fixture-fast','fixture-deep') + @(1..28 | ForEach-Object { 'fixture-option-{0:d2}' -f $_ })
+    if (@(Compare-Object $expected $seen).Count -or $expected.Count -ne $seen.Count) { throw 'Resizing hid or duplicated catalog entries' }
+    Save-PrivateWindow (Join-Path $root 'task-models-compact.png')
+    WindowSize 1240 700
+    Wait-For { !(Named 'Next models') -and (Named 'fixture-option-28').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'the selected model survives reflow'
+    Click 'Allow any model'
+    Wait-For { (Named 'fixture-option-28').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'restoring the unrestricted model policy'
+    Click 'Image generation'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,39,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,39,1)
+    Wait-For { Named 'Claude Code for Model design' } 'right arrow selects the next task'
+    [void][WorkshopPointer]::PostMessage($appWindow,0x100,35,1)
+    [void][WorkshopPointer]::PostMessage($appWindow,0x101,35,1)
+    Wait-For { Named 'Functions per run' } 'End selects the decompilation tab'
+    Click 'Generate an AI summary'
+    Wait-For { (Named 'Summary models') -and (Named 'Maximum summary effort') } 'independent AI summary controls'
+    Click 'Close settings'
+    Click 'Project tools'
+    Click 'Decompilation'
+    Click 'Run settings'
+    Wait-For { (Named 'Use task defaults').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'run inherits the task defaults'
+    if ((Named 'Codex for Decompilation') -or (Named 'fixture-fast').Current.IsEnabled) { throw 'Inherited run settings expose edits to shared permissions or defaults' }
+    Click 'Use task defaults'
+    Click 'fixture-fast'
+    Wait-For { (Named 'fixture-fast').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'independent model for this run'
+    Click 'Back to reports'
+    Click 'Settings'
+    Wait-For { (Named 'Summary models') -and (Named 'Any available model') } 'the run override left the global summary policy intact'
+    Click 'Close settings'
+    Click 'Custom run settings'
+    Wait-For { (Named 'fixture-fast').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'per-run selection survives leaving settings'
+    Click 'Use task defaults'
+    Click 'Back to reports'
+}
+
 function Save-PrivateWindow($path) {
     $rect = [WorkshopPointer+Rect]::new()
     if (![WorkshopPointer]::GetClientRect($appWindow,[ref]$rect)) { throw 'Could not measure the private Workshop window' }
@@ -362,9 +455,9 @@ function Test-NavigationLayout {
         Snapshot 'marketplace'
         Section 'Settings sections' 'Skills' 'Filter list'
         Snapshot 'skills'
-        Section 'Settings sections' 'Tasks' 'Task defaults'
+        Section 'Settings sections' 'Tasks' 'Allowed models'
         Click 'Workers'
-        Wait-For { Named 'Worker defaults' } 'worker settings'
+        Wait-For { Named 'Maximum worker effort' } 'worker settings'
         Snapshot 'worker-settings'
         Click 'Image generation'
         Section 'Settings sections' 'Notifications' "Notify me when I’m needed"
@@ -1060,6 +1153,7 @@ try {
     if ($headless.ExitCode -ne 0) { throw $headless.StandardError.ReadToEnd() }
 } finally { $headless.Dispose() }
 if ($UsageOnly) { [void](New-Item -ItemType File -Path (Join-Path $root 'catalog.hold')) }
+if ($ProviderTasksOnly) { [void](New-Item -ItemType File -Path (Join-Path $root 'large-task-catalog')) }
 $proc = [TestDesktop]::StartApp($fixtureApp, $project)
 try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
@@ -1116,6 +1210,7 @@ try {
     if ($GoalOnly) { Test-ChatGoals; return }
     if ($ProviderTasksOnly) {
         Test-ProviderTasks
+        Test-TaskModelLayout
         Write-Output "Provider task settings passed. Screenshot in $root"
         return
     }
@@ -1413,7 +1508,7 @@ try {
     Wait-For { !(Test-Path (Join-Path $env:CODEX_HOME 'skills/sample-skill')) } 'skill removal'
     if (!(Get-ChildItem (Join-Path $env:CODEX_HOME 'removed-skills') -Recurse -Filter SKILL.md)) { throw 'Missing archived skill' }
     Click 'Tasks'
-    Wait-For { Named 'Task defaults' } 'per-task defaults'
+    Wait-For { Named 'Allowed models' } 'per-task defaults'
     Click 'fixture-deep'
     Click 'Decompilation'
     Wait-For { (Named 'Functions per run') -and (Named 'Generate an AI summary') } 'local analysis controls'

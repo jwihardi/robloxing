@@ -1,4 +1,8 @@
 import { GoalEditor, GoalSummary } from "goal.slint";
+import { PickerOption, PolicyModel, EffortTrack, AgentPolicyFields } from "agent-policy.slint";
+export { PickerOption, PolicyModel, PolicyChoices } from "agent-policy.slint";
+import { TaskEditor, TaskControls } from "task-settings.slint";
+export { TaskControls, TaskProvider, TaskModelPage } from "task-settings.slint";
 import { Theme, ThemeColors, Action, RowAction, ActivityLine } from "common.slint";
 import { ReplyView } from "transcript.slint";
 export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
@@ -16,16 +20,14 @@ import { PackPage } from "asset-packs.slint";
 export { AssetPacks, PackRow, PackMember } from "asset-packs.slint";
 import { Studio, StudioPage, ModelInspector } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
-import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
+import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
 export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-model: bool, maker: string }
 export struct OutputItem { title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
-export struct PolicyModel { value: string, label: string, selected: bool }
 export struct SettingRow { id: string, label: string, detail: string, action: string, button: string, task-count: string }
 export enum PluginSection { recommended, installed, marketplace }
-export struct PickerOption { value: string, label: string }
 export struct MeterData { label: string, remaining: float, detail: string }
 export struct PickerData {
     models: [PickerOption], efforts: [PickerOption], model-index: int, effort-index: int,
@@ -126,194 +128,6 @@ component WorkerGroup inherits VerticalLayout {
             }
         }
     }
-}
-
-component EffortTrack inherits Rectangle {
-    in property <bool> enabled: true;
-    in property <[PickerOption]> levels;
-    in property <int> selected;
-    in property <string> name;
-    private property <int> dragging: -1;
-    out property <int> shown: dragging >= 0 ? dragging : selected;
-    private property <int> last: max(0, levels.length - 1);
-    private property <length> inset: 17px;
-    private property <length> span: self.width - 2 * inset;
-    callback commit(int);
-    callback dismiss();
-    function hit(x: length) -> int { return round(clamp((x - inset) / max(1px, span), 0, 1) * last); }
-    function pick(i: int) {
-        if root.enabled && levels.length > 0 { root.commit(clamp(i, 0, last)); }
-    }
-    accessible-role: slider; accessible-label: name;
-    accessible-value: max(0, shown); accessible-value-minimum: 0; accessible-value-maximum: last;
-    accessible-value-step: 1; accessible-orientation: horizontal; accessible-enabled: root.enabled && levels.length > 1;
-    accessible-description: shown >= 0 && shown < levels.length ? levels[shown].label : "Default";
-    accessible-action-set-value(v) => { if v.is-float() { root.pick(round(v.to-float())); } }
-    accessible-action-increment => { root.pick(root.shown + 1); }
-    accessible-action-decrement => { root.pick(root.shown - 1); }
-    forward-focus: keys;
-    border-radius: self.height / 2; border-width: keys.has-focus ? 1px : 0px; border-color: Theme.text;
-    rail := Rectangle {
-        x: 2px; width: parent.width - 4px; height: 30px; y: (parent.height - self.height)/2;
-        border-radius: 15px; background: Theme.track;
-    }
-    private property <length> thumb-x: inset + span * max(0, shown) / max(1,last);
-    if shown >= 0: Rectangle {
-        x: rail.x; y: rail.y; height: rail.height; width: thumb-x - self.x + 12px;
-        border-radius: 15px; background: Theme.text;
-    }
-    for level[i] in levels: Rectangle {
-        x: root.inset + root.span * i / max(1,root.last) - 2.5px;
-        y: (parent.height - self.height)/2; width: 5px; height: 5px; border-radius: 3px;
-        background: i <= root.shown ? transparent : Theme.muted;
-    }
-    if levels.length > 0 && shown >= 0: Rectangle {
-        x: thumb-x - 17px; y: (parent.height - self.height)/2; width: 34px; height: 34px;
-        border-radius: 17px; background: Theme.text; border-width: 1px; border-color: Theme.muted;
-    }
-    touch := TouchArea {
-        enabled: root.enabled && root.levels.length > 1; mouse-cursor: pointer;
-        pointer-event(e) => {
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                keys.focus(); root.dragging = root.hit(self.mouse-x);
-            } else if e.kind == PointerEventKind.up && root.dragging >= 0 {
-                root.pick(root.hit(self.mouse-x)); root.dragging = -1;
-            } else if e.kind == PointerEventKind.cancel { root.dragging = -1; }
-        }
-        moved => { if self.pressed && root.dragging >= 0 { root.dragging = root.hit(self.mouse-x); } }
-    }
-    keys := FocusScope {
-        focus-on-click: false; enabled: root.enabled && root.levels.length > 1;
-        key-pressed(e) => {
-            if e.text == Key.Escape { root.dismiss(); return accept; }
-            if e.text == Key.RightArrow || e.text == Key.UpArrow { root.pick(root.shown+1); return accept; }
-            if e.text == Key.LeftArrow || e.text == Key.DownArrow { root.pick(root.shown - 1); return accept; }
-            if e.text == Key.Home { root.pick(0); return accept; }
-            if e.text == Key.End { root.pick(root.last); return accept; }
-            return reject;
-        }
-    }
-}
-
-export struct PolicyChoices { has-provider:bool, blocked-models:bool, all-models:bool, allowed-names:string, models:[PolicyModel], levels:[PickerOption], cap-index:int }
-export global TaskControls {
-    in-out property <string> area:"Images";
-    in-out property <bool> for-run;
-    in property <bool> inherited;
-    in property <PolicyChoices> choices;
-    in property <int> function-limit;
-    in property <int> seconds;
-    in property <bool> summary;
-    in property <string> error;
-    callback change(string,string);
-    public function open(run:bool, area:string) { self.for-run=run; self.area=area; self.change("open",""); }
-}
-
-component AgentPolicyFields inherits VerticalLayout {
-    in property <bool> has-provider;
-    in property <bool> blocked-models;
-    in property <bool> inherited-policy;
-    in property <string> allowed-model-names;
-    in property <bool> all-models;
-    in property <[PolicyModel]> policy-models;
-    in property <[PickerOption]> cap-levels;
-    in property <int> cap-index;
-    in property <string> effort-name;
-    in property <length> list-height:108px;
-    callback change-policy(string,string);
-    callback dismiss();
-    spacing:5px;
-    Text { text: "Allowed models"; color: Theme.text; font-size: 14px; font-weight: 600; }
-    if root.inherited-policy || !root.has-provider || root.blocked-models: Text {
-        text: root.allowed-model-names; color: Theme.muted; font-size: 13px;
-        wrap: word-wrap; overflow: elide; max-height: 38px;
-    }
-    if !root.inherited-policy && root.has-provider: models := ScrollView {
-        height: min(model-list.preferred-height, root.list-height); content-width: self.visible-width; content-height: model-list.preferred-height;
-        model-list := VerticalLayout { width: models.visible-width - 5px; spacing: 0px; alignment: start;
-            RowAction { end-inset:32px; label: "Any available model"; height: 30px;
-                if root.all-models: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
-                accessible-checkable: true; accessible-checked: root.all-models;
-                activate => {root.change-policy("model","");} }
-            for model in root.policy-models: RowAction { end-inset:32px; label: model.label; height: 30px;
-                if model.selected: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
-                accessible-checkable: true; accessible-checked: model.selected;
-                activate => {root.change-policy("model",model.value);} }
-        }
-    }
-    Rectangle { height: 1px; background: Theme.line; }
-    HorizontalLayout { height: 22px;
-        Text { text: "Maximum effort"; font-size: 14px; color: Theme.text; font-weight: 600; horizontal-stretch: 1; }
-        Text { text: root.cap-index >= 0 && root.cap-index < root.cap-levels.length ? root.cap-levels[root.cap-index].label : "";
-            color: Theme.muted; font-size: 14px; }
-    }
-    if !root.inherited-policy && root.has-provider: EffortTrack { height: 34px; name: root.effort-name;
-        enabled: root.cap-levels.length > 1;
-        opacity: self.enabled ? 1 : 0.45; levels: root.cap-levels; selected: root.cap-index;
-        commit(i) => { if self.enabled {root.change-policy("effort",root.cap-levels[i].value);} }
-        dismiss => {root.dismiss();} }
-}
-
-component TaskEditor inherits VerticalLayout {
-    in property <bool> catalog-ready;
-    in property <string> catalog-status;
-    callback reload();
-    callback back();
-    callback choose-providers();
-    in property <bool> has-project;
-    in property <bool> auto-delegate;
-    in property <bool> parallel-workers;
-    callback schedule(bool,bool);
-    private property <bool> workers:TaskControls.area=="Workers";
-    private property <bool> local:TaskControls.area=="Ghidra";
-    private property <bool> inherited:TaskControls.for-run && TaskControls.inherited;
-    private property <string> title:local ? "Decompilation" : TaskControls.area=="Models" ? "Model design" : "Image generation";
-    spacing:12px; alignment:start;
-    if !TaskControls.for-run: HorizontalLayout { height:34px; alignment:start; spacing:3px;
-        for tab[i] in ["Workers","Images","Models","Ghidra"]: Action {
-            label:["Workers","Image generation","Model design","Decompilation"][i]; width:[78px,130px,110px,120px][i]; height:34px;
-            selected:TaskControls.area==tab; activate=>{TaskControls.open(false,tab);}
-        }
-    }
-    HorizontalLayout { height:34px; spacing:8px;
-        Text { text:TaskControls.for-run ? root.title + " settings" : root.workers ? "Worker defaults" : "Task defaults";
-            vertical-alignment:center; horizontal-stretch:1; font-size:21px; font-weight:600; color:Theme.text; }
-        if !root.local || TaskControls.summary: Action { label:"Choose providers"; width:144px; glyph:"\u{e77b}"; activate=>{root.choose-providers();} }
-    }
-    Text { text:TaskControls.for-run ? "Changes apply to the next run." : root.workers ? "Used across projects unless a chat has its own worker settings." : root.local ? "Used across projects for decompilation." : "The lead uses these choices when you ask for an asset in chat.";
-        font-size:14px; color:Theme.muted; wrap:word-wrap; }
-    if TaskControls.for-run: CheckBox { text:"Use task defaults"; checked:TaskControls.inherited; toggled=>{TaskControls.change(self.checked ? "inherit" : "customize","");} }
-    Rectangle { height:1px; background:Theme.line; }
-    if root.local: HorizontalLayout { height:36px; spacing:12px;
-        Text { text:"Functions per run"; color:Theme.text; vertical-alignment:center; horizontal-stretch:1; }
-        SpinBox { width:108px; accessible-label:"Functions per run"; enabled:!root.inherited; minimum:1; maximum:256;
-            value:TaskControls.function-limit; edited(v)=>{TaskControls.change("functions",v);}}
-    }
-    if root.local: HorizontalLayout { height:36px; spacing:12px;
-        Text { text:"Seconds per function"; color:Theme.text; vertical-alignment:center; horizontal-stretch:1; }
-        SpinBox { width:108px; accessible-label:"Seconds per function"; enabled:!root.inherited; minimum:1; maximum:120;
-            value:TaskControls.seconds; edited(v)=>{TaskControls.change("seconds",v);}}
-    }
-    if root.local: CheckBox { text:"Generate an AI summary"; enabled:!root.inherited; checked:TaskControls.summary;
-        toggled=>{TaskControls.change("summary",self.checked ? "true" : "false");} }
-    if root.local: Text { text:"Summaries send up to 48 KiB of saved pseudocode to the selected model."; wrap:word-wrap; color:Theme.muted; font-size:13px; }
-    if !root.local || TaskControls.summary: AgentPolicyFields {
-        blocked-models:TaskControls.choices.blocked-models; has-provider:TaskControls.choices.has-provider; inherited-policy:root.inherited; allowed-model-names:TaskControls.choices.allowed-names;
-        all-models:TaskControls.choices.all-models; policy-models:TaskControls.choices.models;
-        cap-levels:TaskControls.choices.levels; cap-index:TaskControls.choices.cap-index;
-        list-height:116px; effort-name:root.local ? "Maximum summary effort" : root.workers ? "Maximum worker effort" : "Maximum task effort";
-        change-policy(f,v)=>{TaskControls.change(f,v);} dismiss=>{root.back();}
-    }
-    if (!root.local || TaskControls.summary) && !root.catalog-ready: Text { text:root.catalog-status; color:Theme.muted; font-size:13px; wrap:word-wrap; }
-    if (!root.local || TaskControls.summary) && !root.catalog-ready: Action { label:"Refresh models"; width:124px; enabled:root.catalog-status!="Loading models…"; activate=>{root.reload();} }
-    if root.workers && root.has-project: VerticalLayout {
-        spacing:4px;
-        Rectangle { height:1px; background:Theme.line; }
-        Text { text:"This project"; height:30px; vertical-alignment:center; color:Theme.text; font-size:14px; font-weight:600; }
-        CheckBox { checked:root.auto-delegate; text:"Auto-delegate project tasks"; toggled=>{root.schedule(self.checked,root.parallel-workers);} }
-        CheckBox { checked:root.parallel-workers; text:"Allow two workers in this project"; toggled=>{root.schedule(root.auto-delegate,self.checked);} }
-    }
-    if TaskControls.error!="": Text { text:TaskControls.error; color:Theme.scarce; wrap:word-wrap; font-size:13px; }
 }
 
 component InferencePicker inherits Rectangle {
@@ -540,7 +354,7 @@ export component Desk inherits Window {
         root.settings-tab = tab; root.settings-provider = provider;
         if tab == "Providers" && root.expanded-provider != "" { root.show-provider-roles(root.expanded-provider); }
         root.load-settings(false);
-        if tab=="Tasks" { TaskControls.open(false,TaskControls.area); }
+        if tab=="Tasks" { TaskControls.open(false,TaskControls.settings-area); }
     }
     function choose-providers() {
         if root.settings-open {root.visit-settings("Providers",root.settings-provider);}
@@ -1004,12 +818,10 @@ export component Desk inherits Window {
     if Studio.inspecting && !root.studio-open && !root.settings-open: ModelInspector { x: rail.width; width: root.width - self.x; height: root.height; }
     if root.studio-open && Studio.editing-run: Rectangle {
         x:rail.width; width:root.width - self.x; height:root.height; background:Theme.canvas;
-        VerticalLayout { x:(parent.width - self.width)/2; width:min(520px,parent.width - 40px); y:24px; height:parent.height - 48px; spacing:16px;
+        VerticalLayout { x:24px; width:parent.width - 48px; y:20px; height:parent.height - 40px; spacing:12px;
             Action { height:36px; label:"Back to reports"; glyph:"\u{e72b}"; width:142px; activate=>{Studio.editing-run=false;} }
-            run-scroll:=ScrollView { vertical-stretch:1; content-width:self.visible-width; content-height:run-editor.preferred-height;
-                run-editor:=TaskEditor { width:run-scroll.visible-width - 8px; catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
-                    reload=>{root.reload-models();} back=>{Studio.editing-run=false;} choose-providers=>{root.choose-providers();} }
-            }
+            TaskEditor { vertical-stretch:1; catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
+                reload=>{root.reload-models();} back=>{Studio.editing-run=false;} choose-providers=>{root.choose-providers();} }
         }
     }
     if root.album-open && root.viewing-shot == "": Rectangle {
@@ -1060,14 +872,14 @@ export component Desk inherits Window {
     if root.settings-open: Rectangle {
         x: rail.width; width: root.width - self.x; height: root.height; background: Theme.canvas;
         VerticalLayout {
-            x: (parent.width - self.width) / 2; width: min(710px, parent.width - 48px);
+            x: (parent.width - self.width) / 2; width: root.settings-tab == "Tasks" ? parent.width - 48px : min(710px, parent.width - 48px);
             y: 25px; height: parent.height - 45px; spacing: 12px;
             HorizontalLayout { height: 40px;
                 Text { text: root.settings-tab == "Tasks" ? "Task settings" : root.settings-tab; font-size: 28px; font-weight: 600; vertical-alignment: center; color: Theme.text; horizontal-stretch: 1; }
                 if !root.context-visible: Action { label:"Settings sections"; glyph:"\u{e700}"; width:152px; activate=>{root.toggle-context();} }
                 Action { label: "Close settings"; icon-only: true; glyph: "\u{e711}"; width: 38px; activate => {root.close-settings();} }
             }
-            Rectangle { height: 1px; background: Theme.line; }
+            if root.settings-tab != "Tasks": Rectangle { height: 1px; background: Theme.line; }
             if root.settings-tab == "Plugins" || root.settings-tab == "Skills": HorizontalLayout { height: 36px; spacing: 4px;
                 for provider in ["Codex", "Claude Code", "Antigravity"]: Action { label: provider; width: provider == "Codex" ? 70px : 109px;
                     selected: provider == root.settings-provider; enabled: !root.settings-working;
@@ -1112,13 +924,11 @@ export component Desk inherits Window {
                 Text { text: "Show a Windows notification when a background run needs your input or has work ready to review.";
                     color: Theme.muted; font-size: 14px; wrap: word-wrap; }
             }
-            if root.settings-tab=="Tasks": defaults-scroll:=ScrollView {
-                vertical-stretch:1; content-width:self.visible-width; content-height:defaults-editor.preferred-height;
-                defaults-editor:=TaskEditor { width:defaults-scroll.visible-width - 8px;
-                    has-project:root.project != ""; auto-delegate:root.auto-delegate; parallel-workers:root.parallel-workers;
-                    schedule(auto,parallel)=>{root.save-scheduling(auto,parallel);}
-                    catalog-ready:root.catalog-ready; catalog-status:root.catalog-status;
-                    reload=>{root.reload-models();} back=>{root.close-settings();} choose-providers=>{root.choose-providers();} }
+            if root.settings-tab == "Tasks": TaskEditor {
+                vertical-stretch: 1; has-project: root.project != ""; auto-delegate: root.auto-delegate; parallel-workers: root.parallel-workers;
+                schedule(auto,parallel) => { root.save-scheduling(auto,parallel); }
+                catalog-ready: root.catalog-ready; catalog-status: root.catalog-status;
+                reload => { root.reload-models(); } back => { root.close-settings(); } choose-providers => { root.choose-providers(); }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": preference-list := ListView { vertical-stretch: 1;
                 for row in root.settings-rows: item := VerticalLayout {

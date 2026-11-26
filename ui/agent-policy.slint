@@ -1,0 +1,118 @@
+import { Theme, RowAction } from "common.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct PickerOption { value: string, label: string }
+export struct PolicyModel { value: string, label: string, selected: bool }
+export struct PolicyChoices { has-provider:bool, blocked-models:bool, all-models:bool, allowed-names:string, models:[PolicyModel], levels:[PickerOption], cap-index:int }
+
+export component EffortTrack inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <[PickerOption]> levels;
+    in property <int> selected;
+    in property <string> name;
+    private property <int> dragging: -1;
+    out property <int> shown: dragging >= 0 ? dragging : selected;
+    private property <int> last: max(0, levels.length - 1);
+    private property <length> inset: 17px;
+    private property <length> span: self.width - 2 * inset;
+    callback commit(int);
+    callback dismiss();
+    function hit(x: length) -> int { return round(clamp((x - inset) / max(1px, span), 0, 1) * last); }
+    function pick(i: int) {
+        if root.enabled && levels.length > 0 { root.commit(clamp(i, 0, last)); }
+    }
+    accessible-role: slider; accessible-label: name;
+    accessible-value: max(0, shown); accessible-value-minimum: 0; accessible-value-maximum: last;
+    accessible-value-step: 1; accessible-orientation: horizontal; accessible-enabled: root.enabled && levels.length > 1;
+    accessible-description: shown >= 0 && shown < levels.length ? levels[shown].label : "Default";
+    accessible-action-set-value(v) => { if v.is-float() { root.pick(round(v.to-float())); } }
+    accessible-action-increment => { root.pick(root.shown + 1); }
+    accessible-action-decrement => { root.pick(root.shown - 1); }
+    forward-focus: keys;
+    border-radius: self.height / 2; border-width: keys.has-focus ? 1px : 0px; border-color: Theme.text;
+    rail := Rectangle {
+        x: 2px; width: parent.width - 4px; height: 30px; y: (parent.height - self.height)/2;
+        border-radius: 15px; background: Theme.track;
+    }
+    private property <length> thumb-x: inset + span * max(0, shown) / max(1,last);
+    if shown >= 0: Rectangle {
+        x: rail.x; y: rail.y; height: rail.height; width: thumb-x - self.x + 12px;
+        border-radius: 15px; background: Theme.text;
+    }
+    for level[i] in levels: Rectangle {
+        x: root.inset + root.span * i / max(1,root.last) - 2.5px;
+        y: (parent.height - self.height)/2; width: 5px; height: 5px; border-radius: 3px;
+        background: i <= root.shown ? transparent : Theme.muted;
+    }
+    if levels.length > 0 && shown >= 0: Rectangle {
+        x: thumb-x - 17px; y: (parent.height - self.height)/2; width: 34px; height: 34px;
+        border-radius: 17px; background: Theme.text; border-width: 1px; border-color: Theme.muted;
+    }
+    touch := TouchArea {
+        enabled: root.enabled && root.levels.length > 1; mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                keys.focus(); root.dragging = root.hit(self.mouse-x);
+            } else if e.kind == PointerEventKind.up && root.dragging >= 0 {
+                root.pick(root.hit(self.mouse-x)); root.dragging = -1;
+            } else if e.kind == PointerEventKind.cancel { root.dragging = -1; }
+        }
+        moved => { if self.pressed && root.dragging >= 0 { root.dragging = root.hit(self.mouse-x); } }
+    }
+    keys := FocusScope {
+        focus-on-click: false; enabled: root.enabled && root.levels.length > 1;
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.dismiss(); return accept; }
+            if e.text == Key.RightArrow || e.text == Key.UpArrow { root.pick(root.shown+1); return accept; }
+            if e.text == Key.LeftArrow || e.text == Key.DownArrow { root.pick(root.shown - 1); return accept; }
+            if e.text == Key.Home { root.pick(0); return accept; }
+            if e.text == Key.End { root.pick(root.last); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component AgentPolicyFields inherits VerticalLayout {
+    in property <bool> has-provider;
+    in property <bool> blocked-models;
+    in property <bool> inherited-policy;
+    in property <string> allowed-model-names;
+    in property <bool> all-models;
+    in property <[PolicyModel]> policy-models;
+    in property <[PickerOption]> cap-levels;
+    in property <int> cap-index;
+    in property <string> effort-name;
+    in property <length> list-height:108px;
+    callback change-policy(string,string);
+    callback dismiss();
+    spacing:5px;
+    Text { text: "Allowed models"; color: Theme.text; font-size: 14px; font-weight: 600; }
+    if root.inherited-policy || !root.has-provider || root.blocked-models: Text {
+        text: root.allowed-model-names; color: Theme.muted; font-size: 13px;
+        wrap: word-wrap; overflow: elide; max-height: 38px;
+    }
+    if !root.inherited-policy && root.has-provider: models := ScrollView {
+        height: min(model-list.preferred-height, root.list-height); content-width: self.visible-width; content-height: model-list.preferred-height;
+        model-list := VerticalLayout { width: models.visible-width - 5px; spacing: 0px; alignment: start;
+            RowAction { end-inset:32px; label: "Any available model"; height: 30px;
+                if root.all-models: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
+                accessible-checkable: true; accessible-checked: root.all-models;
+                activate => {root.change-policy("model","");} }
+            for model in root.policy-models: RowAction { end-inset:32px; label: model.label; height: 30px;
+                if model.selected: Text { x: parent.width - 24px; width: 20px; text: "✓"; color: Theme.text; vertical-alignment: center; }
+                accessible-checkable: true; accessible-checked: model.selected;
+                activate => {root.change-policy("model",model.value);} }
+        }
+    }
+    Rectangle { height: 1px; background: Theme.line; }
+    HorizontalLayout { height: 22px;
+        Text { text: "Maximum effort"; font-size: 14px; color: Theme.text; font-weight: 600; horizontal-stretch: 1; }
+        Text { text: root.cap-index >= 0 && root.cap-index < root.cap-levels.length ? root.cap-levels[root.cap-index].label : "";
+            color: Theme.muted; font-size: 14px; }
+    }
+    if !root.inherited-policy && root.has-provider: EffortTrack { height: 34px; name: root.effort-name;
+        enabled: root.cap-levels.length > 1;
+        opacity: self.enabled ? 1 : 0.45; levels: root.cap-levels; selected: root.cap-index;
+        commit(i) => { if self.enabled {root.change-policy("effort",root.cap-levels[i].value);} }
+        dismiss => {root.dismiss();} }
+}

@@ -341,8 +341,12 @@ class FixtureProvider {
                     while (Mode("catalog.hold")) Thread.Sleep(40);
                 }
                 var low=new {reasoningEffort="low"}; var high=new {reasoningEffort="high"};
-                Send(new {id=id,result=new {data=new[]{new {model="fixture-fast",defaultReasoningEffort="low",supportedReasoningEfforts=new[]{low},isDefault=true},
-                    new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}}}});
+                var models=new List<object> {new {model="fixture-fast",defaultReasoningEffort="low",supportedReasoningEfforts=new[]{low},isDefault=true},
+                    new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}};
+                if (Mode("large-task-catalog")) {
+                    for (int i=1;i<=28;i++) models.Add(new {model="fixture-option-"+i.ToString("00"),defaultReasoningEffort="low",supportedReasoningEfforts=new[]{low},isDefault=false});
+                }
+                Send(new {id=id,result=new {data=models}});
             }
             if(method=="thread/start" || method=="thread/resume"){
                 if(Mode("capture-mcp")) File.WriteAllText(Path.Combine(Dir,"mcp-codex.json"),Json.Serialize(p["config"]));

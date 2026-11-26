@@ -49,6 +49,8 @@ During a run, Enter steers the lead. The arrow beside Send opens delivery option
 
 ## Project tools, settings and album
 
+Task settings uses the full content pane. One tab selects the task. Each supported provider has a heading and an enable switch, with its models arranged in columns underneath. Reserve the bottom of the pane for the effort limit and worker scheduling. When a catalog exceeds the available space, page the grid and repeat the provider heading on continuations. The per-run editor uses the same grid with read-only provider permissions.
+
 **Asset packs** sits beside **Saved assets** in Tools. The sidebar selects a project pack. Its art direction, member thumbnails and selected model preview share the main pane. On narrow windows the member list sits above the preview. **Use in chat** adds a reference to the current draft. Import and export operate on portable Blender library folders.
 
 Chat is the creation surface for images and 3D models. Show the finished preview, its maker and the relevant actions together in the transcript. Outputs opens the images, models and screenshots for this chat. Tools contains a searchable project asset library and the local decompilation editor. Decompilation run settings apply to one analysis. Global task defaults live in Settings alongside providers, plugins, skills and appearance. Keep manual installation fields behind **Install from source**. Expand a provider to toggle the tasks it may handle. Show the number of enabled tasks beside its name, and keep account actions separate from the toggles. Closing Settings returns to the previous destination and selected output. The album uses a responsive thumbnail grid with the project and capture date under each image.

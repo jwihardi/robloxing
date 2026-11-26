@@ -78,6 +78,7 @@ export component Action inherits Rectangle {
     in property <color> glyph-color: root.selected ? Theme.accent : Theme.muted;
     in property <string> label-font: "Segoe UI";
     in property <bool> enabled: true;
+    in property <bool> tab-stop: true;
     out property <bool> hovered: area.has-hover;
     out property <bool> focused: focus.has-focus;
     callback activate();
@@ -107,7 +108,7 @@ export component Action inherits Rectangle {
         }
     }
     area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.activate(); } }
-    focus := FocusScope { focus-on-click: false; width: 0px; enabled: root.enabled;
+    focus := FocusScope { focus-on-click: false; width: 0px; enabled: root.enabled && root.tab-stop;
         key-pressed(e) => { if e.text == Key.Return || e.text == Key.Space { root.activate(); return accept; } return reject; }
     }
 }
