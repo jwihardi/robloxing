@@ -52,6 +52,7 @@ impl Store {
                 text,
                 files: serde_json::from_str(&files)?,
                 queued_id: Some(id),
+                followup: true,
             };
             self.direction_unavailable(
                 attempt,
@@ -78,7 +79,7 @@ impl Store {
         );
         let written = self.db.lock().unwrap().execute(
             "INSERT INTO queued_messages(attempt,body,files)
-             SELECT id,?2,?3 FROM attempts WHERE id=?1 AND (state='running' OR (?4 AND state IN ('review','cancelled','failed','interrupted')))",
+             SELECT id,?2,?3 FROM attempts WHERE id=?1 AND (state='running' OR (?4 AND state IN ('review','cancelled','failed','interrupted','accepted')))",
             params![chat, message.text, serde_json::to_string(&message.files)?, between_turns],
         )?;
         ensure!(
@@ -147,6 +148,7 @@ impl Store {
             text,
             files: serde_json::from_str(&files)?,
             queued_id: Some(id),
+            followup: true,
         };
         for file in &followup.files {
             ensure!(

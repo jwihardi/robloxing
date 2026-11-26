@@ -1353,7 +1353,15 @@ try {
             }
             if (!$panelFound) { throw 'The open code panel did not switch to Solarized Light' }
         } finally { $render.Dispose() }
-        "Formatted transcript and responsive theme checks passed. Screenshots in $root"
+        [void](New-Item -ItemType File -Path (Join-Path $root 'linked-files'))
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Send an archive and a preview')
+        Click 'Send message'
+        Wait-For { (Test-Path -LiteralPath (Join-Path $project 'Game.zip')) -and (Named 'Game.zip') -and (Named 'Lobby preview').Current.BoundingRectangle.Height -gt 80 } 'applied project, linked archive and inline image'
+        Save-PrivateWindow (Join-Path $root 'chat-deliverable.png')
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Revise that file in this chat')
+        Click 'Send message'
+        Wait-For { (Get-Content -LiteralPath (Join-Path $project 'delivery-note.txt') -Raw) -eq 'revised' } 'second applied edit in the same chat'
+        "Formatted transcript, linked files, image previews and continued edits passed. Screenshots in $root"
         return
     }
     if ($HarnessOnly) {

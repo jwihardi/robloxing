@@ -218,7 +218,7 @@ class FixtureProvider {
             }
             return;
         }
-        if(Array.IndexOf(args,"--acp")>=0 || (args.Length==2 && args[0]=="acp" && args[1]=="--stdio")){Acp(args[0]=="acp" ? "antigravity" : "gemini");return;}
+        if(Array.IndexOf(args,"--acp")>=0 || (args.Length>=2 && args[0]=="acp" && Array.IndexOf(args,"--stdio")>=0 && Array.IndexOf(args,"--dangerously-skip-permissions")>=0)){Acp(args[0]=="acp" ? "antigravity" : "gemini");return;}
         if (args.Length == 1 && args[0] == "models") {
             Console.WriteLine("gemini-test-high    Gemini Test (High)");
             Console.WriteLine("gemini-test-low     Gemini Test (Low)");
@@ -351,7 +351,7 @@ class FixtureProvider {
             if(method=="thread/start" || method=="thread/resume"){
                 if(Mode("capture-mcp")) File.WriteAllText(Path.Combine(Dir,"mcp-codex.json"),Json.Serialize(p["config"]));
                 if (Mode("check-isolation") && (Environment.GetEnvironmentVariable("CODEX_WINDOWS_REGISTERED_CORE") != null ||
-                    !Object.Equals(p["sandbox"], "workspace-write") || !Object.Equals(p["approvalPolicy"], "never")))
+                    !Object.Equals(p["sandbox"], "danger-full-access") || !Object.Equals(p["approvalPolicy"], "never")))
                     throw new InvalidDataException("Unexpected provider process identity or sandbox settings");
                 session=p.ContainsKey("threadId")?(string)p["threadId"]:ThreadId;
                 worker=((string)p["developerInstructions"]).StartsWith("You are a Workshop worker");
@@ -436,6 +436,20 @@ class FixtureProvider {
                     continue;
                 }
                 if (Mode("small-talk")) { Done("Hello!"); continue; }
+                if (Mode("linked-files")) {
+                    var note = "delivery-note.txt";
+                    if (File.Exists(note)) {
+                        File.WriteAllText(note,"revised");
+                        Done("Updated the same file.");
+                    } else {
+                        File.WriteAllText(note,"first");
+                        File.WriteAllBytes("Lobby.png",Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAIAAABChommAAAAEUlEQVR4nGNoe3CAIGIYVQQAL2HOQZG1B4YAAAAASUVORK5CYII="));
+                        var zip = new byte[22]; zip[0]=80; zip[1]=75; zip[2]=5; zip[3]=6;
+                        File.WriteAllBytes("Game.zip",zip);
+                        Done("**Ready.** [Download the project](Game.zip)\n\n![Lobby preview](Lobby.png)");
+                    }
+                    continue;
+                }
                 if (Mode("formatted-reply")) {
                     Done("## Project structure\n\nThe app opens the **current folder** and remembers the last active chat.\n\n```rust\nfn workspace_title(name: &str) -> String {\n    // Keep the folder name in the title bar.\n    format!(\"Workshop / {}\", name)\n}\n```\n\nCall `workspace_title` when the selected project changes.");
                     continue;

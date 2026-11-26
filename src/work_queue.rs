@@ -30,7 +30,8 @@ fn page(db: &Connection, offset: usize, limit: usize) -> Result<Vec<WorkItem>> {
            FROM task_heads h JOIN attempts a ON a.id=h.attempt JOIN tasks t ON t.id=h.task
            LEFT JOIN chat_goals g ON g.attempt=a.id LEFT JOIN checkpoints c ON c.lead=a.id
            LEFT JOIN open_workshop_blockers b ON b.attempt=a.id
-           WHERE a.state NOT IN ('accepted','discarded')
+           WHERE a.state NOT IN ('accepted','discarded') OR (a.state='accepted' AND EXISTS (
+               SELECT 1 FROM queued_messages q WHERE q.attempt=a.id AND q.sending=0))
          ), ranked AS (
            SELECT *, CASE
              WHEN state='applying' AND action LIKE 'Acceptance needs attention.%' THEN 0

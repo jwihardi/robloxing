@@ -88,7 +88,7 @@ pub(crate) fn chat_reason(
     if end.state == "failed" {
         return Ok(Some("Chat needs your attention"));
     }
-    if end.state != "review" {
+    if !matches!(end.state.as_str(), "accepted" | "review") {
         return Ok(None);
     }
     if had_active_goal && let Some(goal) = store.chat_goal(end.id)? {
@@ -114,7 +114,9 @@ pub(crate) fn chat_reason(
     if (changes || checkpoint.is_some() && checkpoint != previous_checkpoint)
         && store.candidate_ready(end, &store.workers(end.id)?)?
     {
-        return Ok(Some(if changes {
+        return Ok(Some(if end.state == "accepted" {
+            "Project updated"
+        } else if changes {
             "Changes ready for review"
         } else {
             "Decisions ready for review"

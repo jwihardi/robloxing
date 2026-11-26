@@ -44,7 +44,7 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
     args.extend([
         "--include-partial-messages",
         "--permission-mode",
-        "acceptEdits",
+        "bypassPermissions",
         "--disallowedTools",
         "Agent,Task,Workflow,EnterWorktree,ExitWorktree",
         "--allowedTools",

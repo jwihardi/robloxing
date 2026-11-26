@@ -353,6 +353,21 @@ impl Store {
                 _ => {}
             }
         }
+        let pending = {
+            let db = store.db.lock().unwrap();
+            let mut q = db.prepare("SELECT attempt FROM pending_chat_applies ORDER BY attempt")?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?
+        };
+        for id in pending {
+            if let Err(e) = store.apply_finished_chat(id) {
+                store.status(
+                    id,
+                    "failed",
+                    &format!("Could not apply changes to the project. {e:#}"),
+                )?;
+            }
+        }
         Ok(store)
     }
 
@@ -518,7 +533,7 @@ impl Store {
         self.event_with_image(id, "workshop/image", Some(caption), Some(&path), None)
     }
     pub fn set_chat_inference(&self, id: i64, model: &str, effort: &str) -> Result<()> {
-        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3,provider=?4 WHERE id=?1 AND (session='' OR provider=?4) AND state IN ('review','failed','interrupted','cancelled')", params![id,model,effort,provider::provider_for(model)])?;
+        let n = self.db.lock().unwrap().execute("UPDATE attempts SET model=?2,effort=?3,provider=?4 WHERE id=?1 AND (session='' OR provider=?4) AND state IN ('review','failed','interrupted','cancelled','accepted','discarded')", params![id,model,effort,provider::provider_for(model)])?;
         ensure!(
             n == 1,
             "Change models between responses. Start a new chat to switch providers."
@@ -711,6 +726,16 @@ impl Store {
     }
 
     pub fn finish(&self, id: i64, state: &str, action: &str) -> Result<()> {
+        self.finish_turn(id, state, action, false)
+    }
+
+    pub(crate) fn finish_turn(
+        &self,
+        id: i64,
+        state: &str,
+        action: &str,
+        apply: bool,
+    ) -> Result<()> {
         let a = self.attempt(id)?;
         let (candidate, bytes) = git::capture(&self.work(id), &a.base)?;
         let patch = if bytes.is_empty() {
@@ -743,7 +768,32 @@ impl Store {
              WHERE attempt=?1 AND status='verifying'",
             params![id, state],
         )?;
+        if apply && state == "review" {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_chat_applies VALUES(?1)",
+                [id],
+            )?;
+        }
         tx.commit()?;
+        drop(db);
+        if apply && state == "review" {
+            self.apply_finished_chat(id)?;
+        }
+        Ok(())
+    }
+
+    fn apply_finished_chat(&self, id: i64) -> Result<()> {
+        let a = self.attempt(id)?;
+        if a.state == "review"
+            && (!a.patch.is_empty() || self.has_checkpoint(id)?)
+            && self.candidate_ready(&a, &self.workers(id)?)?
+        {
+            return self.accept(id);
+        }
+        self.db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM pending_chat_applies WHERE attempt=?1", [id])?;
         Ok(())
     }
     fn patch_path(&self, a: &Attempt) -> PathBuf {
@@ -822,8 +872,9 @@ impl Store {
     fn decide(&self, id: i64, state: &str, action: &str) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        tx.execute("DELETE FROM pending_chat_applies WHERE attempt=?1", [id])?;
         tx.execute(
-            "INSERT INTO decisions(attempt,decision) VALUES(?1,?2)",
+            "INSERT INTO decisions(attempt,decision) VALUES(?1,?2) ON CONFLICT(attempt) DO UPDATE SET decision=excluded.decision,recorded=CURRENT_TIMESTAMP",
             params![id, state],
         )?;
         tx.execute(

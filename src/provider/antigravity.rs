@@ -122,6 +122,7 @@ pub(super) async fn studio(
         text: request,
         files: prompt.files.clone(),
         queued_id: None,
+        followup: false,
     };
     gemini::rpc(
         &mut io.stdin,

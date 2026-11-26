@@ -50,7 +50,8 @@ fn command(dir: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+        cmd.args(["-c", "core.longpaths=true"])
+            .creation_flags(0x08000000);
     }
     cmd
 }

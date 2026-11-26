@@ -1,6 +1,6 @@
 # Workshop
 
-Workshop is a Windows desktop chat for working on a Git project with Codex, Claude Code, Google Antigravity, or Gemini CLI. The lead can reply directly or assign parts of a task to workers. Replies stream into the conversation. Enter sends and Shift+Enter adds a line. Use **Chats** to search the current project’s conversations and reopen one. **Sidebar** toggles the chat list and opens it as a drawer in a narrow window. The desktop app keeps a successful direct chat connected for follow-ups and releases its connection when you switch chats, review changes or close the window.
+Workshop is a Windows desktop chat for working on a Git project with Codex, Claude Code, Google Antigravity, or Gemini CLI. The lead can reply directly or assign parts of a task to workers. Chat providers run with full tool access. Replies stream into the conversation and render Markdown, links, tables, file attachments and inline images. External image previews load when you click **Load image**. Enter sends and Shift+Enter adds a line. Use **Chats** to search the current project’s conversations and reopen one. **Sidebar** toggles the chat list and opens it as a drawer in a narrow window. The composer stays available for follow-ups after edits have been applied, including when you reopen an accepted chat.
 
 ## Run on Windows
 
@@ -32,7 +32,7 @@ Open **Settings → Tasks → Workers** to set scheduling for the current projec
 
 Workers can report unmet acceptance criteria and return a concrete finding to the lead. An unresolved owner holds dependent work in the queue. When the owner is repaired, its waiting tasks become eligible automatically. Workshop checks intermediate patches before releasing dependencies and runs the configured project command on the joined revision. With no configured command the automatic check is `git diff --check`. The lead and workers can also run the project’s own behavioral checks in their provider sessions.
 
-If the lead finishes with an unresolved assignment or a failing final check, Workshop sends it the evidence in the same conversation. It can delegate a repair or fix the integrated copy itself. The transcript shows each automatic repair pass. Workshop stops after two extra passes, sooner if the same failure recurs on the same revision, the user stops an assignment, or the lead reports an external blocker. Use **Accept change** to apply the reviewed result. To configure a project check, pass its executable and arguments as a JSON array to `workshop-cli team --check-args`.
+If the lead finishes with an unresolved assignment or a failing final check, Workshop sends it the evidence in the same conversation. It can delegate a repair or fix the integrated copy itself. The transcript shows each automatic repair pass. Workshop stops after two extra passes, sooner if the same failure recurs on the same revision, the user stops an assignment, or the lead reports an external blocker. Verified changes reach the project automatically. To configure a project check, pass its executable and arguments as a JSON array to `workshop-cli team --check-args`.
 
 Use **+** on the left of the composer to attach files, reference a folder, or paste text. Attachments appear above the draft and can be removed individually. The selected provider receives PNG, JPEG and WebP files as images, small UTF-8 files as text, and local paths for larger files, binary documents and folders. Keep the original files available when sending or retrying.
 
@@ -104,11 +104,11 @@ The CLI uses the same setting. Run `workshop-cli blender-mcp connect`, `test`, `
 
 When the lead delegates, expand its dispatch in the conversation or open **Activity** in the chat header to see all workers. Each worker shows its model and reasoning effort under its title. Select a worker to see the allowed models and maximum effort for that run, its assignment, acceptance criteria, dependencies, file scope, latest activity and reported usage. **Stop worker** interrupts that assignment while its sibling can continue. **Stop response** interrupts the whole team. Start a new chat to use delegation on projects with conversations created before H2.
 
-Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
+Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the decisions and next task. Workshop saves the handoff automatically, including for turns that produce only decisions.
 
 **Chats → Work queue** shows what needs your attention across the current project. Each row gives the chat, provider, worker activity and next action. Open a row to answer a blocker, resume work or review a change. The queue follows the attempt you most recently started or resumed, including an older retry. A plain chat reply drops out of the queue when it finishes. From another terminal, `workshop-cli --project PATH status --json` reads the same queue while the desktop is running. Use `--offset` and `--limit` to page through it.
 
-After a shutdown interrupts an active goal, open the chat’s **Goal paused → Resume goal** or run `workshop-cli --project PATH recover-goal`. Both continue in the saved working copy with the original provider and last recorded progress. Pass a chat ID to the command to select a particular goal. Headless recovery skips manually paused goals and outstanding requests for your input. Completed changes follow the usual review and acceptance flow.
+After a shutdown interrupts an active goal, open the chat’s **Goal paused → Resume goal** or run `workshop-cli --project PATH recover-goal`. Both continue in the saved working copy with the original provider and last recorded progress. Pass a chat ID to the command to select a particular goal. Headless recovery skips manually paused goals and outstanding requests for your input. Verified changes are applied automatically when the turn finishes.
 
 ## Recommended game development skills
 
@@ -180,7 +180,6 @@ $cli = ".\target\debug\workshop-cli.exe"
 & $cli --project $project run "Create a README.md with a one-sentence description of this project."
 & $cli --project $project list
 & $cli --project $project diff 1
-& $cli --project $project accept 1
 ```
 
 The same studio jobs are available from the CLI. For example, use `studio texture Moss --seed 42`, `studio image "An isometric forest shrine"`, `studio prop "A low-poly lantern with a copper roof"`, `studio model Barrel "Dock barrel"`, `studio blend scene.blend`, or `studio decompile game.dll --filter TileCost`. Use `studio history Models` to inspect a project’s model runs.
@@ -203,11 +202,11 @@ Use `team --parallelism 2` to enable the second worker. Use `team --check-args` 
 
 On stdin, plain text steers the lead, `/steer-worker ID MESSAGE` directs one worker, and `/queue MESSAGE` adds a follow-up. The chat records a direction when Workshop sends it to the provider. If delivery is interrupted, the transcript shows the original direction with a delivery notice. After a stopped run, `workshop-cli send-next ID` continues that chat’s saved queue. If startup stopped before the provider saved a session, **Send next** reopens the original request in its working copy and delivers the follow-ups in order. **Retry** carries that queue into the new attempt.
 
-## What acceptance applies
+## How chat edits reach your project
 
 - Each attempt gets a separate Git repository seeded from the creator's tracked and non-ignored working files. The starting point includes staged, unstaged and untracked work. A temporary index captures the snapshot.
 - Review compares the starting point with the final working tree, including additions, deletions, binary files and commits made by the agent. The app stores the binary-capable patch, its SHA-256 digest, the base revision and the proposed tree.
-- Acceptance verifies the saved patch, project revision and original contents of every affected path. A conflict leaves the creator's files available for a fresh attempt. Applying the patch changes the working files and preserves the creator's index. The project's Git attributes and line-ending rules apply.
+- Completed chat turns automatically apply verified edits. Follow-ups use the same chat and apply just their new edits. Workshop verifies the saved patch, project revision and original contents of every affected path. A conflict leaves the creator's files available for a fresh attempt. Applying the patch changes the working files and preserves the creator's index. The project's Git attributes and line-ending rules apply.
 - A journal entry precedes application. After an interruption the app compares each affected path with its original and proposed versions, applies any remaining changes, and records one acceptance decision.
 - The Windows provider process and its descendants run inside a kill-on-close Job Object. Reopening a project captures the remaining work in an interrupted copy. A project lock coordinates desktop and CLI access.
 

@@ -4,7 +4,7 @@ export { PickerOption, PolicyModel, PolicyChoices } from "agent-policy.slint";
 import { TaskEditor, TaskControls } from "task-settings.slint";
 export { TaskControls, TaskProvider, TaskModelPage } from "task-settings.slint";
 import { Theme, ThemeColors, Action, RowAction, ActivityLine } from "common.slint";
-import { ReplyView } from "transcript.slint";
+import { ReplyView, Transcript } from "transcript.slint";
 export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
 export { ThemeColors } from "common.slint";
 import { AppearancePage } from "appearance.slint";
@@ -665,11 +665,12 @@ export component Desk inherits Window {
                 for turn in root.turns: message := Rectangle {
                     private property <bool> reply: !turn.from-user && !turn.delivery-notice && turn.asset-id == 0 && turn.dispatch-id == 0 && turn.shot == "" && !self.has-sketch;
                     private property <bool> has-sketch: turn.sketch.width > 0;
+                    private property <bool> formatted-user: turn.from-user && Transcript.formatted(turn.body);
                     private property <bool> enlarged;
                     private property <length> sketch-width: self.enlarged ? self.width - 32px : min(304px, self.width * 0.84 - 32px);
                     private property <length> image-height: min(self.enlarged ? 540px : 212px, self.sketch-width * turn.sketch.height / max(1,turn.sketch.width));
                     private property <length> preview-height: self.has-sketch ? self.image-height + 42px : 0px;
-                    height: turn.asset-id > 0 ? asset-reply.preferred-height : turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : body.preferred-height + (turn.from-user ? 22px : 0px) + self.preview-height;
+                    height: turn.asset-id > 0 ? asset-reply.preferred-height : turn.shot != "" ? 166px : turn.dispatch-id != 0 ? dispatch-group.preferred-height : self.reply ? reply-view.preferred-height : (self.formatted-user ? user-markdown.preferred-height : body.preferred-height) + (turn.from-user ? 22px : 0px) + self.preview-height;
                     asset-reply := VerticalLayout {
                         visible: turn.asset-id > 0; x: 0px; y: 0px; width: min(360px, parent.width); spacing: 5px;
                         Action {
@@ -726,7 +727,10 @@ export component Desk inherits Window {
                             label: "Compare"; accessible-description: turn.previous-output ? "Compare with the previous chat image" : "Compare with the original";
                             activate => {Comparison.open(turn.original-path,turn.markup-path,turn.image-path,turn.previous-output);}
                         }
+                        user-markdown := ReplyView { visible: message.formatted-user; x: 16px; y: 11px + message.preview-height;
+                            width: parent.width - 32px; height: self.preferred-height; body: message.formatted-user ? turn.body : ""; }
                         body := TextInput {
+                            visible: !message.formatted-user;
                             x: turn.from-user ? 16px : 0px; y: (turn.from-user ? 11px : 0px) + message.preview-height;
                             width: parent.width - 2 * self.x; height: self.preferred-height;
                             text: turn.body; color: turn.delivery-notice ? Theme.muted : Theme.text; font-size: turn.delivery-notice ? 14px : 16px;
@@ -734,11 +738,6 @@ export component Desk inherits Window {
                             accessible-label: turn.from-user ? "Your message" : turn.delivery-notice ? "Delivery notice" : root.chat-provider + " reply";
                         }
                     }
-                }
-                if !root.home && !root.later-messages && root.can-review: VerticalLayout { spacing: 4px;
-                    Text { text:root.checkpoint-only ? "Decisions ready for review" : "Changes ready for review"; font-size:16px; color:Theme.text; font-weight:600; }
-                    Text { text:root.checkpoint-only ? "Accept the handoff to keep these decisions for the project." : "Accept the agent’s changes to apply them to your project."; color:Theme.muted; font-size:14px; wrap:word-wrap; }
-                    HorizontalLayout { alignment:start; Action { label:root.checkpoint-only ? "Accept decisions" : "Accept change"; width:146px; selected:true; enabled:!root.busy; activate=>{root.operate("accept");} } }
                 }
                 if !root.home && root.later-messages: Action { label: "Newer messages"; activate => {root.page(false,false);} }
                 if !root.later-messages && root.running && root.partial != "": ReplyView {
@@ -754,7 +753,7 @@ export component Desk inherits Window {
             x: composer.x; width: composer.width;
             visible: root.queued.length > 0 && !root.home;
             height: self.visible ? 32px + min(root.queued.length,2) * 31px : 0px;
-            y: (root.editing-goal ? goal-editor.y : root.writable ? pad.y : closed.y) - self.height;
+            y: (root.editing-goal ? goal-editor.y : pad.y) - self.height;
             HorizontalLayout { height: 30px; spacing: 8px;
                 Text { text: "Queued (" + root.queued.length + ")"; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 1; font-size: 13px; }
                 if !root.busy && root.can-send-next: Action { label: "Send next"; height: 30px; activate => {root.operate("send-next");} }
@@ -774,10 +773,10 @@ export component Desk inherits Window {
         }
         composer := Composer {
             chat-provider: root.chat-provider;
-            visible: root.project != "" && root.writable && !root.editing-goal;
+            visible: root.project != "" && !root.editing-goal;
             x: (parent.width - self.width) / 2; width: pane.measure;
             y: parent.height - self.height - feedback.height - 24px;
-            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || root.attachments.length > 0 || Sketch.has-content);
+            value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.writable && !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || root.attachments.length > 0 || Sketch.has-content);
             attachments: root.attachments; remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
@@ -795,14 +794,6 @@ export component Desk inherits Window {
             can-retry:root.can-retry; can-recover:root.recoverable-goal; retry=>{root.operate("retry");}
             start(v)=>{root.run-goal(v);} close=>{root.close-goal();}
             pause=>{root.operate("pause-goal");} clear=>{root.operate("clear-goal");}
-        }
-        closed := Rectangle {
-            visible: !root.home && !root.writable && !root.editing-goal; x: (parent.width - self.width) / 2; width: pane.measure;
-            height: 44px; y: parent.height - self.height - feedback.height - 24px;
-            HorizontalLayout { alignment: center; spacing: 14px;
-                Text { text: root.state-label; color: Theme.muted; font-size: 14px; vertical-alignment: center; }
-                Action { label: "New chat"; glyph: "\u{e70f}"; enabled: !root.busy; selected: true; activate => {root.new-chat();} }
-            }
         }
         feedback := ScrollView {
             x: (parent.width - self.width) / 2; width: pane.measure; height: root.feedback-text == "" ? 0px : min(78px, feedback-copy.preferred-height + 6px);

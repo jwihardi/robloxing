@@ -233,7 +233,7 @@ impl Store {
         ensure!(
             matches!(
                 state.as_str(),
-                "review" | "interrupted" | "failed" | "cancelled"
+                "review" | "interrupted" | "failed" | "cancelled" | "accepted" | "discarded"
             ),
             "Change subagent settings between turns"
         );

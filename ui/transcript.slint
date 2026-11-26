@@ -1,10 +1,19 @@
 import { Action, Theme, ThemeColors } from "common.slint";
 
-export enum BlockKind { prose, rich, heading, code }
-export struct ReplyBlock { kind: BlockKind, text: string, language: string, styled: styled-text }
+export enum BlockKind { prose, rich, heading, code, image, attachment, table-row }
+export struct ReplyBlock { kind: BlockKind, text: string, language: string, styled: styled-text,
+    target: string, remote: bool, cells: [styled-text], header: bool }
 export global Transcript {
+    in-out property <string> directory;
+    in-out property <int> revision;
+    pure callback formatted(string) -> bool;
     pure callback blocks(string) -> [ReplyBlock];
     pure callback highlight(string, string, ThemeColors) -> styled-text;
+    pure callback preview(string, string, int) -> image;
+    callback load-preview(string, string);
+    callback clear-previews();
+    callback received(string, string, image);
+    callback open(string, string);
 }
 
 component CodeSnippet inherits Rectangle {
@@ -42,21 +51,63 @@ component CodeSnippet inherits Rectangle {
     Timer { interval: 1500ms; running: root.copied; triggered => { root.copied = false; } }
 }
 
+component EmbeddedImage inherits VerticalLayout {
+    in property <ReplyBlock> block;
+    private property <image> pixels: Transcript.preview(Transcript.directory, block.target, Transcript.revision);
+    private property <bool> loaded: pixels.width > 0;
+    private property <string> source: block.target;
+    private property <string> directory: Transcript.directory;
+    private property <bool> requested;
+    function load() { requested = true; Transcript.load-preview(Transcript.directory, source); }
+    function prepare() { requested = false; if !block.remote && source != "" { load(); } }
+    init => { prepare(); }
+    changed source => { prepare(); }
+    changed directory => { prepare(); }
+    Action {
+        label: root.loaded ? (root.block.text == "" ? "Open image" : root.block.text)
+            : root.block.remote && !root.requested ? "Load image" : (root.block.text == "" ? "Open image" : root.block.text);
+        height: root.loaded ? min(320px, self.width * root.pixels.height / max(1,root.pixels.width)) : 36px;
+        icon-only: root.loaded; leading: true; glyph: root.loaded ? "" : "\u{eb9f}";
+        accessible-description: root.loaded ? "Image preview" : root.source;
+        clip: true; border-radius: 10px; background: Theme.surface;
+        activate => { if root.block.remote && !root.requested {root.load();} else {Transcript.open(Transcript.directory, root.source);} }
+        if root.loaded: Image { width: parent.width; height: parent.height; source: root.pixels; image-fit: contain; }
+    }
+}
+
 export component ReplyView inherits VerticalLayout {
     in property <string> body;
     in property <string> provider;
     in property <bool> streaming;
     alignment: start; spacing: 10px;
-    HorizontalLayout { height: 19px; alignment: start; spacing: 8px;
+    if root.provider != "": HorizontalLayout { height: 19px; alignment: start; spacing: 8px;
         Text { text: ">"; color: Theme.accent; font-family: Theme.mono; font-size: 14px; vertical-alignment: center; accessible-role: none; }
         Text { text: root.provider; color: Theme.accent; font-family: Theme.mono; font-size: 13px; font-weight: 600; vertical-alignment: center; }
     }
     for block in Transcript.blocks(root.body): VerticalLayout {
+        if block.kind == BlockKind.image: EmbeddedImage { block: block; }
+        if block.kind == BlockKind.attachment: Action {
+            label: block.text; detail: block.language; glyph: "\u{e8a5}"; glyph-color: Theme.symbol;
+            leading: true; height: 48px; max-width: 420px; background: Theme.surface;
+            accessible-description: block.target;
+            activate => {Transcript.open(Transcript.directory, block.target);}
+        }
+        if block.kind == BlockKind.table-row: VerticalLayout {
+            HorizontalLayout { spacing: 14px;
+                for cell in block.cells: StyledText {
+                    horizontal-stretch: 1; min-width: 0px; preferred-width: 1px;
+                    text: cell; default-color: block.header ? Theme.symbol : Theme.text; default-font-size: 14px; selectable: true;
+                    link-color: Theme.symbol; link-clicked(url) => {Transcript.open(Transcript.directory, url);}
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+        }
         if block.kind == BlockKind.code: CodeSnippet { block: block; streaming: root.streaming; }
         if block.kind == BlockKind.rich: StyledText {
             text: block.styled; default-color: Theme.text; default-font-size: 16px; selectable: true;
+            link-color: Theme.symbol; link-clicked(url) => {Transcript.open(Transcript.directory, url);}
             selection-background-color: Theme.selected; selection-foreground-color: Theme.text;
-            accessible-role: text; accessible-label: root.provider + " reply"; accessible-value: block.text;
+            accessible-role: text; accessible-label: root.provider == "" ? "Your message" : root.provider + " reply"; accessible-value: block.text;
         }
         if block.kind == BlockKind.prose || block.kind == BlockKind.heading: TextInput {
             text: block.text; read-only: true; single-line: false; wrap: word-wrap; color: Theme.text;

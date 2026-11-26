@@ -120,6 +120,7 @@ pub struct Message {
     pub text: String,
     pub files: Vec<PathBuf>,
     pub(crate) queued_id: Option<i64>,
+    pub(crate) followup: bool,
 }
 impl From<&str> for Message {
     fn from(text: &str) -> Self {
@@ -127,6 +128,7 @@ impl From<&str> for Message {
             text: text.into(),
             files: Vec::new(),
             queued_id: None,
+            followup: false,
         }
     }
 }
@@ -153,7 +155,7 @@ impl Message {
         if store.worker {
             notify(ReplyUpdate::WorkerPromptSent);
         }
-        if !a.session.is_empty() {
+        if !a.session.is_empty() || self.followup {
             store.message_event(a.id, "user/followup", self)?;
             notify(ReplyUpdate::TranscriptChanged);
         }
@@ -175,6 +177,7 @@ impl Message {
             text,
             files,
             queued_id: None,
+            followup: false,
         }
     }
     fn input(&self) -> Result<Value> {
@@ -282,8 +285,8 @@ async fn open_thread(
     a: &Attempt,
     legacy_assets: Option<&gemini::Bridge>,
 ) -> Result<()> {
-    let mut params = json!({"cwd":store.work(a.id),"approvalPolicy":"never","sandbox":"workspace-write",
-        "developerInstructions":"Work only in the current project copy. Keep edits available for the creator to review."});
+    let mut params =
+        json!({"cwd":store.work(a.id),"approvalPolicy":"never","sandbox":"danger-full-access"});
     params["config"] = json!({"features.multi_agent":false, "features.image_generation":false});
     if let Some(server) = blender_mcp::configured(&store.preferences_home)? {
         params["config"]["mcp_servers.blender"] = server.codex();
@@ -1414,18 +1417,7 @@ fn run_one_turn(
     }
     let failure;
     let (state, action) = match &result {
-        Ok(true) => (
-            "review",
-            if a.provider == "claude" {
-                "Claude finished. Review the change."
-            } else if a.provider == "antigravity" {
-                "Antigravity finished. Review the change."
-            } else if a.provider == "gemini" {
-                "Gemini finished. Review the change."
-            } else {
-                "Codex finished. Review the change."
-            },
-        ),
+        Ok(true) => ("review", "Finished"),
         Ok(false) => (
             "cancelled",
             "Cancelled. Any edits are available for review.",
@@ -1438,13 +1430,15 @@ fn run_one_turn(
     if state != "review" && !store.worker {
         store.pause_goal(a.id, action)?;
     }
-    if let Err(e) = store.finish(a.id, state, action) {
-        store.pause_goal(a.id, "Workshop could not save the review.")?;
-        store.status(
-            a.id,
-            "failed",
-            &format!("Could not save the review. Working copy retained. {e:#}"),
-        )?;
+    if let Err(e) = store.finish_turn(a.id, state, action, true) {
+        store.pause_goal(a.id, "Workshop could not save the changes.")?;
+        if store.attempt(a.id)?.state != "applying" {
+            store.status(
+                a.id,
+                "failed",
+                &format!("Could not save the changes. Working copy retained. {e:#}"),
+            )?;
+        }
         return Err(e);
     }
     result

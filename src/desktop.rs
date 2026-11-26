@@ -396,7 +396,7 @@ fn title(state: &str) -> &str {
     match state {
         "running" => "In progress",
         "review" => "Ready for review",
-        "accepted" => "Accepted",
+        "accepted" => "Ready",
         "discarded" => "Discarded",
         "cancelled" => "Cancelled",
         "interrupted" => "Interrupted",
@@ -681,6 +681,12 @@ impl App {
     }
     fn refresh_chat(&self, store: &Store, attempt: &Attempt) -> Result<()> {
         let ui = self.ui.unwrap();
+        let transcript = ui.global::<Transcript>();
+        let directory = store.work(attempt.id);
+        if transcript.get_directory().as_str() != directory.to_string_lossy() {
+            transcript.invoke_clear_previews();
+            transcript.set_directory(directory.to_string_lossy().as_ref().into());
+        }
         self.render_queue(store, attempt.id)?;
         let switching = self.displayed.get() != Some(attempt.id);
         let follow = switching || ui.invoke_at_end();
@@ -1261,8 +1267,9 @@ impl App {
                     && verified,
             );
             ui.set_can_discard(done);
-            ui.set_can_resume(done && !a.session.is_empty());
-            ui.set_can_send_next(done && (!a.session.is_empty() || !a.base.is_empty()));
+            let can_continue = done || matches!(a.state.as_str(), "accepted" | "discarded");
+            ui.set_can_resume(can_continue);
+            ui.set_can_send_next(can_continue && (!a.session.is_empty() || !a.base.is_empty()));
             ui.set_can_retry(done || a.state == "discarded" || a.state == "accepted");
             self.refresh_chat(store, a)?;
         }

@@ -126,7 +126,7 @@ def conflict(case):
     case.release("right")
     # The lead receives the integration conflict and repairs it on the same user request.
     finish(proc, True)
-    assert not (case.project / "left.txt").exists()
+    assert (case.project / "left.txt").read_text() == "left\n"
     assert [w[2] for w in case.workers()] == [1, 2]
     case.call("accept", "1")
     case.call("accept", "1")
@@ -149,7 +149,6 @@ def stop_one(case):
     case.release("left")
     case.call("resume", "1", "retry left")
     assert [w[2] for w in case.workers()] == [2, 1]
-    case.call("accept", "1")
 
 
 def stop_preparing_worker(case):
@@ -292,7 +291,6 @@ def mixed_plan(case):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    case.call("accept", "1")
     assert (case.root / "joins.log").read_text().splitlines() == ["check"]
     for key in ("left", "right", "guide", "summary"):
         assert (case.project / (key + ".txt")).read_text() == key + "\n"
@@ -318,8 +316,7 @@ def autonomous_release(case):
         repairs = db.execute("SELECT summary FROM events WHERE kind='workshop/repair'").fetchall()
         assert len(repairs) == 1 and "rigth" in repairs[0][0], repairs
         assert not db.execute("SELECT 1 FROM events WHERE kind='user/followup'").fetchone()
-    assert not (case.project / "right.txt").exists()
-    case.call("accept", "1")
+    assert (case.project / "right.txt").read_text() == "right\n"
     assert (case.project / "right.txt").read_text().strip() == "right"
     assert (case.project / "publish.txt").read_text().strip() == "release ready"
 
@@ -329,7 +326,6 @@ def direct_repair(case):
     case.call("team", "--check-args", json.dumps([case.env["WORKSHOP_CODEX"], "content-check"]))
     case.call("run", "Update the answer.")
     assert case.workers() == []
-    case.call("accept", "1")
     assert (case.project / "answer.txt").read_text() == "correct"
 
 
@@ -376,15 +372,19 @@ def manual_recheck(case):
     case.call("run", "answer.txt must contain correct")
     command = [case.env["WORKSHOP_CODEX"], "check"]
     case.call("team", "--check-args", json.dumps(command))
-    case.call("accept", "1", ok=False)
+    def verified():
+        with sqlite3.connect(case.db) as db:
+            return bool(db.execute("SELECT 1 FROM verified_team WHERE lead=1 AND check_args=?", (json.dumps(command,separators=(',', ':')),)).fetchone())
+    assert (case.project / "answer.txt").is_file() and not verified()
     case.call("check", "1", "--", *command)
+    assert verified()
     marker = case.root / "fail-check"
     marker.touch()
     case.call("check", "1", "--", *command, ok=False)
-    case.call("accept", "1", ok=False)
+    assert not verified()
     marker.unlink()
     case.call("check", "1", "--", *command)
-    case.call("accept", "1")
+    assert verified()
 
 
 def external_blocker(case):
@@ -396,7 +396,6 @@ def external_blocker(case):
     marker.unlink()
     (case.root / "direct-repair").touch()
     case.call("resume", "1", "The release input is here. answer.txt must contain correct.")
-    case.call("accept", "1")
     assert (case.project / "answer.txt").read_text() == "correct"
 
     (case.root / "direct-repair").unlink()
@@ -411,7 +410,6 @@ def external_blocker(case):
     case.call("accept", "2", ok=False)
     (case.root / "fail-check").unlink()
     case.call("resume", "2", "Confirmed. The checks are ready.")
-    case.call("accept", "2")
     with sqlite3.connect(case.db) as db:
         assert db.execute("SELECT count(*) FROM events WHERE attempt=2 AND kind='workshop/blocker_resolved'").fetchone() == (1,)
 
@@ -455,7 +453,6 @@ def steer_during_check(case):
     assert exited(pid)
     assert (case.root / "delivery.log").read_text().splitlines() == [
         "Update the answer.", "Please ensure answer.txt must contain correct", "Follow up after verification"]
-    case.call("accept", "1")
     assert (case.project / "answer.txt").read_text().strip() == "correct"
 
 
@@ -508,10 +505,9 @@ def claude_without_codex(case):
     assert "claude:default" in case.call("models")
     case.call("run", "--provider", "claude", "delegate")
     with sqlite3.connect(case.db) as db:
-        assert db.execute("SELECT provider,state FROM attempts").fetchone() == ("claude", "review")
+        assert db.execute("SELECT provider,state FROM attempts").fetchone() == ("claude", "accepted")
         assert db.execute("SELECT model,state FROM workers ORDER BY id").fetchall() == [
             ("claude:default", "finished"), ("claude:default", "finished")]
-    case.call("accept", "1")
 
 
 def mixed_provider_conflict(case):
@@ -551,7 +547,6 @@ def delivery(case, provider):
         assert db.execute("SELECT summary FROM events WHERE kind='user/followup' ORDER BY id").fetchall() == [
             ("Follow up one",), ("Follow up two",)]
         assert not pending()
-    case.call("accept", "1")
     assert (case.project / "left.txt").read_text().strip() == "blue"
     assert (case.project / "right.txt").read_text().strip() == "right"
     proc = case.run("run", "--provider", provider, "Wait for a correction")
@@ -717,8 +712,8 @@ def interrupted_goal(case):
         case.release("goal")
     case.call("recover-goal", "1")
     with sqlite3.connect(case.db) as db:
-        assert db.execute("SELECT state,status FROM attempts JOIN chat_goals ON attempt=id").fetchall() == [("review","complete")]
-    assert (work / "second.txt").read_text() == "two" and not (case.project / "second.txt").exists()
+        assert db.execute("SELECT state,status FROM attempts JOIN chat_goals ON attempt=id").fetchall() == [("accepted","complete")]
+    assert (work / "second.txt").read_text() == "two" and (case.project / "second.txt").read_text() == "two"
     assert "No interrupted goal" in case.call("recover-goal")
 
 

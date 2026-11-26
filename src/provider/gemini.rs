@@ -186,7 +186,7 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
     if a.provider == "antigravity" {
         let mut io = spawn_cli(
             &store.work(a.id),
-            &["acp", "--stdio"],
+            &["acp", "--stdio", "--dangerously-skip-permissions"],
             stderr,
             (antigravity::program()?, None),
             "Antigravity CLI",
@@ -196,7 +196,7 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
         return Ok(io);
     }
     let model = model_name((&a.model, &a.effort))?;
-    let mut args = vec!["--acp", "--approval-mode", "auto_edit"];
+    let mut args = vec!["--acp", "--approval-mode", "yolo"];
     let bridge = Bridge::new(store.worker, store.gemini_project_trusted())?;
     if bridge.project_trusted
         && std::env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() != Ok("false")
@@ -443,6 +443,7 @@ pub(super) async fn studio(
             text: input,
             files: prompt.files.clone(),
             queued_id: None,
+            followup: false,
         };
         rpc(
             &mut io.stdin,
@@ -535,52 +536,13 @@ fn save_text(
     Ok(())
 }
 
-async fn permission(
-    stdin: &mut ChildStdin,
-    msg: &Value,
-    tools: &Value,
-    antigravity: bool,
-    blender: Option<&blender_mcp::Server>,
-) -> Result<()> {
-    let params = &msg["params"];
-    let source = &params["toolCall"]["_meta"]["gemini-cli"]["mcp"];
-    let tool = if antigravity {
-        params["toolCall"]["name"]
-            .as_str()
-            .and_then(|n| n.strip_prefix("mcp_workshop_"))
-    } else if source["server_name"] == "workshop" {
-        source["tool_name"].as_str()
-    } else {
-        None
-    };
-    let workshop = tool.is_some_and(|name| {
-        tools
-            .as_array()
-            .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
+async fn permission(stdin: &mut ChildStdin, msg: &Value) -> Result<()> {
+    let options = msg["params"]["options"].as_array();
+    let option = ["allow_once", "allow_always"].iter().find_map(|kind| {
+        options?
+            .iter()
+            .find(|option| option["kind"].as_str() == Some(*kind))
     });
-    let blender_tool = if antigravity {
-        params["toolCall"]["name"]
-            .as_str()
-            .and_then(|n| n.strip_prefix("mcp_blender_"))
-    } else if source["server_name"] == "blender" {
-        source["tool_name"].as_str()
-    } else {
-        None
-    };
-    let shared =
-        blender_tool.is_some_and(|name| blender.is_some_and(|s| s.tools.iter().any(|t| t == name)));
-    let option = params["options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|o| {
-            o["kind"]
-                == if workshop || shared {
-                    "allow_once"
-                } else {
-                    "reject_once"
-                }
-        });
     let outcome = option.map_or_else(
         || json!({"outcome":"cancelled"}),
         |o| json!({"outcome":"selected","optionId":o["optionId"]}),
@@ -609,9 +571,9 @@ pub(super) async fn exchange(
         .as_mut()
         .context("Missing Workshop bridge")?;
     let agy = a.provider == "antigravity";
+
     let blender = blender_mcp::configured(&store.preferences_home)?;
     let provider = if agy { "Antigravity" } else { "Gemini CLI" };
-    let mut set_edit_mode = false;
     let mut worker_inference: Option<(String, String)> = None;
     let mut first = content(prompt)?;
     let instructions = instructions(store, a)?;
@@ -732,7 +694,7 @@ pub(super) async fn exchange(
                 if method == "session/request_permission"
                     && msg["params"]["sessionId"] == io.session
                 {
-                    permission(&mut io.stdin, &msg, &bridge.tools, agy, blender.as_ref()).await?;
+                    permission(&mut io.stdin, &msg).await?;
                 } else {
                     send(&mut io.stdin,json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32601,"message":"Unsupported client request"}})).await?;
                 }
@@ -834,7 +796,6 @@ pub(super) async fn exchange(
                 };
                 store.session(a.id, &io.session)?;
                 let model = if agy {
-                    set_edit_mode = reply["modes"]["currentModeId"] != "accept-edits";
                     antigravity::session_model(&reply["models"], &a.model, &a.effort)?
                 } else {
                     Some(model_name((&a.model, &a.effort))?).filter(|&m| m != "default")
@@ -875,7 +836,7 @@ pub(super) async fn exchange(
                     waiting = false;
                 }
             }
-            Some(3 | 5) => waiting = false,
+            Some(3) => waiting = false,
             Some(4) => {
                 save_text(store, a.id, &mut text, notify)?;
                 let reason = reply["stopReason"].as_str().unwrap_or("unknown");
@@ -920,17 +881,6 @@ pub(super) async fn exchange(
                 }
             }
             _ => {}
-        }
-        if !waiting && set_edit_mode {
-            rpc(
-                &mut io.stdin,
-                5,
-                "session/set_mode",
-                json!({"sessionId":io.session,"modeId":"accept-edits"}),
-            )
-            .await?;
-            waiting = true;
-            set_edit_mode = false;
         }
     }
 }
