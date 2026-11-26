@@ -791,6 +791,7 @@ function Test-Attention {
             [void](New-Item -ItemType File -Path (Join-Path $root 'blocker'))
         }
         $prompt = if ($blocked) { 'Prepare the release' } else { 'Hello from another chat' }
+        Wait-For { Named 'Message Codex' } 'new chat composer for the background notification'
         (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($prompt)
         Click 'Send message'
         Wait-For { Named 'Stop response' } 'background chat running'
