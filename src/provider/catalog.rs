@@ -1,4 +1,5 @@
 use super::{Connection, send};
+use crate::provider_permissions::PROVIDERS;
 use crate::usage::{UsageWindow, account_windows};
 use anyhow::{Context, Result, ensure};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -151,51 +152,121 @@ async fn catalog_connection(project: &Path) -> Result<(Connection, Catalog)> {
     Ok(catalog)
 }
 
-async fn all_providers(project: &Path) -> Result<(Option<Connection>, Catalog)> {
-    let (codex, claude, gemini, antigravity) = tokio::join!(
-        catalog_connection(project),
-        tokio::time::timeout(Duration::from_secs(8), super::claude::models(project)),
-        super::gemini::models(project),
-        super::antigravity::models(project),
-    );
-    let claude = claude
-        .context("Claude model discovery timed out")
-        .and_then(|r| r);
-    let (io, mut catalog) = match codex {
-        Ok((io, catalog)) => (Some(io), catalog),
-        Err(e) if claude.is_err() && gemini.is_err() && antigravity.is_err() => anyhow::bail!(
-            "Model discovery failed. Codex: {e:#}. Claude: {}. Gemini: {}. Antigravity: {}",
-            claude.err().unwrap(),
-            gemini.err().unwrap(),
-            antigravity.err().unwrap()
-        ),
-        Err(_) => (None, Catalog::default()),
-    };
-    if let Ok(models) = claude {
-        catalog.models.extend(models);
-    }
-    if let Ok(other) = antigravity {
-        catalog.models.extend(other.models);
-    }
-    if let Ok(other) = gemini {
-        catalog.models.extend(other.models);
-    }
-    Ok((io, catalog))
-}
-
-pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result<Catalog> {
-    match only {
-        Some("codex") => Ok(catalog_connection(project).await?.1),
-        Some("antigravity") => super::antigravity::models(project).await,
-        Some("gemini") => super::gemini::models(project).await,
-        Some("claude") => Ok(Catalog {
+async fn provider_catalog(project: &Path, source: &str) -> Result<(Option<Connection>, Catalog)> {
+    let catalog = match source {
+        "codex" => {
+            let (io, catalog) = catalog_connection(project).await?;
+            return Ok((Some(io), catalog));
+        }
+        "claude" => Catalog {
             models: tokio::time::timeout(Duration::from_secs(8), super::claude::models(project))
                 .await
                 .context("Claude model discovery timed out")??,
             default_model: "claude:default".into(),
             default_effort: String::new(),
-        }),
-        _ => Ok(all_providers(project).await?.1),
+        },
+        "antigravity" => super::antigravity::models(project).await?,
+        "gemini" => super::gemini::models(project).await?,
+        _ => anyhow::bail!("Unknown model provider {source}"),
+    };
+    Ok((None, catalog))
+}
+
+async fn gather<F: Future<Output = Result<(Option<Connection>, Catalog)>>>(
+    load: impl Fn(&'static str) -> F,
+    mut publish: impl FnMut(&Catalog),
+) -> Result<(Option<Connection>, Catalog)> {
+    let mut pending: FuturesUnordered<_> = PROVIDERS
+        .into_iter()
+        .enumerate()
+        .map(|(i, source)| {
+            let request = load(source);
+            async move { (i, request.await) }
+        })
+        .collect();
+    let mut parts: [Option<Catalog>; PROVIDERS.len()] = Default::default();
+    let mut errors = Vec::new();
+    let mut connection = None;
+    let mut combined = Catalog::default();
+    while let Some((i, result)) = pending.next().await {
+        match result {
+            Ok((io, found)) => {
+                if io.is_some() {
+                    connection = io;
+                }
+                parts[i] = Some(found);
+                combined = parts[0].clone().unwrap_or_default();
+                for catalog in parts[1..].iter().flatten() {
+                    combined.models.extend_from_slice(&catalog.models);
+                }
+                publish(&combined);
+            }
+            Err(e) => errors.push(format!("{}: {e:#}", PROVIDERS[i])),
+        }
+    }
+    ensure!(
+        parts.iter().any(Option::is_some),
+        "Model discovery failed. {}",
+        errors.join(". ")
+    );
+    Ok((connection, combined))
+}
+
+#[derive(Default)]
+pub struct CatalogSources {
+    sources: [tokio::sync::OnceCell<Catalog>; PROVIDERS.len()],
+}
+
+impl CatalogSources {
+    pub(crate) async fn get(&self, project: &Path, source: &str) -> Result<&Catalog> {
+        let i = PROVIDERS
+            .iter()
+            .position(|&p| p == source)
+            .context("Unknown model provider")?;
+        self.sources[i]
+            .get_or_try_init(|| async { Ok(provider_catalog(project, source).await?.1) })
+            .await
+    }
+
+    pub(crate) fn from_catalog(catalog: &Catalog) -> Self {
+        let cache = Self::default();
+        for (source, slot) in PROVIDERS.into_iter().zip(&cache.sources) {
+            let models: Vec<_> = catalog
+                .models
+                .iter()
+                .filter(|m| super::provider_for(&m.model) == source)
+                .cloned()
+                .collect();
+            if !models.is_empty() {
+                let _ = slot.set(Catalog {
+                    models,
+                    default_model: catalog.default_model.clone(),
+                    default_effort: catalog.default_effort.clone(),
+                });
+            }
+        }
+        cache
+    }
+
+    /// Publish incremental snapshots in picker order while workers share the same in-flight requests.
+    pub fn discover(&self, project: &Path, mut publish: impl FnMut(Catalog)) -> Result<()> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(gather(
+                |source| async move { Ok((None, self.get(project, source).await?.clone())) },
+                |c| publish(c.clone()),
+            ))?;
+        Ok(())
+    }
+}
+
+pub(crate) async fn worker_catalog(project: &Path, only: Option<&str>) -> Result<Catalog> {
+    match only {
+        Some(source) => Ok(provider_catalog(project, source).await?.1),
+        None => Ok(gather(|source| provider_catalog(project, source), |_| {})
+            .await?
+            .1),
     }
 }
 
@@ -203,45 +274,11 @@ pub fn model_catalog(project: &Path) -> Result<Catalog> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(all_providers(project))
-        .map(|(_, catalog)| catalog)
+        .block_on(worker_catalog(project, None))
 }
 
-/// Publish the available providers as each local CLI responds. Keep picker ordering
-/// and the Codex default stable regardless of which CLI answered first.
-pub fn discover_models(project: &Path, mut publish: impl FnMut(Catalog)) -> Result<()> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let sources = crate::provider_permissions::PROVIDERS;
-            let mut pending: FuturesUnordered<_> = sources
-                .iter()
-                .enumerate()
-                .map(|(i, source)| async move { (i, worker_catalog(project, Some(source)).await) })
-                .collect();
-            let mut catalogs: [Option<Catalog>; 4] = Default::default();
-            let mut errors = Vec::new();
-            while let Some((i, result)) = pending.next().await {
-                match result {
-                    Ok(found) => {
-                        catalogs[i] = Some(found);
-                        let mut combined = catalogs[0].clone().unwrap_or_default();
-                        for other in catalogs[1..].iter().flatten() {
-                            combined.models.extend_from_slice(&other.models);
-                        }
-                        publish(combined);
-                    }
-                    Err(e) => errors.push(format!("{}: {e:#}", sources[i])),
-                }
-            }
-            ensure!(
-                catalogs.iter().any(Option::is_some),
-                "{}",
-                errors.join(". ")
-            );
-            Ok(())
-        })
+pub fn discover_models(project: &Path, publish: impl FnMut(Catalog)) -> Result<()> {
+    CatalogSources::default().discover(project, publish)
 }
 
 pub fn load_models_and_usage(
@@ -252,7 +289,7 @@ pub fn load_models_and_usage(
         .enable_all()
         .build()?
         .block_on(async {
-            let (io, catalog) = all_providers(project).await?;
+            let (io, catalog) = gather(|source| provider_catalog(project, source), |_| {}).await?;
             loaded(catalog);
             let Some(mut io) = io else {
                 return Ok(None);
@@ -264,4 +301,53 @@ pub fn load_models_and_usage(
                     .and_then(Result::ok),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn workers_join_pending_discovery_without_waiting_for_another_provider() -> Result<()> {
+        let cache = CatalogSources::default();
+        let index = |source| PROVIDERS.iter().position(|&p| p == source).unwrap();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let codex = cache.sources[index("codex")].get_or_init(|| async {
+            started.send(()).unwrap();
+            released.await.unwrap();
+            Catalog {
+                default_model: "fixture-codex".into(),
+                ..Default::default()
+            }
+        });
+        let other = Catalog {
+            default_model: "claude:sonnet".into(),
+            ..Default::default()
+        };
+        assert!(cache.sources[index("claude")].set(other).is_ok());
+        let requests = async {
+            waiting.await?;
+            let missing = tempfile::tempdir()?.path().join("absent");
+            let worker = cache.get(&missing, "codex");
+            tokio::pin!(worker);
+            assert!(futures_util::poll!(&mut worker).is_pending());
+            assert_eq!(
+                cache.get(&missing, "claude").await?.default_model,
+                "claude:sonnet"
+            );
+            release.send(()).unwrap();
+            assert_eq!(worker.await?.default_model, "fixture-codex");
+            assert_eq!(
+                cache.get(&missing, "codex").await?.default_model,
+                "fixture-codex"
+            );
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(codex, requests).1
+        })
+        .await??;
+        Ok(())
+    }
 }

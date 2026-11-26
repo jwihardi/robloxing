@@ -499,6 +499,52 @@ def delivery(case, provider):
     assert (case.root / "delivery.log").read_text().splitlines().count("Follow up after restart") == 1
 
 
+def shared_blender_connection(case):
+    fixture = case.env["WORKSHOP_CODEX"]
+    case.env.update(WORKSHOP_GEMINI=fixture, WORKSHOP_ANTIGRAVITY=fixture)
+    (case.root / "capture-mcp").touch()
+    case.call("gemini-trust", "true")
+    assert "1 tool." in case.call("blender-mcp", "connect")
+    assert "1 tool." in case.call("blender-mcp", "test")
+    for source in ("codex", "claude", "antigravity", "gemini"):
+        case.call("run", "--provider", source, "hi")
+        payload = json.loads((case.root / ("mcp-" + source + ".json")).read_text())
+        if source == "codex":
+            server = payload["mcp_servers.blender"]
+        elif source == "claude":
+            server = payload["mcpServers"]["blender"]
+        else:
+            assert any(s["name"] == "workshop" for s in payload)
+            server = next(s for s in payload if s["name"] == "blender")
+        assert Path(server["command"]) == Path(fixture) and server["args"] == ["--fixture-blender"]
+    case.call("blender-mcp", "disconnect")
+    case.call("run", "--provider", "codex", "hi")
+    assert "mcp_servers.blender" not in json.loads((case.root / "mcp-codex.json").read_text())
+
+
+def interrupted_goal(case):
+    (case.root / "goal-mode").touch()
+    case.hold("goal")
+    proc = case.run("run", "/goal Finish both fixture files")
+    def has_session():
+        with sqlite3.connect(case.db) as db:
+            return db.execute("SELECT 1 FROM attempts WHERE id=1 AND state='running' AND session<>''").fetchone()
+    try:
+        wait_for(has_session, "goal did not connect")
+        assert json.loads(case.call("status", "--json"))[0]["status"] == "In progress"
+        work = case.db.parent / "attempt-1/work"
+        (work / "first.txt").write_text("one")
+    finally:
+        proc.kill()
+        proc.communicate(timeout=10)
+        case.release("goal")
+    case.call("recover-goal", "1")
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT state,status FROM attempts JOIN chat_goals ON attempt=id").fetchall() == [("review","complete")]
+    assert (work / "second.txt").read_text() == "two" and not (case.project / "second.txt").exists()
+    assert "No interrupted goal" in case.call("recover-goal")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", type=Path, default=Path("target/debug/workshop-cli.exe"))
@@ -509,7 +555,7 @@ def main():
         compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
-        for test in (autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
+        for test in (shared_blender_connection, interrupted_goal, autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
                      small_talk, chat_goals, manual_recheck, external_blocker, mixed_plan, conflict,
                      stop_one, stop_preparing_worker, steer_preparing_worker, cancel_check, steer_during_check, overlap,
                      repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,

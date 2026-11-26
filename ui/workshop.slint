@@ -4,6 +4,8 @@ import { ReplyView } from "transcript.slint";
 export { Transcript, BlockKind, ReplyBlock } from "transcript.slint";
 export { ThemeColors } from "common.slint";
 import { AppearancePage } from "appearance.slint";
+import { WorkQueuePage, WorkRow } from "work-queue.slint";
+export { WorkRow } from "work-queue.slint";
 import { SketchPad, Sketch } from "sketch.slint";
 import { Comparison, ComparisonPage } from "comparison.slint";
 export { Comparison } from "comparison.slint";
@@ -546,6 +548,12 @@ export component Desk inherits Window {
     background: Theme.canvas; default-font-family: "Segoe UI";
     in property <string> project;
     in property <[string]> rows;
+    in-out property <bool> work-open;
+    in property <[WorkRow]> work-items;
+    in-out property <int> work-offset;
+    in property <bool> more-work;
+    in property <string> work-error;
+    callback load-work(int);
     in property <[ChatTurn]> turns;
     in property <MeterData> context-meter;
     in property <[MeterData]> usage-meters;
@@ -592,6 +600,7 @@ export component Desk inherits Window {
     in property <bool> can-review;
     in property <bool> can-discard;
     in property <bool> can-resume;
+    in property <bool> recoverable-goal;
     in property <bool> can-retry;
     in property <bool> busy;
     in property <bool> running;
@@ -670,7 +679,7 @@ export component Desk inherits Window {
     function new-chat() {root.visit("chat"); root.chat-query=""; root.select-row(-1); composer.focus-input();}
     public function open-asset-draft() {
         if Comparison.visible {Comparison.close();}
-        root.editing-goal = false; root.studio-open = false; root.album-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
+        root.editing-goal = false; root.studio-open = false; root.album-open = false; root.work-open = false; root.viewing-shot = ""; root.return-to-outputs = false; root.open-panel = OpenPanel.closed;
         if !root.writable { root.new-chat(); }
         composer.focus-input();
     }
@@ -678,8 +687,8 @@ export component Desk inherits Window {
     private property <bool> compact: root.width < 940px;
     private property <bool> hide-context;
     private property <bool> compact-context;
-    private property <bool> chat-screen: !Comparison.visible && !Studio.inspecting && !root.studio-open && !root.settings-open && !root.album-open && root.viewing-shot == "";
-    private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !Studio.inspecting);
+    private property <bool> chat-screen: !Comparison.visible && !Studio.inspecting && !root.studio-open && !root.settings-open && !root.album-open && !root.work-open && root.viewing-shot == "";
+    private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !root.work-open && !Studio.inspecting);
     private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
     private property <string> chat-query;
     private property <[PickerOption]> search-hits;
@@ -687,7 +696,7 @@ export component Desk inherits Window {
     callback select-hit(string);
     changed chat-query => {root.search-hits = root.find-chats(root.chat-query);}
     public function reset-chat-navigation() {
-        root.chat-query = ""; root.compact-context = false; root.clear-recipient();
+        root.chat-query = ""; root.compact-context = false; root.work-open = false; root.clear-recipient();
         root.settings-origin = "chat"; root.settings-origin-shot = ""; root.editing-goal = false;
     }
     changed compact => {root.compact-context = false;}
@@ -718,13 +727,15 @@ export component Desk inherits Window {
     function visit(where: string) {
         if Studio.inspecting && where != "settings" && !root.restoring-destination {Studio.command("close-inspector");}
         if where == "settings" && !root.settings-open {
-            root.settings-origin = Comparison.visible ? "comparison" : root.studio-open ? "studio" : root.album-open ? "album" : "chat";
+            root.settings-origin = Comparison.visible ? "comparison" : root.studio-open ? "studio" : root.album-open ? "album" : root.work-open ? "work" : "chat";
             root.settings-origin-shot = root.viewing-shot;
         }
         root.editing-goal = false;
         if Comparison.visible && where != "settings" && where != "comparison" {Comparison.close();}
         root.open-panel = OpenPanel.closed; root.viewing-shot = "";
         root.studio-open = where == "studio"; root.settings-open = where == "settings"; root.album-open = where == "album";
+        root.work-open = where == "work";
+        if root.work-open {root.load-work(root.restoring-destination ? root.work-offset : 0);}
         root.compact-context = false;
         if root.studio-open {Studio.command("refresh"); if Studio.editing-run { TaskControls.open(true,Studio.area); }}
         if root.settings-open {root.visit-settings(root.settings-tab,root.settings-provider);}
@@ -740,7 +751,7 @@ export component Desk inherits Window {
             VerticalLayout { padding-left: 6px; padding-right: 6px; padding-top: 15px; padding-bottom: 10px; spacing: 4px;
                 Rectangle { height: 42px; WorkshopMark { x: (parent.width - self.width) / 2; } }
                 if root.project != "": RailAction { caption: "New chat"; label: "New chat"; symbol: "\u{e710}"; enabled: !root.busy; activate => {root.new-chat();} }
-                RailAction { caption: "Chats"; label: "Chats"; symbol: "\u{e8bd}"; selected: root.chat-screen;
+                RailAction { caption: "Chats"; label: "Chats"; symbol: "\u{e8bd}"; selected: root.chat-screen || root.work-open;
                     activate => {if root.chat-screen {root.toggle-context();} else {root.visit("chat");}} }
                 if root.project != "": RailAction { caption: "Tools"; label: "Project tools"; symbol: "\u{e90f}"; selected: root.studio-open;
                     activate => {if root.studio-open && root.compact {root.toggle-context();} else {root.visit(root.studio-open ? "chat" : "studio");}} }
@@ -945,7 +956,7 @@ export component Desk inherits Window {
             y:parent.height - self.height - feedback.height - 24px;
             objective:root.goal-objective; status:root.goal-status; detail:root.goal-detail; value <=> root.goal-input;
             writable:root.writable; busy:root.busy; valid:root.has-content(root.goal-input);
-            can-retry:root.can-retry; retry=>{root.operate("retry");}
+            can-retry:root.can-retry; can-recover:root.recoverable-goal; retry=>{root.operate("retry");}
             start(v)=>{root.run-goal(v);} close=>{root.close-goal();}
             pause=>{root.operate("pause-goal");} clear=>{root.operate("clear-goal");}
         }
@@ -965,8 +976,12 @@ export component Desk inherits Window {
 
         }
     }
-    // Disable the outside hit area during the press so Slint delivers that same
-    // event to the newly uncovered control. The opener itself toggles on release.
+    if root.work-open: WorkQueuePage {
+        x: rail.width; width: root.width - self.x; height: root.height;
+        items: root.work-items; more: root.more-work; offset: root.work-offset; busy: root.busy; problem: root.work-error;
+        back => {root.visit("chat");} refresh(offset) => {root.load-work(offset);}
+        open(id) => {root.visit("chat"); if !root.busy {root.select-hit(id);} }
+    }
     if root.studio-open && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; navigation-hidden: !root.context-visible; browse=>{root.toggle-context();} }
     if Studio.inspecting && !root.studio-open && !root.settings-open: ModelInspector { x: rail.width; width: root.width - self.x; height: root.height; }
     if root.studio-open && Studio.editing-run: Rectangle {
@@ -1163,8 +1178,8 @@ export component Desk inherits Window {
         if root.settings-open: VerticalLayout {
             padding: 14px; padding-top: 19px; alignment: start; spacing: 5px;
             Text { text: "Settings"; height: 36px; color: Theme.text; font-size: 20px; font-weight: 600; }
-            for tab[i] in ["Providers", "Plugins", "Skills", "Tasks", "Appearance", "Notifications"]: RowAction {
-                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e90f}","\u{e790}","\u{ea8f}"][i]; selected: root.settings-tab == tab;
+            for tab[i] in ["Providers", "Plugins", "Skills", "MCP servers", "Tasks", "Appearance", "Notifications"]: RowAction {
+                label: tab; glyph: ["\u{e77b}","\u{e74c}","\u{e8f1}","\u{e774}","\u{e90f}","\u{e790}","\u{ea8f}"][i]; selected: root.settings-tab == tab;
                 enabled: !root.settings-working; activate => {root.visit-settings(tab,root.settings-provider);root.compact-context=false;}
             }
         }
@@ -1177,7 +1192,10 @@ export component Desk inherits Window {
                 Text { x: parent.width - 20px; text:"\u{e70d}"; font-family:"Segoe MDL2 Assets"; color:Theme.muted; font-size:11px; vertical-alignment:center; }
             }
             Rectangle { height:1px; background:Theme.line; }
-            Text { text: "Chats"; color: Theme.text; font-size: 18px; font-weight: 600; height: 31px; vertical-alignment: bottom; }
+            HorizontalLayout { height: 34px; spacing: 5px;
+                Text { text: "Chats"; color: Theme.text; font-size: 18px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                if root.project != "": Action { label: "Work queue"; width: 98px; activate => {root.visit("work");} }
+            }
             if root.project != "": LineEdit { height: 34px; placeholder-text: "Search chats"; accessible-label: "Search chats"; text <=> root.chat-query; }
             if root.chat-query != "" && root.search-hits.length == 0: Text { text:"No matching chats"; color:Theme.muted; font-size:13px; wrap:word-wrap; }
             if root.project != "" && root.chat-query == "" && root.rows.length == 0: Text { text:"Your conversations appear here."; color:Theme.muted; font-size:13px; wrap:word-wrap; }
@@ -1196,6 +1214,8 @@ export component Desk inherits Window {
             }
         }
     }
+    // Disable the outside hit area during the press so Slint delivers that same
+    // event to the newly uncovered control. The opener itself toggles on release.
     TouchArea {
         enabled: root.open-panel != OpenPanel.closed;
         pointer-event(e) => {

@@ -211,9 +211,14 @@ impl Store {
     }
 
     pub fn cache_worker_catalog(&self, catalog: &provider::Catalog) {
-        if let Ok(mut cache) = self.worker_catalog.try_lock() {
-            *cache = Some(catalog.clone());
-        }
+        *self.worker_catalog.lock().unwrap() =
+            std::sync::Arc::new(provider::CatalogSources::from_catalog(catalog));
+    }
+
+    pub fn refresh_model_sources(&self) -> std::sync::Arc<provider::CatalogSources> {
+        let fresh = std::sync::Arc::new(provider::CatalogSources::default());
+        *self.worker_catalog.lock().unwrap() = fresh.clone();
+        fresh
     }
 
     pub(crate) async fn worker_inference(
@@ -274,34 +279,27 @@ impl Store {
             if model.is_empty()
                 && effort.is_empty()
                 && policy.max_effort.is_empty()
-                && sources[0] == "codex"
+                && (sources.len() == 1 || sources[0] == "codex")
             {
-                return Ok((String::new(), String::new()));
+                let source = sources[0];
+                let selection = if source == "codex" {
+                    String::new()
+                } else {
+                    format!("{source}:default")
+                };
+                return Ok((selection, String::new()));
             }
         }
-        let mut cache = self.worker_catalog.lock().await;
-        let available = cache.get_or_insert_with(Default::default);
+        let cache = self.worker_catalog.lock().unwrap().clone();
         let mut errors = Vec::new();
         for source in sources {
-            if !available
-                .models
-                .iter()
-                .any(|m| provider::provider_for(&m.model) == source)
-            {
-                match provider::worker_catalog(&self.project, Some(source)).await {
-                    Ok(found) => {
-                        available.models.extend(found.models);
-                        if source == "codex" || available.default_model.is_empty() {
-                            available.default_model = found.default_model;
-                            available.default_effort = found.default_effort;
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(format!("{source}: {e:#}"));
-                        continue;
-                    }
+            let available = match cache.get(&self.project, source).await {
+                Ok(catalog) => catalog,
+                Err(e) => {
+                    errors.push(format!("{source}: {e:#}"));
+                    continue;
                 }
-            }
+            };
             match policy.resolve(model, effort, available, source) {
                 Ok(choice) => return Ok(choice),
                 Err(e) => errors.push(format!("{source}: {e:#}")),

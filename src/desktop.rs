@@ -31,7 +31,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, WorkRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
@@ -45,6 +45,7 @@ enum Update {
         provider: preferences::Provider,
         account_changed: bool,
         recommendation: bool,
+        changed: bool,
     },
     Opened(Arc<Store>, Option<notifications::Target>),
     Models(PathBuf, u64, Result<provider::Catalog>),
@@ -486,6 +487,49 @@ impl App {
             .collect();
         ModelRc::new(VecModel::from(items))
     }
+    fn refresh_work_queue(&self, offset: i32) {
+        const PAGE: usize = 40;
+        let ui = self.ui.unwrap();
+        let store = self.store.borrow();
+        let Some(store) = store.as_ref() else { return };
+        let offset = offset.max(0);
+        match store.work_queue(offset as usize, PAGE + 1) {
+            Ok(mut rows) => {
+                ui.set_more_work(rows.len() > PAGE);
+                rows.truncate(PAGE);
+                let items = rows
+                    .into_iter()
+                    .map(|r| {
+                        let mut owner =
+                            workshop::provider_permissions::provider_label(&r.provider).to_owned();
+                        if r.running_workers + r.queued_workers != 0 {
+                            owner.push_str(&format!(
+                                " · {} running, {} queued workers",
+                                r.running_workers, r.queued_workers
+                            ));
+                        }
+                        if r.queued_messages != 0 {
+                            owner.push_str(&format!(" · {} queued messages", r.queued_messages));
+                        }
+                        WorkRow {
+                            id: r.id.to_string().into(),
+                            title: r.title.into(),
+                            status: r.status.into(),
+                            detail: r.next_action.into(),
+                            owner: owner.into(),
+                            current: self.id.get() == Some(r.id),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !ui.get_work_items().iter().eq(items.iter().cloned()) {
+                    ui.set_work_items(ModelRc::new(VecModel::from(items)));
+                }
+                ui.set_work_offset(offset);
+                ui.set_work_error("".into());
+            }
+            Err(e) => ui.set_work_error(format!("Could not read open work. {e:#}").into()),
+        }
+    }
     fn refresh_album(&self) {
         let ui = self.ui.unwrap();
         match data_dir().and_then(|home| workshop::screenshots::album(&home)) {
@@ -740,8 +784,14 @@ impl App {
             .unwrap()
             .set_catalog_status("Loading models…".into());
         let updates = self.updates.clone();
+        let sources = self
+            .store
+            .borrow()
+            .as_ref()
+            .map(|store| store.refresh_model_sources())
+            .unwrap_or_default();
         std::thread::spawn(move || {
-            if let Err(error) = provider::discover_models(&project, |catalog| {
+            if let Err(error) = sources.discover(&project, |catalog| {
                 let _ = updates.send(Update::Models(project.clone(), generation, Ok(catalog)));
             }) {
                 let _ = updates.send(Update::Models(project, generation, Err(error)));
@@ -900,6 +950,15 @@ impl App {
             };
             arg = path.to_string_lossy().into_owned();
         }
+        if action == "locate-mcp" {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose Blender MCP executable")
+                .pick_file()
+            else {
+                return;
+            };
+            arg = path.to_string_lossy().into_owned();
+        }
         ui.set_settings_working(true);
         ui.set_settings_working_id(arg.as_str().into());
         self.settings_read.take();
@@ -910,6 +969,7 @@ impl App {
                 "login" => "Finish signing in with your provider…",
                 "remove" => "Uninstalling…",
                 "recommend" => "Installing recommendation…",
+                "connect-mcp" | "locate-mcp" | "test-mcp" => "Checking Blender MCP tools…",
                 "install" | "folder" => "Installing…",
                 _ => "Updating…",
             }
@@ -936,6 +996,7 @@ impl App {
                 account_changed: tab == "Providers"
                     && matches!(action.as_str(), "login" | "logout"),
                 recommendation: action == "recommend",
+                changed: action != "test-mcp",
             });
         });
     }
@@ -1090,8 +1151,17 @@ impl App {
         let ui = self.ui.unwrap();
         let mut partial = None::<String>;
         let mut transcript_changed = false;
+        let mut work_changed = false;
         let follow = ui.invoke_at_end();
         for update in self.receiver.try_iter() {
+            work_changed |= matches!(
+                &update,
+                Update::Started(..)
+                    | Update::Activity(..)
+                    | Update::WorkersChanged
+                    | Update::TranscriptChanged
+                    | Update::Finished(_)
+            );
             match update {
                 Update::Attention(target, title, detail) => self.notify(target, title, &detail),
                 Update::NotificationError(error) => ui.set_notice(error.into()),
@@ -1224,6 +1294,7 @@ impl App {
                     provider,
                     account_changed,
                     recommendation,
+                    changed,
                 } => {
                     ui.set_settings_working(false);
                     let id = ui.get_settings_working_id();
@@ -1240,7 +1311,7 @@ impl App {
                                     *row = preferences::Row::checking_provider(id.as_str());
                                 }
                                 self.filter_preferences(&ui.get_settings_query());
-                            } else {
+                            } else if changed {
                                 self.plugin_catalogs.borrow_mut().remove(&provider);
                             }
                             if recommendation {
@@ -1254,7 +1325,9 @@ impl App {
                                 }
                                 self.filter_preferences(&ui.get_settings_query());
                             }
-                            self.clear_sessions();
+                            if changed {
+                                self.clear_sessions();
+                            }
                             if account_changed && let Some(s) = self.store.borrow().as_ref() {
                                 self.usage.borrow_mut().clear();
                                 ui.set_usage_meters(usage_meters(Vec::new()));
@@ -1307,8 +1380,9 @@ impl App {
                     self.draft_policy.take();
                     self.catalog.replace(Default::default());
                     ui.set_catalog_ready(false);
-                    self.load_models(store.project.clone());
+                    let project = store.project.clone();
                     self.store.replace(Some(store));
+                    self.load_models(project);
                     ui.set_draft("".into());
                 }
                 Update::Models(project, generation, result) => {
@@ -1323,9 +1397,6 @@ impl App {
                     ) {
                         match result {
                             Ok(catalog) => {
-                                if let Some(store) = store {
-                                    store.cache_worker_catalog(&catalog);
-                                }
                                 self.catalog.replace(catalog);
                                 ui.set_catalog_ready(true);
                                 ui.set_catalog_status("".into());
@@ -1460,6 +1531,9 @@ impl App {
                 }
             }
         }
+        if work_changed && ui.get_work_open() {
+            self.refresh_work_queue(ui.get_work_offset());
+        }
         if let Some(text) = partial {
             ui.set_partial(text.into());
             if follow {
@@ -1556,6 +1630,7 @@ impl App {
         let ui = self.ui.unwrap();
         ui.set_goal_objective(goal.as_ref().map_or("", |g| g.objective.as_str()).into());
         ui.set_goal_status(goal.as_ref().map_or("", |g| g.status.as_str()).into());
+        ui.set_recoverable_goal(goal.as_ref().is_some_and(|g| g.recoverable));
         ui.set_goal_detail(goal.as_ref().map_or("", |g| g.detail.as_str()).into());
         Ok(())
     }
@@ -1714,7 +1789,10 @@ impl App {
             None
         };
         self.start(move |events| {
-            if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
+            if matches!(
+                op.as_str(),
+                "submit" | "retry" | "resume" | "send-next" | "recover-goal"
+            ) {
                 let a = match op.as_str() {
                     "submit" => store.prepare_with_files(
                         &objective
@@ -1736,10 +1814,17 @@ impl App {
                         draft = next;
                         attempt
                     }
+                    "recover-goal" => {
+                        let (attempt, direction) = store
+                            .recover_goal(Some(id.context("Select a chat.")?))?
+                            .context("This goal is no longer waiting for recovery.")?;
+                        draft = direction.as_str().into();
+                        attempt
+                    }
                     _ => store
                         .resume_with_goal(id.context("Select a task.")?, objective.as_deref())?,
                 };
-                let prompt = if matches!(op.as_str(), "resume" | "send-next") {
+                let prompt = if matches!(op.as_str(), "resume" | "send-next" | "recover-goal") {
                     draft
                 } else if op == "retry" {
                     store.retry_prompt(&a)?.as_str().into()
@@ -1749,7 +1834,10 @@ impl App {
                 if op == "submit" {
                     store.bind_draft_screenshots(a.id)?;
                 }
-                events.send(Update::Started(a.id, op != "send-next" && from_composer))?;
+                events.send(Update::Started(
+                    a.id,
+                    !matches!(op.as_str(), "send-next" | "recover-goal") && from_composer,
+                ))?;
                 let active_goal = store.chat_goal(a.id)?.filter(|g| g.status == "active");
                 let earlier_output = store.last_asset_output(a.id)?.map_or(0, |(id, _)| id);
                 let earlier_checkpoint = store.current_checkpoint(a.id)?;
@@ -2050,6 +2138,8 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
+    ui.on_load_work(move |offset| a.refresh_work_queue(offset));
+    let a = app.clone();
     ui.on_find_chats(move |query| {
         if query.trim().is_empty() {
             return Default::default();
@@ -2108,7 +2198,11 @@ fn main() -> Result<()> {
     let a = app.clone();
     ui.on_run_goal(move |objective| {
         if let Err(e) = a.operate_with_goal(
-            if a.id.get().is_some() {
+            if a.ui.unwrap().get_recoverable_goal()
+                && objective.trim() == a.ui.unwrap().get_goal_objective().as_str()
+            {
+                "recover-goal"
+            } else if a.id.get().is_some() {
                 "resume"
             } else {
                 "submit"

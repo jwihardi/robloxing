@@ -2,6 +2,23 @@
 
 The Codex lead and workers were exercised with the Windows release build, standalone Codex CLI 0.172.0 and the same signed-in account. Both roles used `gpt-6.2-sol`. All projects used for these runs were disposable Git folders.
 
+## Provider startup and project management in 0.1.10
+
+The Windows release CLI sent one short greeting to each installed provider from a separate, empty Git project. Time to first visible text includes preparing the isolated working copy, starting the native CLI and waiting for the provider to answer. Each measurement is one cold run on this PC.
+
+| Provider | First visible text |
+|---|---:|
+| Codex | 7.41 s |
+| Claude Code | 5.77 s |
+| Antigravity | 4.09 s |
+| Gemini CLI | Requested separate Gemini CLI credentials after 6.86 s |
+
+The installed Gemini CLI also passed an end-to-end test against a local model endpoint, covering streaming, session resume, queued messages and worker dispatch. The picker and workers share one in-flight model lookup per provider. A concurrency regression held Codex discovery open, resolved a Claude request and verified that another Codex caller reused the pending result.
+
+Workshop imported the installed Blender Lab stdio server into an isolated profile and discovered all 26 tools. In a live Claude chat, the agent called `get_objects_summary` and returned the name of a mesh in a private, headless Blender scene. The four native provider adapters also passed fixture checks for the shared server configuration. The private-desktop test opened a blocked chat from the work queue while the CLI read the same blocker from the live project. A forced process exit followed by `recover-goal` completed a two-file goal in the original working copy and left it ready for review.
+
+The queue’s next-action display follows feedback from developers managing several agents. Goal recovery keeps the existing working copy and sends the last recorded progress back to the agent. These choices also follow the session overview in Agent of Empires and Anthropic’s guidance on handing off long-running work. [Developer discussion](https://www.reddit.com/r/ClaudeAI/comments/1xmzp2n/how_do_you_keep_track_of_multiple_coding_agents/) · [Agent of Empires](https://www.agent-of-empires.com/) · [Anthropic engineering](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
+
 ## Claude Code and mixed teams
 
 The signed-in Windows Claude Code CLI (2.1.222, Claude Pro) and Codex each took both roles in disposable Git projects. Each request asked one worker to create a one-line greeting and the lead to record its capitalization. The native provider processes ran headlessly. Each pairing produced a worker attempt, an integrated review and the expected file after acceptance. The source project had no greeting before acceptance.

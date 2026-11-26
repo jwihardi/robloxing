@@ -11,6 +11,7 @@ pub mod screenshots;
 pub mod studio;
 pub mod team;
 pub mod usage;
+pub mod work_queue;
 pub mod worker_policy;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -62,7 +63,7 @@ pub struct Store {
     db: Mutex<Connection>,
     _lock: File,
     worker: bool,
-    worker_catalog: tokio::sync::Mutex<Option<provider::Catalog>>,
+    worker_catalog: Mutex<std::sync::Arc<provider::CatalogSources>>,
     controls: Mutex<
         std::collections::HashMap<i64, tokio::sync::mpsc::UnboundedSender<provider::Control>>,
     >,
@@ -233,6 +234,7 @@ impl Store {
             ("workers", "model", "TEXT"),
             ("workers", "effort", "TEXT"),
             ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
+            ("chat_goals", "recoverable", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let missing: bool = tx.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
@@ -243,8 +245,22 @@ impl Store {
                 tx.execute_batch(&format!(
                     "ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 ))?;
+                if table == "chat_goals" && column == "recoverable" {
+                    tx.execute(
+                        "UPDATE chat_goals SET recoverable=1 WHERE status='paused' AND detail=?1
+                        AND attempt IN (SELECT id FROM attempts WHERE state='interrupted')",
+                        [goals::INTERRUPTED],
+                    )?;
+                }
             }
         }
+        // Older databases acquire the recovery marker in the migration above.
+        tx.execute_batch("CREATE VIEW IF NOT EXISTS recoverable_goals AS
+            SELECT g.attempt,g.objective,g.detail FROM chat_goals g JOIN attempts a ON a.id=g.attempt
+            WHERE g.recoverable=1 AND g.status='paused' AND a.state='interrupted'
+              AND NOT EXISTS(SELECT 1 FROM attempts newer WHERE newer.task=a.task AND newer.id>a.id)
+              AND coalesce((SELECT kind FROM events WHERE attempt=a.id AND kind IN ('workshop/blocker','workshop/blocker_resolved')
+                            ORDER BY id DESC LIMIT 1),'') <> 'workshop/blocker'")?;
         tx.commit()?;
         studio::reports::recover(&dir, &mut db)?;
         db.execute("UPDATE studio_jobs SET state='Interrupted', detail='Workshop closed during this run.' WHERE state IN ('Running','Queued')", [])?;
@@ -266,8 +282,9 @@ impl Store {
         };
         store.recover_workers()?;
         store.db.lock().unwrap().execute(
-            "UPDATE chat_goals SET status='paused',detail='Workshop closed before this goal finished.' WHERE status IN ('active','verifying')",
-            [],
+            "UPDATE chat_goals SET status='paused',recoverable=1,
+             detail=CASE WHEN detail='' THEN ?1 ELSE detail END WHERE status IN ('active','verifying')",
+            [goals::INTERRUPTED],
         )?;
         let interrupted = {
             let db = store.db.lock().unwrap();
@@ -559,6 +576,17 @@ impl Store {
         self.resume_with_goal(id, None)
     }
 
+    fn mark_resuming(db: &Connection, id: i64) -> Result<()> {
+        let changed = db.execute(
+            "UPDATE attempts SET state='running',action='Resuming session' WHERE id=?1
+             AND state IN ('interrupted','failed','cancelled','review')
+             AND NOT EXISTS (SELECT 1 FROM attempts WHERE state IN ('running','preparing','applying'))",
+            [id],
+        )?;
+        ensure!(changed == 1, "Finish the active operation first.");
+        Ok(())
+    }
+
     pub fn resume_with_goal(&self, id: i64, objective: Option<&str>) -> Result<Attempt> {
         let a = self.attempt(id)?;
         ensure!(
@@ -572,8 +600,7 @@ impl Store {
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
-            let changes=tx.execute("UPDATE attempts SET state='running',action='Resuming session' WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM attempts WHERE state IN ('running','preparing','applying'))",[id])?;
-            ensure!(changes == 1, "Finish the active operation first.");
+            Self::mark_resuming(&tx, id)?;
             if let Some(objective) = objective {
                 goals::set(&tx, id, objective)?;
             }

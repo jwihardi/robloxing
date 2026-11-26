@@ -2,11 +2,14 @@ use crate::Store;
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
+pub(crate) const INTERRUPTED: &str = "Workshop closed before this goal finished.";
+
 #[derive(Debug, PartialEq)]
 pub struct ChatGoal {
     pub objective: String,
     pub status: String,
     pub detail: String,
+    pub recoverable: bool,
 }
 
 /// Match a whole command at the start of a message. A bare command opens the editor.
@@ -23,7 +26,7 @@ pub(crate) fn set(db: &Connection, id: i64, objective: &str) -> Result<()> {
     );
     db.execute(
         "INSERT INTO chat_goals(attempt,objective,status) VALUES(?1,?2,'active')
-         ON CONFLICT(attempt) DO UPDATE SET objective=excluded.objective,status='active',detail=''",
+         ON CONFLICT(attempt) DO UPDATE SET objective=excluded.objective,status='active',detail='',recoverable=0",
         params![id, objective],
     )?;
     Ok(())
@@ -42,7 +45,8 @@ impl Store {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT objective,CASE WHEN status='verifying' THEN 'active' ELSE status END,detail
+                "SELECT objective,CASE WHEN status='verifying' THEN 'active' ELSE status END,detail,
+                        EXISTS(SELECT 1 FROM recoverable_goals WHERE attempt=?1)
                  FROM chat_goals WHERE attempt=?1",
                 [id],
                 |r| {
@@ -50,10 +54,43 @@ impl Store {
                         objective: r.get(0)?,
                         status: r.get(1)?,
                         detail: r.get(2)?,
+                        recoverable: r.get(3)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    pub fn recover_goal(&self, requested: Option<i64>) -> Result<Option<(crate::Attempt, String)>> {
+        let (id, objective, progress) = {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            let saved: Option<(i64, String, String)> = tx
+                .query_row(
+                    "SELECT attempt,objective,detail FROM recoverable_goals
+                 WHERE ?1 IS NULL OR attempt=?1 ORDER BY attempt LIMIT 1",
+                    [requested],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some(saved) = saved else { return Ok(None) };
+            ensure!(
+                self.work(saved.0).is_dir(),
+                "The saved working copy is missing."
+            );
+            Self::mark_resuming(&tx, saved.0)?;
+            tx.execute("UPDATE chat_goals SET status='active',recoverable=0,detail=CASE WHEN detail=?2 THEN '' ELSE detail END WHERE attempt=?1",
+                params![saved.0, INTERRUPTED])?;
+            tx.commit()?;
+            saved
+        };
+        let mut direction = format!(
+            "Continue the interrupted goal in this working copy. Inspect existing work before repeating steps and verify the result.\n\n{objective}"
+        );
+        if !progress.is_empty() && progress != INTERRUPTED {
+            direction.push_str(&format!("\n\nLast recorded progress: {progress}"));
+        }
+        Ok(Some((self.attempt(id)?, direction)))
     }
 
     pub fn clear_goal(&self, id: i64) -> Result<()> {
@@ -68,7 +105,7 @@ impl Store {
 
     pub fn pause_goal(&self, id: i64, detail: &str) -> Result<()> {
         self.db.lock().unwrap().execute(
-            "UPDATE chat_goals SET status='paused',detail=?2 WHERE attempt=?1 AND status IN ('active','verifying')",
+            "UPDATE chat_goals SET status='paused',detail=?2,recoverable=0 WHERE attempt=?1 AND (status IN ('active','verifying') OR recoverable=1)",
             params![id, detail],
         )?;
         Ok(())
@@ -265,6 +302,85 @@ mod tests {
         assert_eq!(store.chat_goal(id)?.unwrap().status, "paused");
         assert!(store.report_goal(id, "progress", "Late result").is_err());
         assert!(matches!(run.advance(&store, id)?, Next::Stop));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_preserves_the_work_checkpoint_and_only_claims_an_interrupted_goal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("project");
+        let home = dir.path().join("home");
+        let store = Store::open(&project, &home)?;
+        let goal = store.prepare("/goal Finish the lobby", "claude:sonnet", None)?;
+        let id = goal.id;
+        store.session(id, "same-provider-session")?;
+        std::fs::write(store.work(id).join("lobby.txt"), "saved layout")?;
+        let mut run = GoalRun::start(&store, id)?.unwrap();
+        store.report_goal(id, "progress", "Saved the lobby layout")?;
+        assert!(matches!(run.advance(&store, id)?, Next::Continue(_)));
+        drop(store);
+
+        let store = Store::open(&project, &home)?;
+        assert_eq!(store.chat_goal(id)?.unwrap().status, "paused");
+        store.event(id, "workshop/blocker", Some("Which spawn point?"))?;
+        assert!(store.recover_goal(Some(id))?.is_none());
+        store.event(id, "workshop/blocker_resolved", None)?;
+        let (resumed, message) = store.recover_goal(None)?.unwrap();
+        assert_eq!(
+            (
+                resumed.id,
+                resumed.session.as_str(),
+                resumed.provider.as_str()
+            ),
+            (id, "same-provider-session", "claude")
+        );
+        assert!(
+            message.contains("\n\nFinish the lobby") && message.ends_with("Saved the lobby layout")
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.work(id).join("lobby.txt"))?,
+            "saved layout"
+        );
+        assert_eq!(
+            store.chat_goal(id)?.unwrap().detail,
+            "Saved the lobby layout"
+        );
+        assert!(store.recover_goal(Some(id))?.is_none());
+        drop(store);
+
+        let store = Store::open(&project, &home)?;
+        store.pause_goal(id, "Park this for now")?;
+        assert!(store.recover_goal(None)?.is_none());
+        let retry = store.prepare("Finish the lobby", "", Some(id))?;
+        drop(store); // before the provider assigned a session ID
+        let store = Store::open(&project, &home)?;
+        let (fresh, _) = store.recover_goal(None)?.unwrap();
+        assert_eq!(fresh.id, retry.id);
+        assert!(fresh.session.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn older_interrupted_goals_can_be_recovered_after_upgrading() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("project");
+        let home = dir.path().join("home");
+        let store = Store::open(&project, &home)?;
+        let old = store.prepare("/goal Verify the lobby", "", None)?;
+        store.session(old.id, "legacy-session")?;
+        store.pause_goal(old.id, INTERRUPTED)?;
+        store.finish(old.id, "interrupted", "Interrupted")?;
+        let db_path = store.dir.join("workshop.sqlite");
+        drop(store);
+        Connection::open(db_path)?.execute_batch(
+            "DROP VIEW recoverable_goals; ALTER TABLE chat_goals DROP COLUMN recoverable;",
+        )?;
+        let upgraded = Store::open(&project, &home)?;
+        assert!(upgraded.chat_goal(old.id)?.unwrap().recoverable);
+        assert_eq!(
+            upgraded.recover_goal(None)?.unwrap().0.session,
+            "legacy-session"
+        );
         Ok(())
     }
 

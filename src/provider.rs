@@ -4,6 +4,7 @@ use crate::{
 };
 pub mod antigravity;
 mod art;
+pub mod blender_mcp;
 mod catalog;
 mod claude;
 pub mod gemini;
@@ -24,7 +25,8 @@ use anyhow::{Context, Result, bail, ensure};
 pub(crate) use art::{design_model, generate_image, summarize_report};
 pub(crate) use catalog::worker_catalog;
 pub use catalog::{
-    Catalog, Model as CatalogModel, discover_models, load_models_and_usage, model_catalog,
+    Catalog, CatalogSources, Model as CatalogModel, discover_models, load_models_and_usage,
+    model_catalog,
 };
 
 pub type AccountLimits = std::collections::HashMap<String, Vec<UsageWindow>>;
@@ -250,7 +252,7 @@ fn instructions(store: &Store, a: &Attempt) -> Result<String> {
         )
     };
     if !store.worker {
-        instructions.push_str(" When the creator asks to make or revise artwork, a texture or a 3D model, call workshop_generate_asset. You choose the generator, give it a complete brief, and can select the model and effort within the creator's settings. Omit those fields to route automatically. Use reference_image=chat when revising a posted image or sketch, or source_asset to revise a saved design. Only the lead can call this tool. For a standalone asset, call it directly as the specialist assignment, including when automatic project delegation is enabled. The tool verifies and delivers the finished file. Use its result as evidence of delivery. Delegate additional project work when the request calls for it. Continue the conversation here. Use workshop_send_image for an existing project image. Use workshop_import_asset when the request also needs the file in the project.");
+        instructions.push_str(" For an explicit request to inspect or edit the connected Blender scene, use its Blender MCP tools when available. When the creator asks for a new or revised asset in this chat, call workshop_generate_asset. You choose the generator, give it a complete brief, and can select the model and effort within the creator's settings. Omit those fields to route automatically. Use reference_image=chat when revising a posted image or sketch, or source_asset to revise a saved design. Only the lead can call this tool. For a standalone asset, call it directly as the specialist assignment, including when automatic project delegation is enabled. The tool verifies and delivers the finished file. Use its result as evidence of delivery. Delegate additional project work when the request calls for it. Continue the conversation here. Use workshop_send_image for an existing project image. Use workshop_import_asset when the request also needs the file in the project.");
     }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
     Ok(instructions)
@@ -265,6 +267,9 @@ async fn open_thread(
     let mut params = json!({"cwd":store.work(a.id),"approvalPolicy":"never","sandbox":"workspace-write",
         "developerInstructions":"Work only in the current project copy. Keep edits available for the creator to review."});
     params["config"] = json!({"features.multi_agent":false, "features.image_generation":false});
+    if let Some(server) = blender_mcp::configured(&store.preferences_home)? {
+        params["config"]["mcp_servers.blender"] = server.codex();
+    }
     let mut instructions = instructions(store, a)?;
     if let Some(bridge) = legacy_assets {
         params["config"]["mcp_servers.workshop_assets"] = bridge.codex_config()?;

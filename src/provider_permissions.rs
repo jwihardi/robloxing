@@ -4,6 +4,16 @@ use std::{fs, path::Path};
 
 pub const PROVIDERS: [&str; 4] = ["codex", "claude", "antigravity", "gemini"];
 
+pub fn provider_label(id: &str) -> &str {
+    match id {
+        "codex" => "Codex",
+        "claude" => "Claude Code",
+        "antigravity" => "Antigravity",
+        "gemini" => "Gemini CLI",
+        other => other,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TaskRole {
     Workers,

@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL
     tokens INTEGER, model TEXT, effort TEXT, UNIQUE(lead,name));
 CREATE TABLE IF NOT EXISTS checkpoints(lead INTEGER PRIMARY KEY REFERENCES attempts, decisions TEXT NOT NULL, next_task TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_by_attempt ON events(attempt,id);
+CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts(task,id);
+CREATE INDEX IF NOT EXISTS blocker_events ON events(attempt,id)
+    WHERE kind IN ('workshop/blocker','workshop/blocker_resolved');
 CREATE TABLE IF NOT EXISTS codex_asset_sessions(session TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queued_messages(
@@ -45,7 +48,8 @@ CREATE TABLE IF NOT EXISTS chat_goals(
     attempt INTEGER PRIMARY KEY REFERENCES attempts,
     objective TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('active','verifying','paused','complete')),
-    detail TEXT NOT NULL DEFAULT ''
+    detail TEXT NOT NULL DEFAULT '',
+    recoverable INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS studio_jobs(

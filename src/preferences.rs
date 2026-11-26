@@ -240,6 +240,38 @@ pub async fn list(
         .await
         .context("The plugin catalog timed out. Select Refresh to try again.")?,
         "Skills" => skills(p),
+        "MCP servers" => {
+            let configured = workshop::provider::blender_mcp::configured(&workshop::data_dir()?)?;
+            let mut rows = vec![Row {
+                id: "blender".into(),
+                label: "Blender MCP".into(),
+                detail: match &configured {
+                    Some(server) => format!("Agents can read and edit the connected Blender scene.\n{}", server.command),
+                    None => "Share a local Blender MCP server with Codex, Claude Code, Antigravity and Gemini CLI. Agents can read and edit the connected scene.".into(),
+                },
+                action: if configured.is_some() { "disconnect-mcp" } else { "connect-mcp" },
+                button: if configured.is_some() { "Disconnect" } else { "Connect" },
+            }];
+            if configured.is_some() {
+                rows.push(Row {
+                    id: "blender-test".into(),
+                    label: "Connection test".into(),
+                    detail: "Ask the server which Blender tools it offers.".into(),
+                    action: "test-mcp",
+                    button: "Test",
+                });
+            }
+            rows.push(Row {
+                id: "blender-exe".into(),
+                label: "Blender MCP executable".into(),
+                detail:
+                    "Choose a local executable when your Blender MCP server is installed elsewhere."
+                        .into(),
+                action: "locate-mcp",
+                button: "Browse…",
+            });
+            Ok(rows)
+        }
         _ => bail!("Unknown settings page"),
     }
 }
@@ -656,6 +688,25 @@ pub async fn change(
     project: Option<&workshop::Store>,
 ) -> Result<String> {
     let arg = arg.trim();
+    if tab == "MCP servers" {
+        use workshop::provider::blender_mcp::{self, Server};
+        let home = workshop::data_dir()?;
+        return match act {
+            "connect-mcp" => Server::discover().await?.connect(&home).await,
+            "locate-mcp" => Server::new(arg.to_owned(), Vec::new()).connect(&home).await,
+            "test-mcp" => {
+                blender_mcp::configured(&home)?
+                    .context("Connect Blender MCP first.")?
+                    .test()
+                    .await
+            }
+            "disconnect-mcp" => {
+                blender_mcp::disconnect(&home)?;
+                Ok("Blender MCP sharing is off.".into())
+            }
+            _ => bail!("Unknown MCP server action"),
+        };
+    }
     if tab == "Providers" {
         if arg == "gemini-project" {
             ensure!(

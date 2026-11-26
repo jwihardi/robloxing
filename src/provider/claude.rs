@@ -10,7 +10,6 @@ const STREAM: &[&str] = &[
     "--output-format",
     "stream-json",
 ];
-const BRIDGE: &str = r#"{"mcpServers":{"workshop":{"type":"sdk","name":"workshop"}}}"#;
 
 fn spawn(cwd: &Path, args: &[&str], stderr: File) -> Result<Connection> {
     let program = std::env::var("WORKSHOP_CLAUDE").unwrap_or_else(|_| "claude".into());
@@ -34,6 +33,13 @@ fn spawn(cwd: &Path, args: &[&str], stderr: File) -> Result<Connection> {
 
 pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Connection> {
     let instructions = instructions(store, a)?;
+    let mut config = json!({"mcpServers":{"workshop":{"type":"sdk","name":"workshop"}}});
+    let mut allowed = String::from("mcp__workshop");
+    if let Some(server) = blender_mcp::configured(&store.preferences_home)? {
+        allowed.push_str(",mcp__blender");
+        config["mcpServers"]["blender"] = server.claude();
+    }
+    let config = config.to_string();
     let mut args = STREAM.to_vec();
     args.extend([
         "--include-partial-messages",
@@ -42,9 +48,9 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
         "--disallowedTools",
         "Agent,Task,Workflow,EnterWorktree,ExitWorktree",
         "--allowedTools",
-        "mcp__workshop",
+        &allowed,
         "--mcp-config",
-        BRIDGE,
+        &config,
         "--append-system-prompt",
         &instructions,
     ]);

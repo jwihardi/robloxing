@@ -92,11 +92,19 @@ Recommended also includes **Frontend Design** for interface layout, **Caveman** 
 
 In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
+**Settings → MCP servers → Blender MCP** shares a local stdio connection with Codex, Claude Code, Antigravity and Gemini CLI. **Connect** imports an enabled Blender entry from Codex or tries the installed `blender-mcp` command. **Browse…** selects a different server executable. Workshop checks the tool list before saving the connection. To inspect or edit a live scene, start the Blender Lab add-on in Blender, then ask the agent about that scene in chat. For a private background scene, Blender also supports `blender --background scene.blend --command blender_mcp`. [Blender Lab MCP](https://www.blender.org/lab/mcp-server/)
+
+The CLI uses the same setting. Run `workshop-cli blender-mcp connect`, `test`, `status` or `disconnect`. For a virtual environment, use `workshop-cli blender-mcp connect --command PATH_TO_PYTHON --arg=-m --arg=blmcp`. Disconnecting turns off Workshop’s shared connection for new sessions. Each provider still manages its own configured servers.
+
 **Plugins** lists the selected provider's installed plugins. Browse its marketplaces, choose **Install from source** to install by `plugin@marketplace`, or enter a marketplace repository and choose **Add marketplace**. Antigravity browses Google’s published plugin directory and supports installing by plugin name, GitHub URL, or local path. **Skills** installs a local folder containing `SKILL.md` or a GitHub URL pointing to that folder. Removing a user skill moves it to a sibling `removed-skills` directory for recovery. Fresh provider sessions pick up changes.
 
 When the lead delegates, expand its dispatch in the conversation or open **Activity** in the chat header to see all workers. Select a worker to see its assignment, acceptance criteria, dependencies, file scope, latest activity and reported usage. **Stop worker** interrupts that assignment while its sibling can continue. **Stop response** interrupts the whole team. Start a new chat to use delegation on projects with conversations created before H2.
 
 Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
+
+**Chats → Work queue** shows what needs your attention across the current project. Each row gives the chat, provider, worker activity and next action. Open a row to answer a blocker, resume work or review a change. The queue uses the latest attempt for each task. A plain chat reply drops out of the queue when it finishes. From another terminal, `workshop-cli --project PATH status --json` reads the same queue while the desktop is running. Use `--offset` and `--limit` to page through it.
+
+After a shutdown interrupts an active goal, open the chat’s **Goal paused → Resume goal** or run `workshop-cli --project PATH recover-goal`. Both continue in the saved working copy with the original provider and last recorded progress. Pass a chat ID to the command to select a particular goal. Headless recovery skips manually paused goals and outstanding requests for your input. Completed changes follow the usual review and acceptance flow.
 
 ## Recommended game development skills
 

@@ -1,9 +1,10 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$HarnessOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     $parameters = @{ Binary = (Resolve-Path -LiteralPath $Binary).Path }
     if ($GoalOnly) { $parameters.GoalOnly = $true }
+    if ($HarnessOnly) { $parameters.HarnessOnly = $true }
     if ($NavigationOnly) { $parameters.NavigationOnly = $true }
     if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
@@ -1111,6 +1112,57 @@ try {
             if (!$panelFound) { throw 'The open code panel did not switch to Solarized Light' }
         } finally { $render.Dispose() }
         "Formatted transcript and responsive theme checks passed. Screenshots in $root"
+        return
+    }
+    if ($HarnessOnly) {
+        Click 'Work queue'
+        Wait-For { Named 'No open work.' } 'empty work queue'
+        Click 'Back to chats'
+        Set-Content (Join-Path $root 'blocker') 'missing fixture input'
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Prepare the release')
+        Click 'Send message'
+        $cli = Join-Path (Split-Path -Parent $exe) 'workshop-cli.exe'
+        Wait-For { ((& $cli --project $project status --json) -join ' ') -match 'Needs attention' } 'recorded blocker' 20
+        Click 'Work queue'
+        Wait-For { Named 'Needs attention' } 'blocked chat in queue'
+        $items = @((& $cli --project $project status --json) | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or $items[0].title -ne 'Prepare the release' -or $items[0].status -ne 'Needs attention') { throw 'Live CLI and desktop queues disagree' }
+        Save-PrivateWindow (Join-Path $root 'work-queue.png')
+        Click 'Open chat Prepare the release'
+        Wait-For { Named 'Activity' } 'queue opens the original chat'
+        Click 'Settings'
+        Wait-For { Named 'MCP servers' } 'tool settings'
+        Click 'MCP servers'
+        Wait-For { Named 'Connect' } 'optional Blender connection'
+        Click 'Connect'
+        Wait-For { (Named 'Disconnect') -and (Named 'Test') } 'imported Blender connection' 15
+        Click 'Test'
+        Wait-For { Named 'Blender MCP answered with 1 tool.' } 'live MCP test'
+        Save-PrivateWindow (Join-Path $root 'blender-mcp.png')
+        Click 'Disconnect'
+        Wait-For { (Named 'Connect') -and !(Named 'Disconnect') } 'Blender disconnected'
+        Click 'Close settings'
+        Click 'New chat'
+        Remove-Item -LiteralPath (Join-Path $root 'blocker')
+        Set-Content (Join-Path $root 'goal-mode') 'test'
+        Set-Content (Join-Path $root 'goal.hold') 'hold'
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('/goal Reopen the saved goal')
+        Click 'Send message'
+        Wait-For { (Named 'Stop response') -and (Named 'Active goal') } 'active goal before simulated process exit'
+        $proc.Kill()
+        if (!$proc.WaitForExit(5000)) { throw 'Fixture window failed to exit' }
+        Remove-Item -LiteralPath (Join-Path $root 'goal.hold')
+        $proc.Dispose()
+        $proc = [TestDesktop]::StartApp($fixtureApp, $project)
+        $appWindow = [TestDesktop]::WaitForWindow($proc)
+        Wait-For { Named 'Work queue' } 'reopened project'
+        Click 'Work queue'
+        Wait-For { Named 'Open chat Reopen the saved goal' } 'interrupted chat in work queue'
+        Click 'Open chat Reopen the saved goal'
+        Click 'Goal paused'
+        Click 'Resume goal'
+        Wait-For { Named 'Goal complete' } 'recover the goal in the original chat'
+        Write-Output "Live work queue, goal recovery and Blender MCP settings passed. Screenshots in $root"
         return
     }
     if ($RecommendedOnly) {

@@ -22,6 +22,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Open,
+    /// Manage the Blender MCP connection shared by the provider adapters.
+    BlenderMcp {
+        #[command(subcommand)]
+        action: BlenderAction,
+    },
     /// Trust this project's Gemini configuration in Workshop copies, or restore the CLI's default trust.
     GeminiTrust {
         #[arg(action=clap::ArgAction::Set)]
@@ -29,7 +34,7 @@ enum Action {
     },
     /// List the installed provider's model IDs and supported effort levels.
     Models {
-        #[arg(long,value_parser=["claude","codex","gemini","antigravity"])]
+        #[arg(long,value_parser=crate::provider_permissions::PROVIDERS)]
         provider: Option<String>,
     },
     /// Create game assets or inspect a local binary.
@@ -38,6 +43,15 @@ enum Action {
         action: StudioAction,
     },
     List,
+    /// Show actionable project work, including while the desktop has the project open.
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=200))]
+        limit: u16,
+    },
     /// Show the workers and checkpoint for a lead conversation.
     Agents {
         id: i64,
@@ -63,7 +77,7 @@ enum Action {
     /// Stream provider JSON. Type /cancel or a steering message on stdin.
     Run {
         /// Use the selected CLI and its configured model unless --model is supplied.
-        #[arg(long,value_parser=["codex","claude","gemini","antigravity"])]
+        #[arg(long,value_parser=crate::provider_permissions::PROVIDERS)]
         provider: Option<String>,
         prompt: String,
         #[arg(long, default_value = "")]
@@ -71,6 +85,10 @@ enum Action {
         /// Reasoning effort for this turn (must be supported by the selected model).
         #[arg(long)]
         effort: Option<String>,
+    },
+    /// Continue a goal interrupted by process shutdown, in its original working copy.
+    RecoverGoal {
+        id: Option<i64>,
     },
     Retry {
         id: i64,
@@ -98,6 +116,52 @@ enum Action {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+}
+#[derive(Subcommand)]
+enum BlenderAction {
+    Status,
+    /// Use the existing Codex blender entry or a local stdio executable.
+    Connect {
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "arg", requires = "command", allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    Test,
+    Disconnect,
+}
+
+fn blender_mcp(action: BlenderAction) -> Result<()> {
+    use provider::blender_mcp::{self, Server};
+    let home = data_dir()?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            match action {
+                BlenderAction::Status => match blender_mcp::configured(&home)? {
+                    Some(server) => println!("Shared Blender MCP executable: {}", server.command),
+                    None => println!("Blender MCP sharing is off."),
+                },
+                BlenderAction::Connect { command, args } => {
+                    let server = match command {
+                        Some(exe) => Server::new(exe, args),
+                        None => Server::discover().await?,
+                    };
+                    println!("{}", server.connect(&home).await?);
+                }
+                BlenderAction::Test => {
+                    let server = blender_mcp::configured(&home)?
+                        .ok_or_else(|| anyhow::anyhow!("Connect Blender MCP first."))?;
+                    println!("{}", server.test().await?);
+                }
+                BlenderAction::Disconnect => {
+                    blender_mcp::disconnect(&home)?;
+                    println!("Blender MCP sharing is off.");
+                }
+            }
+            Ok(())
+        })
 }
 #[derive(clap::Args)]
 struct StudioAgentOptions {
@@ -353,13 +417,38 @@ fn list_models(project: &Path, provider: Option<&str>) -> Result<()> {
 pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let args = Args::parse_from(args);
     match args.command {
+        Action::BlenderMcp { action } => return blender_mcp(action),
         Action::Studio { action } => return studio(&args.project, action),
         Action::Models { provider } => return list_models(&args.project, provider.as_deref()),
+        Action::Status {
+            json,
+            offset,
+            limit,
+        } => {
+            let rows =
+                crate::work_queue::read(&args.project, &data_dir()?, offset, usize::from(limit))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("No open work on this page.");
+            } else {
+                for row in rows {
+                    println!(
+                        "#{}  {}  {}  {}\n    {}",
+                        row.id, row.status, row.provider, row.title, row.next_action
+                    );
+                }
+            }
+            return Ok(());
+        }
         _ => {}
     }
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
-        Action::Studio { .. } | Action::Models { .. } => unreachable!(),
+        Action::Studio { .. }
+        | Action::Models { .. }
+        | Action::Status { .. }
+        | Action::BlenderMcp { .. } => unreachable!(),
         Action::GeminiTrust { enabled } => {
             store.set_gemini_project_trusted(enabled)?;
             println!("Gemini project trust override: {enabled}");
@@ -458,6 +547,13 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             };
             let message = a.prompt.as_str().into();
             run(&store, a, message)?
+        }
+        Action::RecoverGoal { id } => {
+            if let Some((attempt, prompt)) = store.recover_goal(id)? {
+                run(&store, attempt, prompt.as_str().into())?;
+            } else {
+                println!("No interrupted goal is ready to recover.");
+            }
         }
         Action::Retry { id } => {
             let a = store.attempt(id)?;

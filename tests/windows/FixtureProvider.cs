@@ -111,6 +111,9 @@ class FixtureProvider {
     }
     static void Claude(string[] args) {
         claudeStream = true;
+        int config = Array.IndexOf(args,"--mcp-config");
+        if(Mode("capture-mcp") && config >= 0)
+            File.WriteAllText(Path.Combine(Dir,"mcp-claude.json"),args[config+1]);
         int instructions = Array.IndexOf(args,"--append-system-prompt");
         worker = instructions >= 0 && args[instructions+1].StartsWith("You are a Workshop worker");
         int resume = Array.IndexOf(args,"--resume");
@@ -161,7 +164,7 @@ class FixtureProvider {
             }
         }
     }
-    static void Acp() {
+    static void Acp(string provider) {
         string line; string sid=ThreadId;
         while ((line=Console.ReadLine())!=null) {
             var frame=Json.Deserialize<Dictionary<string,object>>(line);
@@ -169,6 +172,8 @@ class FixtureProvider {
             switch(Convert.ToString(frame["method"])) {
                 case "initialize": Send(new {id=id,result=new {protocolVersion=1}}); break;
                 case "session/new": case "session/load":
+                    if(Mode("capture-mcp") && line.Contains("workshop"))
+                        File.WriteAllText(Path.Combine(Dir,"mcp-"+provider+".json"),Json.Serialize(p["mcpServers"]));
                     if(p.ContainsKey("sessionId")) sid=(string)p["sessionId"];
                     Send(new {id=id,result=new {sessionId=sid,modes=new {currentModeId="accept-edits"},
                         models=new {currentModelId="gemini-test-high",availableModels=new[]{new {modelId="gemini-test-high",name="Gemini Test (High)"}}}}}); break;
@@ -183,7 +188,26 @@ class FixtureProvider {
         }
     }
     static void Main(string[] args) {
-        if(Array.IndexOf(args,"--acp")>=0 || (args.Length==2 && args[0]=="acp" && args[1]=="--stdio")){Acp();return;}
+        if(args.Length==4 && args[0]=="mcp" && args[1]=="get" && args[2]=="blender") {
+            Send(new {enabled=true,transport=new {type="stdio",command=Environment.GetCommandLineArgs()[0],args=new[]{"--fixture-blender"}}});
+            return;
+        }
+        if(args.Length==1 && args[0]=="--fixture-blender") {
+            string input;
+            while((input=Console.ReadLine())!=null) {
+                var frame=Json.Deserialize<Dictionary<string,object>>(input);
+                if(!frame.ContainsKey("id")) continue;
+                var id=frame["id"];
+                if((string)frame["method"]=="initialize") {
+                    Send(new {jsonrpc="2.0",id=id,result=new {protocolVersion="2025-06-18",capabilities=new {tools=new {}},serverInfo=new {name="fixture",version="1"}}});
+                } else if((string)frame["method"]=="tools/list") {
+                    var tool=new {name="get_objects_summary",inputSchema=new {type="object"}};
+                    Send(new {jsonrpc="2.0",id=id,result=new {tools=new[]{tool}}});
+                }
+            }
+            return;
+        }
+        if(Array.IndexOf(args,"--acp")>=0 || (args.Length==2 && args[0]=="acp" && args[1]=="--stdio")){Acp(args[0]=="acp" ? "antigravity" : "gemini");return;}
         if (args.Length == 1 && args[0] == "models") {
             Console.WriteLine("gemini-test-high    Gemini Test (High)");
             Console.WriteLine("gemini-test-low     Gemini Test (Low)");
@@ -300,6 +324,7 @@ class FixtureProvider {
                     new {model="fixture-deep",defaultReasoningEffort="high",supportedReasoningEfforts=new[]{low,high},isDefault=false}}}});
             }
             if(method=="thread/start" || method=="thread/resume"){
+                if(Mode("capture-mcp")) File.WriteAllText(Path.Combine(Dir,"mcp-codex.json"),Json.Serialize(p["config"]));
                 if (Mode("check-isolation") && (Environment.GetEnvironmentVariable("CODEX_WINDOWS_REGISTERED_CORE") != null ||
                     !Object.Equals(p["sandbox"], "workspace-write") || !Object.Equals(p["approvalPolicy"], "never")))
                     throw new InvalidDataException("Unexpected provider process identity or sandbox settings");

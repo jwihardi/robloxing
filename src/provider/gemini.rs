@@ -429,6 +429,7 @@ async fn permission(
     msg: &Value,
     tools: &Value,
     antigravity: bool,
+    blender: Option<&blender_mcp::Server>,
 ) -> Result<()> {
     let params = &msg["params"];
     let source = &params["toolCall"]["_meta"]["gemini-cli"]["mcp"];
@@ -446,13 +447,24 @@ async fn permission(
             .as_array()
             .is_some_and(|ts| ts.iter().any(|t| t["name"] == name))
     });
+    let blender_tool = if antigravity {
+        params["toolCall"]["name"]
+            .as_str()
+            .and_then(|n| n.strip_prefix("mcp_blender_"))
+    } else if source["server_name"] == "blender" {
+        source["tool_name"].as_str()
+    } else {
+        None
+    };
+    let shared =
+        blender_tool.is_some_and(|name| blender.is_some_and(|s| s.tools.iter().any(|t| t == name)));
     let option = params["options"]
         .as_array()
         .into_iter()
         .flatten()
         .find(|o| {
             o["kind"]
-                == if workshop {
+                == if workshop || shared {
                     "allow_once"
                 } else {
                     "reject_once"
@@ -486,6 +498,7 @@ pub(super) async fn exchange(
         .as_mut()
         .context("Missing Workshop bridge")?;
     let agy = a.provider == "antigravity";
+    let blender = blender_mcp::configured(&store.preferences_home)?;
     let provider = if agy { "Antigravity" } else { "Gemini CLI" };
     let mut set_edit_mode = false;
     let mut first = content(prompt)?;
@@ -601,7 +614,7 @@ pub(super) async fn exchange(
                 if method == "session/request_permission"
                     && msg["params"]["sessionId"] == io.session
                 {
-                    permission(&mut io.stdin, &msg, &bridge.tools, agy).await?;
+                    permission(&mut io.stdin, &msg, &bridge.tools, agy, blender.as_ref()).await?;
                 } else {
                     send(&mut io.stdin,json!({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32601,"message":"Unsupported client request"}})).await?;
                 }
@@ -666,7 +679,11 @@ pub(super) async fn exchange(
                     reply["protocolVersion"] == 1,
                     "Unsupported {provider} ACP protocol"
                 );
-                let mut params = json!({"cwd":io.cwd,"mcpServers":[bridge.config()?]});
+                let mut servers = vec![bridge.config()?];
+                if let Some(server) = &blender {
+                    servers.push(server.acp());
+                }
+                let mut params = json!({"cwd":io.cwd,"mcpServers":servers});
                 let method = if a.session.is_empty() {
                     "session/new"
                 } else {

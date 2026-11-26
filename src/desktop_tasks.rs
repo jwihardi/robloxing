@@ -1,10 +1,10 @@
 use super::{App, Desk, PolicyModel, Studio, TaskControls, policy_choices};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
 use workshop::{
     data_dir,
-    provider_permissions::{ProviderPermissions, TaskRole},
+    provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole, provider_label},
     studio::settings::TaskSettings,
     worker_policy::WorkerPolicy,
 };
@@ -98,13 +98,10 @@ impl App {
     }
 }
 fn provider_id(label: &str) -> Result<&'static str> {
-    match label {
-        "Codex" => Ok("codex"),
-        "Claude Code" => Ok("claude"),
-        "Antigravity" => Ok("antigravity"),
-        "Gemini CLI" => Ok("gemini"),
-        _ => bail!("Unknown provider"),
-    }
+    PROVIDERS
+        .into_iter()
+        .find(|id| provider_label(id) == label)
+        .context("Unknown provider")
 }
 
 pub(super) fn task_count(permissions: &ProviderPermissions, label: &str) -> Option<String> {
