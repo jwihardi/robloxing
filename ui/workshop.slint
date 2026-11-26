@@ -12,6 +12,8 @@ export { Comparison } from "comparison.slint";
 export { Sketch } from "sketch.slint";
 export { Appearance, ThemeChoice } from "appearance.slint";
 import { RailAction, WorkshopMark, StudioNavigation } from "navigation.slint";
+import { PackPage } from "asset-packs.slint";
+export { AssetPacks, PackRow, PackMember } from "asset-packs.slint";
 import { Studio, StudioPage, ModelInspector } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit, SpinBox } from "std-widgets.slint";
@@ -985,7 +987,8 @@ export component Desk inherits Window {
         back => {root.visit("chat");} refresh(offset) => {root.load-work(offset);}
         open(id) => {root.visit("chat"); if !root.busy {root.select-hit(id);} }
     }
-    if root.studio-open && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; navigation-hidden: !root.context-visible; browse=>{root.toggle-context();} }
+    if root.studio-open && Studio.area == "Packs": PackPage { x: rail.width; width: root.width - self.x; height: root.height; can-reference: !root.busy; navigation-hidden: !root.context-visible; browse => { root.toggle-context(); } }
+    if root.studio-open && Studio.area != "Packs" && !Studio.editing-run: StudioPage { x: rail.width; y: 0px; width: root.width - self.x; height: root.height; can-attach: !root.busy; navigation-hidden: !root.context-visible; browse=>{root.toggle-context();} }
     if Studio.inspecting && !root.studio-open && !root.settings-open: ModelInspector { x: rail.width; width: root.width - self.x; height: root.height; }
     if root.studio-open && Studio.editing-run: Rectangle {
         x:rail.width; width:root.width - self.x; height:root.height; background:Theme.canvas;

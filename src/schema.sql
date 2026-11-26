@@ -38,7 +38,7 @@ CREATE VIEW IF NOT EXISTS delivered_user_inputs AS
 CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts(task,id);
 CREATE INDEX IF NOT EXISTS blocker_events ON events(attempt,id)
     WHERE kind IN ('workshop/blocker','workshop/blocker_resolved');
-CREATE TABLE IF NOT EXISTS codex_asset_sessions(session TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS codex_asset_sessions(session TEXT PRIMARY KEY,pack_tools INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queued_messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT, attempt INTEGER NOT NULL REFERENCES attempts,

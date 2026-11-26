@@ -34,57 +34,6 @@ fn variant<'a>(id: &'a str, label: &'a str) -> (&'a str, &'a str, Option<&'stati
     (id, label, None)
 }
 
-async fn response(
-    io: &mut Connection,
-    id: u32,
-    mut text: Option<&mut String>,
-    image: bool,
-) -> Result<Value> {
-    loop {
-        let msg = gemini::next(&mut io.lines).await?;
-        if msg.get("method").is_none() && msg["id"] == id {
-            return gemini::result(&msg, "Antigravity").cloned();
-        }
-        if msg.get("method").is_some() && msg.get("id").is_some() {
-            let response = if msg["method"] == "session/request_permission" {
-                let call = &msg["params"]["toolCall"];
-                let allow = image
-                    && msg["params"]["sessionId"] == io.session
-                    && (call["name"] == "generate_image"
-                        || (call["name"] == "invoke_subagent"
-                            && call["rawInput"]["TypeName"] == "image-generator"));
-                let option = msg["params"]["options"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|o| o["kind"] == if allow { "allow_once" } else { "reject_once" });
-                let outcome = option.map_or_else(
-                    || json!({"outcome":"cancelled"}),
-                    |o| json!({"outcome":"selected","optionId":o["optionId"]}),
-                );
-                json!({"result":{"outcome":outcome}})
-            } else {
-                json!({"error":{"code":-32601,"message":"Unsupported client request"}})
-            };
-            let mut frame = response;
-            frame["id"] = msg["id"].clone();
-            frame["jsonrpc"] = json!("2.0");
-            send(&mut io.stdin, frame).await?;
-        } else if msg["method"] == "session/update"
-            && msg["params"]["sessionId"] == io.session
-            && msg["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
-            && let Some(buffer) = text.as_deref_mut()
-            && let Some(chunk) = msg["params"]["update"]["content"]["text"].as_str()
-        {
-            ensure!(
-                buffer.len() + chunk.len() <= 8 * 1024 * 1024,
-                "Studio response exceeds 8 MiB"
-            );
-            buffer.push_str(chunk);
-        }
-    }
-}
-
 pub async fn sign_out() -> Result<()> {
     let scratch = tempfile::tempdir()?;
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -96,13 +45,13 @@ pub async fn sign_out() -> Result<()> {
             "Antigravity",
         )?;
         gemini::initialize(&mut io.stdin).await?;
-        let init = response(&mut io, 1, None, false).await?;
+        let init = gemini::studio_response("Antigravity", &mut io, 1, None, false).await?;
         ensure!(
             init["agentCapabilities"]["auth"]["logout"].is_object(),
             "Use /logout in Antigravity to sign out with this CLI version"
         );
         gemini::rpc(&mut io.stdin, 2, "logout", json!({})).await?;
-        response(&mut io, 2, None, false).await?;
+        gemini::studio_response("Antigravity", &mut io, 2, None, false).await?;
         Ok(())
     })
     .await
@@ -125,7 +74,7 @@ pub(super) async fn studio(
         "Antigravity",
     )?;
     gemini::initialize(&mut io.stdin).await?;
-    response(&mut io, 1, None, false).await?;
+    gemini::studio_response("Antigravity", &mut io, 1, None, false).await?;
     gemini::rpc(
         &mut io.stdin,
         2,
@@ -133,7 +82,7 @@ pub(super) async fn studio(
         json!({"cwd":scratch.path(),"mcpServers":[]}),
     )
     .await?;
-    let session = response(&mut io, 2, None, false).await?;
+    let session = gemini::studio_response("Antigravity", &mut io, 2, None, false).await?;
     io.session = session["sessionId"]
         .as_str()
         .context("Missing Studio session")?
@@ -148,7 +97,7 @@ pub(super) async fn studio(
             json!({"sessionId":io.session,"modelId":model}),
         )
         .await?;
-        response(&mut io, 3, None, false).await?;
+        gemini::studio_response("Antigravity", &mut io, 3, None, false).await?;
     }
     let mut request = if image {
         "Use the built-in image-generator subagent to generate one image for the following brief. Wait for its finished image before replying. Use no other tools.".to_owned()
@@ -160,7 +109,7 @@ pub(super) async fn studio(
             json!({"sessionId":io.session,"modeId":"plan"}),
         )
         .await?;
-        response(&mut io, 4, None, false).await?;
+        gemini::studio_response("Antigravity", &mut io, 4, None, false).await?;
         instructions.to_owned()
     };
     if !schema.is_null() {
@@ -182,7 +131,7 @@ pub(super) async fn studio(
     )
     .await?;
     let mut text = String::new();
-    let reply = response(&mut io, 5, Some(&mut text), image).await?;
+    let reply = gemini::studio_response("Antigravity", &mut io, 5, Some(&mut text), image).await?;
     ensure!(
         reply["stopReason"] == "end_turn",
         "Antigravity ended the Studio request: {}",

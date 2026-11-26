@@ -1,5 +1,6 @@
 """Exercise Workshop through the installed Gemini CLI with a local model endpoint."""
 import argparse
+import base64
 from contextlib import closing, ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -28,6 +29,7 @@ class ModelEndpoint(BaseHTTPRequestHandler):
         delegate = next((n for n in names if n.endswith("workshop_delegate")), None)
         report = next((n for n in names if n.endswith("workshop_report_result")), None)
         generate = next((n for n in names if n.endswith("workshop_generate_asset")), None)
+        pack = next((n for n in names if n.endswith("workshop_asset_pack")), None)
         if "HOLD_GEMINI_PROBE" in text:
             self.server.waiting.set()
             self.server.release.wait(timeout=10)
@@ -36,8 +38,20 @@ class ModelEndpoint(BaseHTTPRequestHandler):
             parts = [{"text": "Direction received."}]
         elif "QUEUE_GEMINI_PROBE" in text:
             parts = [{"text": "Queued message received."}]
+        elif "A matching harbor lantern" in text and "Rendered swatches" in text:
+            if self.server.preview_data in json.dumps(last):
+                self.server.designer_saw_preview.set()
+            design = {"parts":[{"name":"Lantern","shape":"box","size":[1,1,1],"center":[0,0,.5],"rotation":[0,0,0],"color":"337799"}]}
+            parts = [{"text": json.dumps(design)}]
         elif any("functionResponse" in part for part in last):
+            if getattr(self.server, "preview_data", None) and self.server.preview_data in json.dumps(last):
+                self.server.reader_saw_preview.set()
             parts = [{"text": "Tool result received."}]
+        elif "INSPECT_PACK_PROBE" in text and pack:
+            parts = [{"functionCall":{"name":pack,"args":{"action":"inspect","pack":"harbor","asset":"crate"}}}]
+        elif "MATCH_PACK_PROBE" in text and generate:
+            parts = [{"functionCall":{"name":generate,"args":{"kind":"model","brief":"A matching harbor lantern",
+                      "style_pack":"harbor","style_asset":"crate","model":self.server.designer}}}]
         elif "ASSET_PROBE" in text and generate:
             parts = [{"functionCall": {"name": generate, "args": {
                 "kind": "texture", "material": "Moss", "seed": 17,
@@ -73,7 +87,9 @@ class ModelEndpoint(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", required=True, type=Path)
-    cli = parser.parse_args().cli.resolve()
+    parser.add_argument("--pack-fixture", type=Path, help="Export from tests/blender_packs.py")
+    args = parser.parse_args()
+    cli = args.cli.resolve()
     with tempfile.TemporaryDirectory(prefix="workshop gemini ") as tmp, \
             ThreadingHTTPServer(("127.0.0.1", 0), ModelEndpoint) as endpoint, ExitStack() as cleanup:
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
@@ -129,6 +145,18 @@ def main():
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute("SELECT e.attempt,a.maker,i.path FROM event_assets a JOIN events e ON e.id=a.event JOIN event_images i ON i.event=e.id").fetchone()
             assert row[:2] == (2, "Local texture generator") and Path(row[2]).is_file()
+        if args.pack_fixture:
+            call("packs", "import", str(args.pack_fixture.resolve()))
+            endpoint.designer = model
+            endpoint.preview_data = base64.b64encode((args.pack_fixture / "assets/crate/preview.png").read_bytes()).decode()
+            endpoint.reader_saw_preview = threading.Event()
+            endpoint.designer_saw_preview = threading.Event()
+            call("resume", "2", "INSPECT_PACK_PROBE")
+            assert endpoint.reader_saw_preview.is_set(), "Gemini did not receive the MCP preview"
+            call("resume", "2", "MATCH_PACK_PROBE")
+            assert endpoint.designer_saw_preview.is_set(), "Gemini did not receive the visual design reference"
+            with closing(sqlite3.connect(db_path)) as db:
+                assert db.execute("SELECT count(*) FROM studio_jobs WHERE area='Models' AND state='Ready'").fetchone()[0] == 1
         with subprocess.Popen([str(cli), "--project", str(project), "run", "--provider", "gemini",
                                "HOLD_GEMINI_PROBE"], env=env, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:

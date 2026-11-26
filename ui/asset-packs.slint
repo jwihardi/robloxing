@@ -1,0 +1,82 @@
+import { ListView, ScrollView } from "std-widgets.slint";
+import { Action, Theme } from "common.slint";
+
+export struct PackRow { key: string, name: string }
+export struct PackMember { key: string, name: string, description: string, geometry: string, preview: image }
+
+export global AssetPacks {
+    in property <[PackRow]> packs;
+    in property <[PackMember]> members;
+    in property <PackRow> pack;
+    in property <PackMember> member;
+    in property <string> style;
+    in property <string> message;
+    callback select-pack(string);
+    callback select-member(string);
+    callback action(string);
+}
+
+component MemberList inherits ListView {
+    for item in AssetPacks.members: Action {
+        width: root.visible-width; height: 58px; icon-only: true; label: item.name;
+        selected: item.key == AssetPacks.member.key; activate => { AssetPacks.select-member(item.key); }
+        HorizontalLayout { padding-left: 6px; padding-right: 10px; spacing: 9px;
+            Image { width: 46px; source: item.preview; image-fit: contain; }
+            Text { text: item.name; color: Theme.text; font-size: 14px; wrap: word-wrap; overflow: elide; vertical-alignment: center; min-width: 0px; }
+        }
+    }
+}
+
+component MemberPreview inherits VerticalLayout {
+    spacing: 6px;
+    Rectangle {
+        min-height: 75px; vertical-stretch: 1; background: Theme.surface; border-radius: 14px;
+        Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+            source: AssetPacks.member.preview; image-fit: contain; accessible-label: AssetPacks.member.name; }
+    }
+    Text { text: AssetPacks.member.name; color: Theme.text; font-size: 20px; font-weight: 600; wrap: word-wrap; }
+    Text { text: AssetPacks.member.description; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+    Text { text: AssetPacks.member.geometry; color: Theme.symbol; font-family: Theme.mono; font-size: 12px; wrap: word-wrap; }
+}
+
+export component PackPage inherits Rectangle {
+    in property <bool> navigation-hidden;
+    in property <bool> can-reference;
+    callback browse();
+    background: Theme.canvas;
+    VerticalLayout {
+        x: (root.width - self.width) / 2; y: 22px; width: min(950px, root.width - 40px);
+        height: root.height - 40px; spacing: 12px;
+        HorizontalLayout { height: 40px; spacing: 8px;
+            Text { text: "Asset packs"; color: Theme.text; font-size: 26px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            Action { label: "Import pack…"; width: 105px; activate => { AssetPacks.action("import"); } }
+            if root.navigation-hidden: Action { width: 40px; icon-only: true; label: "Browse tools and packs"; glyph: "\u{e700}"; activate => {root.browse();} }
+        }
+        if AssetPacks.pack.key == "": Text {
+            text: "Ask in chat to create a Blender asset pack with a shared art style.";
+            color: Theme.muted; font-size: 15px; wrap: word-wrap; vertical-alignment: top; vertical-stretch: 1;
+        }
+        if AssetPacks.pack.key != "": VerticalLayout { spacing: 10px; vertical-stretch: 1;
+            Text { text: AssetPacks.pack.name; color: Theme.text; font-size: 20px; font-weight: 600; wrap: word-wrap; }
+            guide := ScrollView { height: min(96px, max(24px, guide-text.preferred-height + 4px));
+                guide-text := Text { width: guide.visible-width; text: AssetPacks.style; color: Theme.muted; font-size: 14px; wrap: word-wrap; } }
+            HorizontalLayout { height: 34px; spacing: 8px; alignment: start;
+                Action { label: "Use in chat"; width: 116px; selected: true; enabled: root.can-reference; activate => { AssetPacks.action("chat"); } }
+                Action { label: "Export pack…"; width: 114px; outlined: true; activate => { AssetPacks.action("export"); } }
+            }
+            Rectangle { height: 1px; background: Theme.line; }
+            if AssetPacks.members.length == 0: Text { text: "This pack is ready for its first model."; color: Theme.muted; vertical-alignment: top; vertical-stretch: 1; }
+            if AssetPacks.members.length > 0 && root.width >= 620px: HorizontalLayout {
+                spacing: 16px; vertical-stretch: 1;
+                MemberList { width: min(230px, root.width * 0.31); }
+                MemberPreview { horizontal-stretch: 1; }
+            }
+            if AssetPacks.members.length > 0 && root.width < 620px: VerticalLayout {
+                spacing: 8px; vertical-stretch: 1;
+                MemberList { height: min(root.height * 0.21, 116px, AssetPacks.members.length * 58px); }
+                MemberPreview { vertical-stretch: 1; }
+            }
+        }
+        if AssetPacks.message != "": Text { text: AssetPacks.message; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
+    }
+}

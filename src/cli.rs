@@ -22,6 +22,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Open,
+    /// Browse, publish and export project-wide Blender asset libraries.
+    Packs {
+        #[command(subcommand)]
+        action: PackAction,
+    },
     /// Manage the Blender MCP connection shared by the provider adapters.
     BlenderMcp {
         #[command(subcommand)]
@@ -120,6 +125,92 @@ enum Action {
         command: Vec<String>,
     },
 }
+#[derive(Subcommand)]
+enum PackAction {
+    List,
+    Show {
+        pack: String,
+        asset: Option<String>,
+    },
+    Create {
+        pack: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        style: String,
+    },
+    Add {
+        pack: String,
+        asset: String,
+        source: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        collection: Option<String>,
+    },
+    /// Write a portable Blender Asset Browser library into a new subfolder.
+    Export {
+        pack: String,
+        folder: PathBuf,
+    },
+    /// Add an exported Workshop pack to this project's asset library.
+    Import {
+        folder: PathBuf,
+    },
+}
+
+fn packs(project: &Path, action: PackAction) -> Result<()> {
+    use crate::studio::packs::{Library, Publish};
+    use serde_json::json;
+    let home = data_dir()?;
+    let library = Library::in_archive(&Store::project_data_dir(project, &home)?);
+    let value = match action {
+        PackAction::List => json!(library.list()?),
+        PackAction::Show {
+            pack,
+            asset: Some(asset),
+        } => {
+            let dir = library.member_dir(&pack, &asset)?;
+            json!({"pack":library.pack(&pack)?, "asset":library.member(&pack, &asset)?, "preview":dir.join("preview.png"),
+                "blend":dir.join("model.blend"), "glb":dir.join("model.glb")})
+        }
+        PackAction::Show { pack, asset: None } => {
+            json!({"pack":library.pack(&pack)?,"assets":library.members(&pack)?})
+        }
+        PackAction::Create { pack, name, style } => json!(library.create(&pack, &name, &style)?),
+        PackAction::Add {
+            pack,
+            asset,
+            source,
+            name,
+            description,
+            collection,
+        } => {
+            let blender = Store::installed_studio_tool(&home, "Blender")?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            json!(runtime.block_on(library.publish(
+                &blender,
+                Publish {
+                    pack: &pack,
+                    key: &asset,
+                    name: &name,
+                    description: &description,
+                    source: &source,
+                    collection: collection.as_deref()
+                }
+            ))?)
+        }
+        PackAction::Export { pack, folder } => json!({"folder":library.export(&pack, &folder)?}),
+        PackAction::Import { folder } => json!(library.import(&folder)?),
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum BlenderAction {
     Status,
@@ -421,6 +512,7 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let args = Args::parse_from(args);
     match args.command {
         Action::BlenderMcp { action } => return blender_mcp(action),
+        Action::Packs { action } => return packs(&args.project, action),
         Action::Studio { action } => return studio(&args.project, action),
         Action::Models { provider } => return list_models(&args.project, provider.as_deref()),
         Action::Status {
@@ -449,6 +541,7 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let store = Store::open(&args.project, &data_dir()?)?;
     match args.command {
         Action::Studio { .. }
+        | Action::Packs { .. }
         | Action::Models { .. }
         | Action::Status { .. }
         | Action::BlenderMcp { .. } => unreachable!(),

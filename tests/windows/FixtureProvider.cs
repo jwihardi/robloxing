@@ -291,6 +291,16 @@ class FixtureProvider {
                 if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
                 if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
+                if(Convert.ToString(msg["id"])=="pack-inspect") {
+                    var result=(Dictionary<string,object>)msg["result"];
+                    if(!Object.Equals(result["success"],true)) throw new InvalidDataException("Could not inspect the pack");
+                    var picture=(Dictionary<string,object>)((System.Collections.IList)result["contentItems"])[1];
+                    var url=Convert.ToString(picture["imageUrl"]);
+                    if(!url.StartsWith("data:image/png;base64,")) throw new InvalidDataException("Missing native image block");
+                    File.WriteAllBytes(Path.Combine(Dir,"inspected-member.png"),Convert.FromBase64String(url.Substring(url.IndexOf(',')+1)));
+                    Send(new {id="chat-asset",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="chat-asset",tool="workshop_generate_asset",
+                        arguments=new {kind="model",brief="A matching dock lantern",style_pack="harbor",style_asset="crate"}}});
+                }
                 if(Convert.ToString(msg["id"])=="chat-asset") {
                     var result=(Dictionary<string,object>)msg["result"];
                     File.AppendAllText(Path.Combine(Dir,"chat-asset-results.jsonl"),Json.Serialize(result)+"\n");
@@ -377,6 +387,11 @@ class FixtureProvider {
                 }
                 if(worker){Worker((string)first["text"]);continue;}
                 string message=(string)first["text"];
+                if(Mode("pack-handoff") && message.StartsWith("Build a dock.")) {
+                    Send(new {id="pack-inspect",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="pack-inspect",tool="workshop_asset_pack",
+                        arguments=new {action="inspect",pack="harbor",asset="crate"}}});
+                    continue;
+                }
                 if (Mode("chat-assets")) {
                     object spec=null;
                     if(message.StartsWith("Draw a forest icon")) spec=new {kind="image",brief="Forest icon",model="fixture-deep",effort="high"};

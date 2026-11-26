@@ -41,6 +41,9 @@ impl App {
     pub(super) fn refresh_studio(&self, store: &Store, selection: Option<i64>) -> Result<()> {
         let ui = self.ui.unwrap();
         let studio = ui.global::<Studio>();
+        if studio.get_area() == "Packs" {
+            return self.refresh_packs(store, None);
+        }
         let jobs = store.find_studio_jobs(&studio.get_area(), &studio.get_query(), false, None)?;
         studio.set_custom_task(
             self.task_overrides
@@ -335,9 +338,12 @@ pub(super) fn connect(ui: &Desk, app: &Rc<App>) {
     let a = app.clone();
     ui.global::<Studio>().on_command(move |cmd| {
         if let Err(e) = a.studio_command(&cmd, None) {
-            a.ui.unwrap()
-                .global::<Studio>()
-                .set_message(format!("{e:#}").into());
+            let ui = a.ui.unwrap();
+            ui.global::<Studio>().set_message(format!("{e:#}").into());
+            if ui.global::<Studio>().get_area() == "Packs" {
+                ui.global::<super::AssetPacks>()
+                    .set_message(format!("{e:#}").into());
+            }
         }
     });
     let a = app.clone();

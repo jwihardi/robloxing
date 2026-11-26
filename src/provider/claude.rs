@@ -267,11 +267,6 @@ async fn mcp_reply(stdin: &mut ChildStdin, id: &Value, rpc: &Value, result: Valu
     answer(stdin, id, json!({"mcp_response":message})).await
 }
 
-fn tool_result(result: Result<String>) -> Value {
-    let error = result.is_err();
-    json!({"isError":error,"content":[{"type":"text","text":result.unwrap_or_else(|e|format!("{e:#}"))}]})
-}
-
 fn tokens(usage: &Value) -> Option<i64> {
     usage.get("input_tokens")?.as_i64()?;
     Some(
@@ -342,7 +337,8 @@ pub(super) async fn exchange(
     for tool in tool_list.as_array_mut().unwrap() {
         tool.as_object_mut().unwrap().remove("type");
     }
-    type Dispatch<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>>;
+    type Dispatch<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<team::ToolOutput>> + 'a>>;
     let mut pending: Option<(Value, Value, Dispatch<'_>)> = None;
     loop {
         if !queued.is_empty() && !interrupt_requested && pending.is_none() && deadline.is_none() {
@@ -401,7 +397,7 @@ pub(super) async fn exchange(
             }
             result = completed_call => {
                 let (id, rpc, _) = pending.take().expect("completed Workshop tool");
-                mcp_reply(&mut io.stdin, &id, &rpc, tool_result(result)).await?;
+                mcp_reply(&mut io.stdin, &id, &rpc, team::ToolOutput::mcp(result)).await?;
                 continue;
             }
             _ = timeout => bail!("Claude did not start the turn within 90 seconds. See provider.stderr.log."),
@@ -451,11 +447,11 @@ pub(super) async fn exchange(
                         let name = msg["params"]["name"].as_str();
                         let args = &msg["params"]["arguments"];
                         if pending.is_some() {
-                            tool_result(Err(anyhow::anyhow!(
+                            team::ToolOutput::mcp(Err(anyhow::anyhow!(
                                 "Wait for the current Workshop tool call to finish."
                             )))
                         } else if retries_stopped(name, args, &stopped) {
-                            tool_result(Err(anyhow::anyhow!(
+                            team::ToolOutput::mcp(Err(anyhow::anyhow!(
                                 "This assignment was stopped by the user."
                             )))
                         } else {
@@ -470,7 +466,7 @@ pub(super) async fn exchange(
                                 id.clone(),
                                 rpc.clone(),
                                 Box::pin(async move {
-                                    team::dispatch(store, a, &request, notify).await
+                                    team::dispatch_tool(store, a, &request, notify).await
                                 }),
                             ));
                             continue;
@@ -629,7 +625,7 @@ pub(super) async fn exchange(
 pub(super) async fn studio(
     dir: &Path,
     instructions: &str,
-    prompt: &str,
+    prompt: &Message,
     schema: Value,
     inference: &(String, String),
 ) -> Result<Value> {
@@ -648,7 +644,7 @@ pub(super) async fn studio(
     }
     add_inference(&mut args, &inference.0, &inference.1)?;
     let mut io = spawn(dir, &args, tempfile::tempfile()?)?;
-    send(&mut io.stdin, user_message(&Message::from(prompt), None)?).await?;
+    send(&mut io.stdin, user_message(prompt, None)?).await?;
     while let Some(line) = io.lines.next_line().await? {
         let event: Value = serde_json::from_str(&line)?;
         if event["type"] == "result" {

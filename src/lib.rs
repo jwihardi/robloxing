@@ -222,6 +222,11 @@ impl Store {
         }
         let tx = db.transaction()?;
         for (table, column, definition) in [
+            (
+                "codex_asset_sessions",
+                "pack_tools",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
             ("team_settings", "lead_effort", "TEXT NOT NULL DEFAULT ''"),
             ("team_settings", "worker_effort", "TEXT NOT NULL DEFAULT ''"),
             (

@@ -111,11 +111,14 @@ def starter(name, template):
     obj.select_set(True)
 
 
-def preview(objects, corners, out):
+def preview(objects, corners, out, collection=None):
     # An isolated preview scene leaves the editable source's camera and render settings intact.
     scene = bpy.data.scenes.new("Workshop preview")
-    for obj in objects:
-        scene.collection.objects.link(obj)
+    if collection is not None:
+        scene.collection.children.link(collection)
+    else:
+        for obj in objects:
+            scene.collection.objects.link(obj)
     center = Vector([(min(v[i] for v in corners)+max(v[i] for v in corners))/2 for i in range(3)])
     radius = max(.01, max((corner-center).length for corner in corners))
     camera = bpy.data.objects.new("Preview camera", bpy.data.cameras.new("Preview camera"))
@@ -131,16 +134,119 @@ def preview(objects, corners, out):
     scene.display.shading.color_type = 'MATERIAL'
     scene.display.shading.show_shadows = True
     scene.display.shading.show_cavity = True
+    if collection is not None:
+        # Render the actual shaders and textures for a reusable style reference.
+        scene.render.engine = 'CYCLES'
+        scene.cycles.device = 'CPU'
+        scene.cycles.samples = 12
+        scene.cycles.use_denoising = True
+        scene.world = bpy.data.worlds.new("Preview world")
+        scene.world.color = (.4, .4, .4)
+        lights = []
+        for offset, intensity in [((2, -3, 4), 1050), ((-3, -1, 2), 550), ((1, 3, 3), 800)]:
+            data = bpy.data.lights.new("Preview softbox", 'AREA')
+            data.energy = intensity * radius**2
+            data.size = 3 * radius
+            light = bpy.data.objects.new("Preview softbox", data)
+            scene.collection.objects.link(light)
+            light.location = center + Vector(offset).normalized() * radius * 4
+            light.rotation_euler = (center-light.location).to_track_quat("-Z", "Y").to_euler()
+            lights.append((light, data))
     scene.render.film_transparent = True
     scene.render.resolution_x = scene.render.resolution_y = 480
     scene.render.resolution_percentage = 100
     scene.render.filepath = str(out/"preview.png")
     bpy.ops.render.render(scene=scene.name, write_still=True)
+    world = scene.world
+    bpy.data.scenes.remove(scene)
+    camera_data = camera.data
+    bpy.data.objects.remove(camera, do_unlink=True)
+    bpy.data.cameras.remove(camera_data)
+    if collection is not None:
+        bpy.data.worlds.remove(world)
+        for light, data in lights:
+            bpy.data.objects.remove(light, do_unlink=True)
+            bpy.data.lights.remove(data)
+
+
+def pack_collection(request, out):
+    bpy.ops.wm.open_mainfile(filepath=request["source"], load_ui=False, use_scripts=False)
+    units = bpy.context.scene.unit_settings
+    scale = units.scale_length if units.system != 'NONE' else 1.0
+    selected = request.get("collection")
+    if selected:
+        collection = bpy.data.collections.get(selected)
+        if collection is None:
+            raise ValueError(f"No collection named {selected!r} in the Blender file")
+    else:
+        collection = bpy.data.collections.new(request["name"])
+        for obj in bpy.context.view_layer.objects:
+            if obj.visible_get() and obj.type not in {'CAMERA', 'LIGHT'}:
+                collection.objects.link(obj)
+    # A library round trip keeps the collection's dependencies and removes unrelated scenes.
+    library = out / "selection.blend"
+    name = collection.name
+    bpy.data.libraries.write(str(library), {collection}, path_remap='ABSOLUTE')
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    with bpy.data.libraries.load(str(library), link=False, recursive=True) as (_, data):
+        data.collections = [name]
+    collection = data.collections[0]
+    bpy.context.scene.collection.children.link(collection)
+    # Appending a collection into another scene does not carry source scene units.
+    # Normalize the root once; rigs, modifiers and child transforms stay editable.
+    bpy.context.scene.unit_settings.system = 'METRIC'
+    bpy.context.scene.unit_settings.scale_length = 1.0
+    if not math.isclose(scale, 1.0):
+        bpy.context.view_layer.update()
+        objects = set(collection.all_objects)
+        anchor = bpy.data.objects.new("Asset scale", None)
+        collection.objects.link(anchor)
+        for obj in objects:
+            if obj.parent not in objects:
+                if obj.parent is None:
+                    obj.parent = anchor
+                else:
+                    world = obj.matrix_world.copy()
+                    obj.parent = anchor
+                    obj.matrix_world = world
+        anchor.scale = (scale,) * 3
+        collection.instance_offset *= scale
+    bpy.data.orphans_purge(do_recursive=True)
+    library.unlink()
+    bpy.ops.file.pack_all()
+    for image in bpy.data.images:
+        if image.users and image.source in {'FILE', 'TILED', 'SEQUENCE', 'MOVIE'} and not image.packed_files:
+            raise ValueError(f"Pack or replace the missing or external image {image.name!r} before publishing")
+    # Blender records an optional append-reuse origin even for fully local IDs.
+    external = [p for p in bpy.utils.blend_paths(absolute=True, packed=False) if p and Path(p) != library]
+    if any(path for path in external):
+        raise ValueError(f"The collection still needs an external file: {next(path for path in external if path)}")
+    collection.asset_mark()
+    collection.asset_data.description = request["description"]
+    collection.asset_data.catalog_id = request["catalog_id"]
+    return collection
+
+
+def material_colors(objects):
+    result = {}
+    for obj in objects:
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None or mat.name in result:
+                continue
+            shader = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None) if mat.node_tree else None
+            color = shader.inputs["Base Color"].default_value if shader else mat.diffuse_color
+            rgb = [max(0, min(1, c)) for c in color[:3]]
+            result[mat.name] = "#" + "".join(f"{round(255*(12.92*c if c <= .0031308 else 1.055*c**(1/2.4)-.055)):02X}" for c in rgb)
+    return [{"name": name, "color": result[name]} for name in sorted(result)]
 
 
 out = Path.cwd()
 request = json.loads((out/"request.json").read_text(encoding="utf-8"))
-if request["type"] == "blend":
+collection = None
+if request["type"] == "pack_asset":
+    collection = pack_collection(request, out)
+elif request["type"] == "blend":
     bpy.ops.wm.open_mainfile(filepath=request["source"], load_ui=False, use_scripts=False)
 else:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -149,26 +255,38 @@ else:
     else:
         starter(request["name"], request["template"])
 bpy.context.view_layer.update()
-objects = [o for o in bpy.context.view_layer.objects if o.type == 'MESH' and o.visible_get()]
-if not objects:
-    raise ValueError("The scene has no visible meshes to export")
 graph = bpy.context.evaluated_depsgraph_get()
-corners, tris = [], 0
-for obj in objects:
-    evaluated = obj.evaluated_get(graph)
-    corners.extend(evaluated.matrix_world @ Vector(v) for v in evaluated.bound_box)
+objects, corners, tris, mesh_count = {}, [], 0, 0
+for instance in graph.object_instances:
+    evaluated = instance.object
+    if evaluated.type != 'MESH' or not instance.show_self:
+        continue
+    obj = evaluated.original
+    if not instance.is_instance and not obj.visible_get():
+        continue
+    corners.extend(instance.matrix_world @ Vector(v) for v in evaluated.bound_box)
     mesh = evaluated.to_mesh()
     try:
         mesh.calc_loop_triangles()
         tris += len(mesh.loop_triangles)
     finally:
         evaluated.to_mesh_clear()
+    objects[obj.name] = obj
+    mesh_count += 1
 if not tris:
     raise ValueError("The selected scene has no mesh faces")
-bpy.ops.wm.save_as_mainfile(filepath=str(out/"model.blend"), copy=True, relative_remap=True)
 result = bpy.ops.export_scene.gltf(filepath=str(out/"model.glb"), export_format='GLB', use_visible=True,
                                    export_cameras=False, export_lights=False)
 if result != {'FINISHED'}:
     raise RuntimeError("glTF export did not finish")
-preview(objects, corners, out)
-(out/"summary.txt").write_text(f"GLB · {len(objects)} mesh{'es' if len(objects)!=1 else ''} · {tris:,} triangles", encoding="utf-8")
+preview(objects.values(), corners, out, collection)
+if collection is not None:
+    with bpy.context.temp_override(id=collection):
+        if bpy.ops.ed.lib_id_load_custom_preview(filepath=str(out/"preview.png")) != {'FINISHED'}:
+            raise RuntimeError("Could not embed the Asset Browser thumbnail")
+    dimensions = [round(max(v[i] for v in corners)-min(v[i] for v in corners), 5) for i in range(3)]
+    (out/"geometry.json").write_text(json.dumps(dict(collection=collection.name, meshes=mesh_count,
+        triangles=tris, dimensions=dimensions, meters_per_unit=bpy.context.scene.unit_settings.scale_length,
+        materials=material_colors(objects.values()))), encoding="utf-8")
+bpy.ops.wm.save_as_mainfile(filepath=str(out/"model.blend"), copy=True, relative_remap=True)
+(out/"summary.txt").write_text(f"GLB · {mesh_count} mesh{'es' if mesh_count!=1 else ''} · {tris:,} triangles", encoding="utf-8")

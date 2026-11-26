@@ -134,6 +134,21 @@ In the model inspector, drag to orbit and scroll to zoom. The arrow keys and +/�
 
 **Settings → Providers** controls which tasks each provider can handle. **Settings → Tasks** sets allowed models and maximum reasoning effort for image generation and model design. You can request a particular model or effort in your message. The lead stays within those settings.
 
+### Reusable Blender asset packs
+
+Ask in chat, “Create a Harbor pack with a blue-green buoy and a weathered dock crate. Keep the fittings chunky and use the same painted iron.” In another chat, try “Inspect the Harbor pack, reuse its crate, and make a matching lantern.” Leads and workers share the project's library. They can inspect a rendered preview, palette and dimensions, copy the exact editable collection or GLB into their working copy, and use a particular pack member as the visual reference for a new design.
+
+Open **Tools → Asset packs** to browse the art direction and preview each model. **Use in chat** adds the selected pack and member to your draft. **Export pack** creates a portable folder with the style guide, Blender catalog, marked collections, packed textures, GLBs, previews and JSON manifests. Add the exported folder as a library in Blender's **Preferences → File Paths → Asset Libraries**, or choose **Import pack** in another Workshop project. Import verifies each file before making the pack available.
+
+External agents can use the same library headlessly while the desktop is open. These commands publish the named collection from an existing Blender scene and inspect its files.
+
+```powershell
+workshop-cli --project . packs create harbor --name "Harbor" --style "Weathered cedar, blue iron, human-scale fittings."
+workshop-cli --project . packs add harbor crate .\props.blend --collection "Dock crate" --name "Dock crate" --description "Stackable cedar cargo crate."
+workshop-cli --project . packs show harbor crate
+workshop-cli --project . packs export harbor .\Libraries
+```
+
 ## Decompilation
 
 Open **Tools → Decompilation**, choose a binary and optionally filter functions by name. Use an extracted Ghidra distribution with its supported JDK on PATH or in `JAVA_HOME`. **Run settings** lets you override the defaults for one analysis. **Reuse settings** restores an earlier analysis configuration.
@@ -196,6 +211,8 @@ Project records live under `%LOCALAPPDATA%\Robloxing\Workshop`. Override the par
 Run `cargo test --locked --all-targets` for the offline recovery and scheduler tests. The Windows records cover the provider, Studio, native desktop and process cleanup. [H1 verification](docs/h1-verification.md) · [H2 verification](docs/h2-verification.md)
 
 After a release build, run the Windows UI tests from PowerShell.
+
+For asset packs, run `py -3 tests/blender_packs.py --cli target/release/workshop-cli.exe --blender "<path to blender.exe>" --keep-in "<new test folder>"`. This publishes two textured collections in parallel and opens them in a clean Blender process. Pass `-PackFixture "<test folder>/portable/harbor"` to the picker suite to exercise importing, browsing, exporting and generating a matching model through chat.
 
 ```powershell
 .\tests\windows\picker_clicks.ps1

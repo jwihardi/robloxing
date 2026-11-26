@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$HarnessOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$HarnessOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -7,6 +7,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($HarnessOnly) { $parameters.HarnessOnly = $true }
     if ($NavigationOnly) { $parameters.NavigationOnly = $true }
     if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
+    if ($PackFixture) { $parameters.PackFixture = (Resolve-Path -LiteralPath $PackFixture).Path }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
     if ($SketchOnly) { $parameters.SketchOnly = $true }
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
@@ -155,7 +156,7 @@ function Choose-Attachment($title,$path) {
     [void]$proc.WaitForInputIdle(1000)
     [void][WorkshopPointer]::SendMessage($edit,0x000c,0,$path)
     [void][WorkshopPointer]::PostMessage($handle,0x0111,1,[WorkshopPointer]::GetDlgItem($handle,1))
-    if ($title -eq 'Attach a folder') {
+    if ($title -in @('Attach a folder', 'Choose an exported asset pack', 'Export Blender asset pack into folder')) {
         # Some shell versions navigate into the typed folder before accepting it.
         Start-Sleep -Milliseconds 350
         if ([WorkshopPointer]::Dialog($proc.Id,$title) -eq $handle) {
@@ -1028,6 +1029,38 @@ try {
     $search = (Named 'Search chats').Current.BoundingRectangle
     if ($rail.Right -gt $search.Left) { throw 'Navigation rail overlaps the chat sidebar' }
     $valuePattern = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($PackFixture) {
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Build a dock.')
+        Click 'Project tools'
+        Click 'Asset packs'
+        Wait-For { Named 'Ask in chat to create a Blender asset pack with a shared art style.' } 'empty project library'
+        Click 'Import pack…'
+        Choose-Attachment 'Choose an exported asset pack' $PackFixture
+        Wait-For { (Named 'Harbor props') -and (Named 'Crate') } 'imported collections'
+        Click 'Crate'
+        Wait-For { Named 'Teal harbor crate.' } 'selected asset preview and description'
+        Save-PrivateWindow (Join-Path $root 'asset-packs.png')
+        $export = (New-Item -ItemType Directory (Join-Path $root 'exported')).FullName
+        Click 'Export pack…'
+        Choose-Attachment 'Export Blender asset pack into folder' $export
+        Wait-For { Test-Path (Join-Path $export 'harbor/assets/crate/model.blend') } 'portable export'
+        Click 'Use in chat'
+        Wait-For { $text = (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value
+            $text.Contains('Build a dock.') -and $text.Contains('harbor') -and $text.Contains('crate') } 'draft with selected pack and member'
+        foreach ($flag in @('pack-handoff','record-inference')) { [void](New-Item -ItemType File (Join-Path $root $flag)) }
+        Click 'Send message'
+        Wait-For { (Named 'Save model') -and (Named 'New chat').Current.IsEnabled } 'style-matched model delivered in chat' 100
+        $turn = Get-ChildItem $root -Filter 'studio-design-*.json' | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
+        $example = $turn.input | Where-Object type -eq 'localImage' | Select-Object -First 1
+        $expected = (Get-FileHash -LiteralPath (Join-Path $PackFixture 'assets/crate/preview.png')).Hash
+        if ((Get-FileHash -LiteralPath $example.path).Hash -ne $expected -or
+            (Get-FileHash -LiteralPath (Join-Path $root 'inspected-member.png')).Hash -ne $expected -or
+            $turn.input[0].text -notmatch 'Weathered teal enamel' -or $turn.input[0].text -notmatch 'Rendered swatches') {
+            throw 'The agent or model designer did not receive the selected reference and art direction'
+        }
+        Write-Output "Asset pack import, inspection, export and style-matched chat generation passed. Screenshot in $root"
+        return
+    }
     if ($NavigationOnly) { Test-NavigationLayout; return }
     if ($StudioOnly) { Test-ChatAssets; return }
     if ($GoalOnly) { Test-ChatGoals; return }

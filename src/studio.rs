@@ -1,5 +1,6 @@
 //! Project-scoped game asset jobs. Only finished runs expose deliverables.
 mod chat;
+pub mod packs;
 pub mod reports;
 pub mod settings;
 use settings::TaskSettings;
@@ -122,6 +123,7 @@ impl Job {
 struct BuildContext<'a> {
     inference: Option<&'a (String, String)>,
     reference: Option<&'a Path>,
+    style_image: Option<&'a Path>,
     delivery: Option<(i64, &'a str)>,
 }
 
@@ -196,65 +198,73 @@ impl Store {
             job.state == "Ready" && matches!(job.recipe.area(), "Images" | "Models"),
             "Choose a ready game image or model."
         );
-        let relative = destination.replace('\\', "/");
-        let segments: Vec<_> = relative.split('/').collect();
-        ensure!(
-            segments.iter().all(|s| {
-                let device = s
-                    .split('.')
-                    .next()
-                    .unwrap_or("")
-                    .trim_end()
-                    .to_ascii_uppercase();
-                !s.is_empty()
-                    && !s.starts_with('.')
-                    && !s.ends_with([' ', '.'])
-                    && s.chars().all(|c| c.is_alphanumeric() || " _-.".contains(c))
-                    && !matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                    && !["COM", "LPT"].iter().any(|p| {
-                        device.strip_prefix(p).is_some_and(|n| {
-                            n.chars().count() == 1 && n.chars().all(char::is_numeric)
-                        })
-                    })
-            }),
-            "Use a project-relative asset path, such as Art/Prop.glb."
-        );
-        let file = Path::new(&relative);
-        ensure!(
-            file.extension()
-                .zip(Path::new(job.filename()).extension())
-                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)),
-            "Use the asset's original file extension."
-        );
-        let mut dir = dunce::canonicalize(self.work(attempt))?;
-        for segment in &segments[..segments.len() - 1] {
-            dir.push(segment);
-            if let Err(e) = fs::create_dir(&dir)
-                && e.kind() != std::io::ErrorKind::AlreadyExists
-            {
-                return Err(e.into());
-            }
-            ensure!(
-                dir.is_dir() && dunce::canonicalize(&dir)? == dir,
-                "Choose a directory inside the review copy without links."
-            );
-        }
-        let dest = dir.join(segments.last().unwrap());
-        let source = job.folder(self).join(job.filename());
-        if fs::symlink_metadata(&dest).is_ok() {
-            ensure!(
-                dest.is_file()
-                    && dunce::canonicalize(&dest)? == dest
-                    && same_contents(&dest, &source)?,
-                "A different file already exists at the destination. Choose another name."
-            );
-            return Ok(());
-        }
-        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
-        std::io::copy(&mut fs::File::open(source)?, temp.as_file_mut())?;
-        temp.persist_noclobber(dest)?;
-        Ok(())
+        copy_to_work(
+            &self.work(attempt),
+            &job.folder(self).join(job.filename()),
+            destination,
+        )
     }
+}
+
+fn copy_to_work(work: &Path, source: &Path, destination: &str) -> Result<()> {
+    let relative = destination.replace('\\', "/");
+    let segments: Vec<_> = relative.split('/').collect();
+    ensure!(
+        segments.iter().all(|s| {
+            let device = s
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .trim_end()
+                .to_ascii_uppercase();
+            !s.is_empty()
+                && !s.starts_with('.')
+                && !s.ends_with([' ', '.'])
+                && s.chars().all(|c| c.is_alphanumeric() || " _-.".contains(c))
+                && !matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !["COM", "LPT"].iter().any(|p| {
+                    device
+                        .strip_prefix(p)
+                        .is_some_and(|n| n.chars().count() == 1 && n.chars().all(char::is_numeric))
+                })
+        }),
+        "Use a project-relative asset path, such as Art/Prop.glb."
+    );
+    let file = Path::new(&relative);
+    ensure!(
+        file.extension()
+            .zip(source.extension())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)),
+        "Use the asset's original file extension."
+    );
+    let mut dir = dunce::canonicalize(work)?;
+    for segment in &segments[..segments.len() - 1] {
+        dir.push(segment);
+        if let Err(e) = fs::create_dir(&dir)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(e.into());
+        }
+        ensure!(
+            dir.is_dir() && dunce::canonicalize(&dir)? == dir,
+            "Choose a directory inside the review copy without links."
+        );
+    }
+    let dest = dir.join(segments.last().unwrap());
+    if fs::symlink_metadata(&dest).is_ok() {
+        ensure!(
+            dest.is_file() && dunce::canonicalize(&dest)? == dest && same_contents(&dest, source)?,
+            "A different file already exists at the destination. Choose another name."
+        );
+        return Ok(());
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+    std::io::copy(&mut fs::File::open(source)?, temp.as_file_mut())?;
+    temp.persist_noclobber(dest)?;
+    Ok(())
+}
+
+impl Store {
     pub fn studio_history(&self, area: &str) -> Result<Vec<Job>> {
         self.find_studio_jobs(area, "", false, None)
     }
@@ -486,8 +496,15 @@ impl Store {
             }
             Recipe::Texture { material, seed } => textures::generate(folder, material, *seed)?,
             Recipe::Model { .. } | Recipe::ModelBrief { .. } | Recipe::Blend { .. } => {
-                return tools::model(self, folder, job, inference.as_ref(), context.reference)
-                    .await;
+                return tools::model(
+                    self,
+                    folder,
+                    job,
+                    inference.as_ref(),
+                    context.reference,
+                    context.style_image,
+                )
+                .await;
             }
             Recipe::Decompile { binary, filter } => {
                 return tools::decompile(self, job, folder, binary, filter, fresh).await;

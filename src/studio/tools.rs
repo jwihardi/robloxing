@@ -43,16 +43,25 @@ impl Store {
         Ok(())
     }
     pub fn studio_tool(&self, name: &str) -> Result<PathBuf> {
-        let stored: Option<String> = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT path FROM preferences.studio_tools WHERE name=?1",
-                [name],
-                |r| r.get(0),
-            )
-            .optional()?;
+        Self::installed_studio_tool(&self.preferences_home, name)
+    }
+
+    pub fn installed_studio_tool(home: &Path, name: &str) -> Result<PathBuf> {
+        let preferences = home.join("preferences.sqlite");
+        let mut stored: Option<String> = None;
+        if preferences.try_exists()? {
+            let db = rusqlite::Connection::open_with_flags(
+                preferences,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            if db.table_exists(None, "studio_tools")? {
+                stored = db
+                    .query_row("SELECT path FROM studio_tools WHERE name=?1", [name], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+            }
+        }
         if let Some(path) = stored.map(PathBuf::from) {
             ensure!(
                 valid_tool(name, &path),
@@ -143,21 +152,35 @@ pub(super) async fn model(
     job: &super::Job,
     inference: Option<&(String, String)>,
     reference: Option<&Path>,
+    style_image: Option<&Path>,
 ) -> Result<String> {
     let recipe = &job.recipe;
-    let blender = store.studio_tool("Blender")?;
     if let Recipe::ModelBrief { brief } = recipe {
         let mut brief = brief.clone();
         if let Some(path) = reference {
             let previous = fs::read_to_string(path)?;
             brief.push_str(&format!("\n\nPrevious model design to revise:\n{previous}"));
         }
-        provider::design_model(cwd, &brief, inference.context("Missing model designer")?).await?;
+        provider::design_model(
+            cwd,
+            &brief,
+            inference.context("Missing model designer")?,
+            style_image,
+        )
+        .await?;
     }
+    run_model(&store.studio_tool("Blender")?, cwd, recipe).await
+}
+
+pub(super) async fn run_model(
+    blender: &Path,
+    cwd: &Path,
+    request: &impl serde::Serialize,
+) -> Result<String> {
     fs::write(cwd.join("model.py"), include_str!("model.py"))?;
-    fs::write(cwd.join("request.json"), serde_json::to_vec(recipe)?)?;
+    fs::write(cwd.join("request.json"), serde_json::to_vec(request)?)?;
     run(
-        &blender,
+        blender,
         &[
             "--background",
             "--factory-startup",

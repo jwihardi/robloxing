@@ -1,5 +1,6 @@
 use crate::{Attempt, Store, git, provider};
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -463,6 +464,7 @@ pub(crate) fn tools(worker: bool) -> Value {
     let string = json!({"type":"string"});
     let strings = json!({"type":"array","items":string});
     let mut available = vec![
+        crate::studio::packs::definition(),
         json!({"type":"function","name":"workshop_find_reports","description":"Search this project's saved decompilation history before requesting another analysis. Search by binary name, filter, symbol, entry point or input SHA-256. Each matching function lists its report byte offset, address and name. Empty query lists recent runs.","inputSchema":{"type":"object","properties":{"query":string,"before":{"type":"integer","description":"Optional next_before from the preceding page."}},"required":["query"],"additionalProperties":false}}),
         json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the optional AI summary, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log","summary"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
     ];
@@ -471,7 +473,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         return Value::Array(available);
     }
     let lead_tools = json!([
-        {"type":"function","name":"workshop_generate_asset","description":"Lead-only specialist dispatch. Call this tool directly to create or revise an image or editable 3D model and deliver it to this chat. For an image or model, give it a short display title (e.g. Blue step stool) and a self-contained brief. Optionally select an allowed generation model and effort. For a revision use the returned source_asset ID, or reference_image for an image or sketch. Local alternatives: texture takes material and seed, starter takes template and brief (name), scene exports a Blender path or re-exports a prior source_asset. The result includes the saved asset ID. Import separately only when the project needs a copy.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["image","model","texture","starter","scene"]},"title":string,"brief":string,"style":string,"model":string,"effort":string,"source_asset":{"type":"integer","minimum":1},"reference_image":{"type":"string","description":"Use chat for the latest marked-up image, sketch or prior image, or supply an attached or project image path."},"material":{"type":"string","enum":["Moss","Basalt","Sand"]},"seed":{"type":"integer","minimum":0,"maximum":4294967295u64},"template":{"type":"string","enum":["Crystal","Barrel","Planter"]},"path":string},"required":["kind"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_generate_asset","description":"Lead-only specialist dispatch. Call this tool directly to create or revise an image or editable 3D model and deliver it to this chat. For an image or model, give it a short display title (e.g. Blue step stool) and a self-contained brief. Optionally select an allowed generation model and effort. For a revision use the returned source_asset ID, or reference_image for an image or sketch. Local alternatives: texture takes material and seed, starter takes template and brief (name), scene exports a Blender path or re-exports a prior source_asset. The result includes the saved asset ID. Import separately only when the project needs a copy.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["image","model","texture","starter","scene"]},"title":string,"brief":string,"style":string,"style_pack":{"type":"string","description":"For a model, use this project pack key as art direction and visual reference."},"style_asset":{"type":"string","description":"Optional member key in style_pack to use as the pictured example."},"model":string,"effort":string,"source_asset":{"type":"integer","minimum":1},"reference_image":{"type":"string","description":"Use chat for the latest marked-up image, sketch or prior image, or supply an attached or project image path."},"material":{"type":"string","enum":["Moss","Basalt","Sand"]},"seed":{"type":"integer","minimum":0,"maximum":4294967295u64},"template":{"type":"string","enum":["Crystal","Barrel","Planter"]},"path":string},"required":["kind"],"additionalProperties":false}},
         {"type":"function","name":"workshop_send_image","description":"Show an existing or locally rendered project image in chat. Use a path inside the current project copy and a short descriptive caption.","inputSchema":{"type":"object","properties":{"path":string,"caption":string},"required":["path","caption"],"additionalProperties":false}},
         {"type":"function","name":"workshop_find_assets","description":"Find saved images and models in this project. Use the result ID to revise or import a finished asset.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
         {"type":"function","name":"workshop_import_asset","description":"Bring a saved PNG or GLB into this chat's isolated working copy at the requested project-relative path for review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
@@ -938,7 +940,54 @@ impl Store {
     }
 }
 
-pub(crate) async fn dispatch(
+#[derive(Debug)]
+pub(crate) struct ToolOutput {
+    pub text: String,
+    pub image: Option<Vec<u8>>,
+}
+
+impl ToolOutput {
+    pub fn text(text: String) -> Self {
+        Self { text, image: None }
+    }
+
+    pub fn mcp(result: Result<Self>) -> Value {
+        let error = result.is_err();
+        let output = result.unwrap_or_else(|e| Self::text(format!("{e:#}")));
+        let mut content = vec![json!({"type":"text","text":output.text})];
+        if let Some(bytes) = output.image {
+            content
+                .push(json!({"type":"image","mimeType":"image/png","data":STANDARD.encode(bytes)}));
+        }
+        json!({"isError":error,"content":content})
+    }
+
+    pub fn codex(result: Result<Self>) -> Value {
+        let success = result.is_ok();
+        let output = result.unwrap_or_else(|e| Self::text(format!("{e:#}")));
+        let mut items = vec![json!({"type":"inputText","text":output.text})];
+        if let Some(bytes) = output.image {
+            items.push(json!({"type":"inputImage","imageUrl":format!("data:image/png;base64,{}",STANDARD.encode(bytes))}));
+        }
+        json!({"success":success,"contentItems":items})
+    }
+}
+
+pub(crate) async fn dispatch_tool(
+    store: &Store,
+    lead: &Attempt,
+    request: &Value,
+    notify: &dyn Fn(provider::ReplyUpdate<'_>),
+) -> Result<ToolOutput> {
+    if request["tool"] == "workshop_asset_pack" {
+        return crate::studio::packs::dispatch(store, lead, &request["arguments"], notify).await;
+    }
+    dispatch(store, lead, request, notify)
+        .await
+        .map(ToolOutput::text)
+}
+
+async fn dispatch(
     store: &Store,
     lead: &Attempt,
     request: &Value,

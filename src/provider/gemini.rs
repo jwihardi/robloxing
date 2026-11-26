@@ -332,10 +332,62 @@ pub async fn sign_in() -> Result<()> {
     .context("Google sign-in timed out")?
 }
 
+pub(super) async fn studio_response(
+    provider: &str,
+    io: &mut Connection,
+    id: u32,
+    mut text: Option<&mut String>,
+    image: bool,
+) -> Result<Value> {
+    loop {
+        let msg = next(&mut io.lines).await?;
+        if msg.get("method").is_none() && msg["id"] == id {
+            return result(&msg, provider).cloned();
+        }
+        if msg.get("method").is_some() && msg.get("id").is_some() {
+            let response = if msg["method"] == "session/request_permission" {
+                let call = &msg["params"]["toolCall"];
+                let allow = image
+                    && msg["params"]["sessionId"] == io.session
+                    && (call["name"] == "generate_image"
+                        || (call["name"] == "invoke_subagent"
+                            && call["rawInput"]["TypeName"] == "image-generator"));
+                let option = msg["params"]["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|o| o["kind"] == if allow { "allow_once" } else { "reject_once" });
+                let outcome = option.map_or_else(
+                    || json!({"outcome":"cancelled"}),
+                    |o| json!({"outcome":"selected","optionId":o["optionId"]}),
+                );
+                json!({"result":{"outcome":outcome}})
+            } else {
+                json!({"error":{"code":-32601,"message":"Unsupported client request"}})
+            };
+            let mut frame = response;
+            frame["id"] = msg["id"].clone();
+            frame["jsonrpc"] = json!("2.0");
+            send(&mut io.stdin, frame).await?;
+        } else if msg["method"] == "session/update"
+            && msg["params"]["sessionId"] == io.session
+            && msg["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+            && let Some(buffer) = text.as_deref_mut()
+            && let Some(chunk) = msg["params"]["update"]["content"]["text"].as_str()
+        {
+            ensure!(
+                buffer.len() + chunk.len() <= 8 * 1024 * 1024,
+                "Studio response exceeds 8 MiB"
+            );
+            buffer.push_str(chunk);
+        }
+    }
+}
+
 pub(super) async fn studio(
     dir: &Path,
     instructions: &str,
-    prompt: &str,
+    prompt: &Message,
     schema: Value,
     inference: &(String, String),
 ) -> Result<Value> {
@@ -345,6 +397,69 @@ pub(super) async fn studio(
         &policy,
         "[[rule]]\ntoolName = \"*\"\ndecision = \"deny\"\npriority = 999\n",
     )?;
+    let model = model_name((&inference.0, &inference.1))?;
+    let mut input = format!("{instructions}\n");
+    if !schema.is_null() {
+        input.push_str(&format!(
+            "Return only JSON matching this schema: {schema}\n"
+        ));
+    }
+    input.push_str(&prompt.text);
+    if !prompt.files.is_empty() {
+        let mut args = vec![
+            "--acp",
+            "--policy",
+            policy.to_str().context("Invalid policy path")?,
+        ];
+        if model != "default" {
+            args.extend(["--model", model]);
+        }
+        let mut io = spawn(dir, &args, tempfile::tempfile()?)?;
+        initialize(&mut io.stdin).await?;
+        studio_response("Gemini CLI", &mut io, 1, None, false).await?;
+        rpc(
+            &mut io.stdin,
+            2,
+            "session/new",
+            json!({"cwd":dir,"mcpServers":[]}),
+        )
+        .await?;
+        let session = studio_response("Gemini CLI", &mut io, 2, None, false).await?;
+        io.session = session["sessionId"]
+            .as_str()
+            .context("Missing Studio session")?
+            .into();
+        if model != "default" && session["models"]["currentModelId"] != model {
+            rpc(
+                &mut io.stdin,
+                3,
+                "session/set_model",
+                json!({"sessionId":io.session,"modelId":model}),
+            )
+            .await?;
+            studio_response("Gemini CLI", &mut io, 3, None, false).await?;
+        }
+        let visual = Message {
+            text: input,
+            files: prompt.files.clone(),
+            queued_id: None,
+        };
+        rpc(
+            &mut io.stdin,
+            4,
+            "session/prompt",
+            json!({"sessionId":io.session,"prompt":content(&visual)?}),
+        )
+        .await?;
+        let mut text = String::new();
+        let reply = studio_response("Gemini CLI", &mut io, 4, Some(&mut text), false).await?;
+        ensure!(
+            reply["stopReason"] == "end_turn",
+            "Gemini ended its visual design request: {}",
+            reply["stopReason"]
+        );
+        return studio_text(&text, &schema);
+    }
     let mut args = vec![
         "-p",
         "Answer the request on stdin.",
@@ -353,7 +468,6 @@ pub(super) async fn studio(
         "--policy",
         policy.to_str().context("Invalid policy path")?,
     ];
-    let model = model_name((&inference.0, &inference.1))?;
     if model != "default" {
         args.extend(["--model", model]);
     }
@@ -364,13 +478,6 @@ pub(super) async fn studio(
         mut child,
         ..
     } = io;
-    let mut input = format!("{instructions}\n");
-    if !schema.is_null() {
-        input.push_str(&format!(
-            "Return only JSON matching this schema: {schema}\n"
-        ));
-    }
-    input.push_str(prompt);
     let mut out = Vec::new();
     let mut reader = lines.reader.take(8 * 1024 * 1024 + 1);
     let ((), _) = tokio::try_join!(
@@ -395,8 +502,12 @@ pub(super) async fn studio(
     );
     let text = result["response"]
         .as_str()
-        .context("Missing Gemini response")?
-        .trim();
+        .context("Missing Gemini response")?;
+    studio_text(text, &schema)
+}
+
+fn studio_text(text: &str, schema: &Value) -> Result<Value> {
+    let text = text.trim();
     if schema.is_null() {
         return Ok(json!({"text":text}));
     }
@@ -529,7 +640,8 @@ pub(super) async fn exchange(
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let startup = tokio::time::sleep(Duration::from_secs(90));
     tokio::pin!(startup);
-    type Dispatch<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>>;
+    type Dispatch<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<team::ToolOutput>> + 'a>>;
     let mut dispatch: Option<Dispatch<'_>> = None;
     loop {
         if !waiting
@@ -603,7 +715,7 @@ pub(super) async fn exchange(
                         }
                         let request = json!({"tool":name,"arguments":args});
                         dispatch = Some(Box::pin(async move {
-                            team::dispatch(store, a, &request, notify).await
+                            team::dispatch_tool(store, a, &request, notify).await
                         }));
                     }
                 }

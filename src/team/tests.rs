@@ -3,6 +3,98 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
+fn pack_tools_share_visual_references_and_copy_exact_assets_into_each_assignment() -> Result<()> {
+    let tmp = tempdir()?;
+    let home = tmp.path().join("home");
+    let store = Store::open(&tmp.path().join("project"), &home)?;
+    let lead = store.prepare("Design a harbor", "", None)?;
+    let child = store.child_store(lead.id, 9)?;
+    let worker = child.prepare("Use the harbor assets", "", None)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let call = |s: &Store, a: &Attempt, args: Value| {
+        runtime.block_on(dispatch_tool(
+            s,
+            a,
+            &json!({"tool":"workshop_asset_pack","arguments":args}),
+            &|_| {},
+        ))
+    };
+    call(
+        &child,
+        &worker,
+        json!({"action":"create","pack":"harbor","name":"Harbor","style":"Dark painted iron"}),
+    )?;
+    assert!(
+        store
+            .asset_packs()
+            .create("../escape", "bad", "bad")
+            .is_err()
+    );
+    assert!(
+        store
+            .asset_packs()
+            .create("harbor", "Other", "different")
+            .is_err()
+    );
+    // Real Blender publication is covered by tests/blender_packs.py. Seed its output
+    // here to exercise native provider envelopes, shared lookup and review isolation.
+    let lib = store.asset_packs();
+    let dir = lib.member_dir("harbor", "buoy")?;
+    fs::create_dir(&dir)?;
+    let record = json!({"key":"buoy","name":"Buoy","description":"Teal iron marker","source_sha256":"fixture","glb_sha256":"fixture",
+        "blend_sha256":"fixture","preview_sha256":"fixture","collection":"Buoy","meshes":1,"triangles":320,
+        "dimensions":[1.0,1.0,2.0],"meters_per_unit":0.5,"materials":[{"name":"Iron","color":"#224455"}],"palette":["#337799"]});
+    fs::write(dir.join("asset.json"), serde_json::to_vec(&record)?)?;
+    let png = dir.join("preview.png");
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([33, 77, 99, 255])).save(&png)?;
+    fs::write(dir.join("model.glb"), b"saved mesh bytes")?;
+    fs::write(dir.join("model.blend"), b"saved native bytes")?;
+    store.finish(lead.id, "review", "Published the pack")?;
+    let later = store.prepare("Build a dock", "", None)?;
+    let inspect = json!({"action":"inspect","pack":"harbor","asset":"buoy"});
+    let response = call(&child, &worker, inspect.clone())?;
+    let png_bytes = fs::read(&png)?;
+    assert_eq!(response.image.as_deref(), Some(png_bytes.as_slice()));
+    let codex = ToolOutput::codex(Ok(response));
+    assert_eq!(
+        codex["contentItems"][1]["imageUrl"],
+        format!("data:image/png;base64,{}", STANDARD.encode(&png_bytes))
+    );
+    let mcp = ToolOutput::mcp(call(&store, &later, inspect));
+    assert_eq!(mcp["content"][1]["data"], STANDARD.encode(png_bytes));
+    assert_eq!(mcp["content"][1]["mimeType"], "image/png");
+    for (s, a) in [(&store, &later), (&child, &worker)] {
+        let use_it = |dest| {
+            call(
+                s,
+                a,
+                json!({"action":"use","pack":"harbor","asset":"buoy","destination":dest}),
+            )
+        };
+        use_it("Art/Buoy.blend")?;
+        use_it("Art/Buoy.blend")?;
+        use_it("Art/Buoy.glb")?;
+        assert!(use_it("../Buoy.glb").is_err());
+        assert_eq!(
+            fs::read(s.work(a.id).join("Art/Buoy.blend"))?,
+            b"saved native bytes"
+        );
+        fs::write(s.work(a.id).join("Art/Buoy.glb"), b"local change")?;
+        assert!(use_it("Art/Buoy.glb").is_err());
+        assert_eq!(
+            fs::read(s.work(a.id).join("Art/Buoy.glb"))?,
+            b"local change"
+        );
+    }
+    assert!(!store.project.join("Art").exists());
+    let other = Store::open(&tmp.path().join("other"), &home)?;
+    assert!(other.asset_packs().list()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn generated_assets_stay_with_the_chat_and_respect_provider_permissions() -> Result<()> {
     use crate::provider_permissions::{ProviderPermissions, TaskRole};
     let root = tempdir()?;
@@ -215,6 +307,7 @@ fn lead_and_worker_can_find_and_page_preexisting_reports() -> Result<()> {
             assert_eq!(
                 names,
                 [
+                    "workshop_asset_pack",
                     "workshop_find_reports",
                     "workshop_read_report",
                     "workshop_report_result"

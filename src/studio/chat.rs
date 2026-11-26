@@ -19,6 +19,8 @@ pub(crate) struct AssetRequest {
     effort: String,
     source_asset: Option<i64>,
     reference_image: Option<String>,
+    style_pack: Option<String>,
+    style_asset: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +110,7 @@ impl Store {
             "Attach a reference image, mark up an image or choose a previous image from this chat.",
         )
     }
-    fn asset_input_file(&self, lead: &Attempt, path: &str) -> Result<PathBuf> {
+    pub(super) fn asset_input_file(&self, lead: &Attempt, path: &str) -> Result<PathBuf> {
         let work = dunce::canonicalize(self.work(lead.id))?;
         let path = dunce::canonicalize(work.join(path)).context("Cannot find the input file.")?;
         ensure!(path.is_file(), "Choose a regular input file.");
@@ -219,13 +221,28 @@ impl Store {
         request: AssetRequest,
         notify: &dyn Fn(provider::ReplyUpdate<'_>),
     ) -> Result<String> {
-        let (recipe, reference) = self.chat_recipe(
+        let (mut recipe, reference) = self.chat_recipe(
             lead,
             request.recipe,
             request.source_asset,
             request.reference_image,
         )?;
         recipe.validate()?;
+        let mut style_image = None;
+        ensure!(
+            request.style_asset.is_none() || request.style_pack.is_some(),
+            "Supply the pack that owns the reference asset."
+        );
+        if let Some(key) = request.style_pack {
+            let Recipe::ModelBrief { brief } = &mut recipe else {
+                bail!("Choose a style pack for a model design.");
+            };
+            let (direction, preview) = self
+                .asset_packs()
+                .style_reference(&key, request.style_asset.as_deref())?;
+            brief.push_str(&direction);
+            style_image = preview;
+        }
         let area = recipe.area();
         notify(provider::ReplyUpdate::Activity(if area == "Images" {
             "Generating an image…"
@@ -278,6 +295,7 @@ impl Store {
             BuildContext {
                 inference: selection.as_ref(),
                 reference: reference.as_deref(),
+                style_image: style_image.as_deref(),
                 delivery: Some((lead.id, &maker)),
             },
         )

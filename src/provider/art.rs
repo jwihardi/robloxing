@@ -31,14 +31,14 @@ async fn art_turn(
             item_type != "imageGeneration",
             "Choose a Codex or Antigravity model for native image generation."
         );
-        return super::gemini::studio(dir, instructions, &prompt.text, schema, inference).await;
+        return super::gemini::studio(dir, instructions, prompt, schema, inference).await;
     }
     if super::provider_for(&inference.0) == "claude" {
         ensure!(
             item_type != "imageGeneration",
             "Claude Code does not provide native image generation. Choose a Codex or Antigravity model."
         );
-        return super::claude::studio(dir, instructions, &prompt.text, schema, inference).await;
+        return super::claude::studio(dir, instructions, prompt, schema, inference).await;
     }
     let mut io = Connection::spawn(dir.to_owned(), tempfile::tempfile()?)?;
     request(
@@ -210,6 +210,7 @@ pub(crate) async fn design_model(
     dir: &Path,
     brief: &str,
     inference: &(String, String),
+    style_image: Option<&Path>,
 ) -> Result<()> {
     let vector = json!({"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3});
     let schema = json!({"type":"object","properties":{"parts":{"type":"array","minItems":1,"maxItems":64,
@@ -217,8 +218,10 @@ pub(crate) async fn design_model(
             "name":{"type":"string"},"shape":{"type":"string","enum":["box","ellipsoid","cylinder","cone","torus"]},
             "size":vector,"center":vector,"rotation":vector,"color":{"type":"string"}},
             "required":["name","shape","size","center","rotation","color"]}}},"required":["parts"],"additionalProperties":false});
-    let item=art_turn(dir,"Design a cohesive low-poly game prop using at most 64 named primitive meshes. Return just the JSON scene description. Size is full local XYZ dimensions in metres, center is XYZ position, rotation is XYZ Euler degrees, color is a six-digit sRGB hex value. Z is up; stand the prop on z=0. Give its silhouette distinctive proportions and connected parts. Use no tools.",
-        &Message::from(brief),schema,"agentMessage",inference).await?;
+    let mut prompt = Message::from(brief);
+    prompt.files.extend(style_image.map(Path::to_path_buf));
+    let item=art_turn(dir,"Design a cohesive low-poly game prop using at most 64 named primitive meshes. Return just the JSON scene description. Size is full local XYZ dimensions in metres, center is XYZ position, rotation is XYZ Euler degrees, color is a six-digit sRGB hex value. Z is up; stand the prop on z=0. Follow the supplied art direction and visual reference when present. Use no tools.",
+        &prompt,schema,"agentMessage",inference).await?;
     let description: Value =
         serde_json::from_str(item["text"].as_str().context("Missing model design")?)?;
     std::fs::write(

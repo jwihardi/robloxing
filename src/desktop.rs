@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod appearance;
 mod capture;
+mod desktop_packs;
 mod desktop_studio;
 mod desktop_tasks;
 mod desktop_usage;
@@ -31,13 +32,15 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, TaskControls, PolicyChoices, ChatTurn, WorkerRow, WorkRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, AssetPacks, PackRow, PackMember, TaskControls, PolicyChoices, ChatTurn, WorkerRow, WorkRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
     NotificationClicked(notifications::Target),
     NotificationError(String),
     StudioFinished(PathBuf, i64, Result<()>),
+    PackExported(PathBuf, String, Result<PathBuf>),
+    PackImported(PathBuf, Result<String>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
     PreferenceChanged {
@@ -1169,6 +1172,36 @@ impl App {
                     self.pending_notification.replace(Some(target));
                     self.open_notification()?;
                 }
+                Update::PackImported(project, result) => {
+                    if let Some(store) = self
+                        .store
+                        .borrow()
+                        .as_ref()
+                        .filter(|s| s.project == project)
+                        && let Err(e) = result.and_then(|key| self.refresh_packs(store, Some(&key)))
+                    {
+                        ui.global::<AssetPacks>()
+                            .set_message(format!("{e:#}").into());
+                    }
+                }
+                Update::PackExported(project, key, result) => {
+                    let packs = ui.global::<AssetPacks>();
+                    if self
+                        .store
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|s| s.project == project)
+                        && packs.get_pack().key == key
+                    {
+                        packs.set_message(
+                            match result {
+                                Ok(path) => format!("Exported to {}", path.display()),
+                                Err(e) => format!("{e:#}"),
+                            }
+                            .into(),
+                        );
+                    }
+                }
                 Update::StudioFinished(project, id, result) => {
                     let slot = self.store.borrow();
                     if let Some(store) = slot.as_ref().filter(|s| s.project == project) {
@@ -1522,7 +1555,7 @@ impl App {
                     self.render()?;
                     let studio = ui.global::<Studio>();
                     if ui.get_studio_open()
-                        && studio.get_area() == "Assets"
+                        && matches!(studio.get_area().as_str(), "Assets" | "Packs")
                         && let Some(store) = self.store.borrow().as_ref()
                     {
                         self.refresh_studio(store, Some(i64::from(studio.get_selected().id)))?;
@@ -1944,6 +1977,7 @@ fn main() -> Result<()> {
         session_generation: Default::default(),
     });
     desktop_studio::connect(&ui, &app);
+    desktop_packs::connect(&ui, &app);
     desktop_tasks::connect(&ui, &app);
     sketch::connect(&ui, &app);
     notifications::connect(&ui);

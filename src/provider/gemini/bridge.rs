@@ -28,12 +28,14 @@ impl Bridge {
     pub(super) fn new(worker: bool, project_trusted: bool) -> Result<Self> {
         Self::with_tools(crate::team::tools(worker), project_trusted)
     }
-    pub(in crate::provider) fn legacy_assets() -> Result<Self> {
-        let mut tools = crate::team::tools(false);
+    pub(in crate::provider) fn legacy_assets(worker: bool) -> Result<Self> {
+        let mut tools = crate::team::tools(worker);
         tools
             .as_array_mut()
             .context("Invalid Workshop tools")?
-            .retain(|t| t["name"] == "workshop_generate_asset");
+            .retain(|t| {
+                t["name"] == "workshop_generate_asset" || t["name"] == "workshop_asset_pack"
+            });
         Self::with_tools(tools, false)
     }
     fn with_tools(mut tools: Value, project_trusted: bool) -> Result<Self> {
@@ -71,21 +73,27 @@ impl Bridge {
         )
     }
     pub(in crate::provider) fn codex_config(&self) -> Result<Value> {
+        let policies: serde_json::Map<_, _> = self
+            .tools
+            .as_array()
+            .context("Invalid Workshop tools")?
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .map(|name| (name.to_owned(), json!({"approval_mode":"approve"})))
+            .collect();
         Ok(
             json!({"command":std::env::current_exe()?,"args":[SWITCH],"env":{(DIRECTORY):self.dir.path()},"tool_timeout_sec":960,
-                "tools":{"workshop_generate_asset":{"approval_mode":"approve"}}}),
+                "tools":policies}),
         )
     }
     pub(in crate::provider) fn call(&self) -> Result<Option<Value>> {
         take(self.dir.path(), "call")
     }
-    pub(in crate::provider) fn reply(&self, result: Result<String>) -> Result<()> {
-        let error = result.is_err();
-        let text = result.unwrap_or_else(|e| format!("{e:#}"));
+    pub(in crate::provider) fn reply(&self, result: Result<crate::team::ToolOutput>) -> Result<()> {
         publish(
             self.dir.path(),
             "reply",
-            &json!({"isError":error,"content":[{"type":"text","text":text}]}),
+            &crate::team::ToolOutput::mcp(result),
         )
     }
 }

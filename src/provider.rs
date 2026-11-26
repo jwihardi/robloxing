@@ -222,6 +222,7 @@ fn tool_activity(name: &str) -> &str {
         "generate_image" | "image_generation" | "imagegen" => "Generating an image…",
         "workshop_delegate" => "Dispatching subagents…",
         "workshop_generate_asset" => "Preparing the asset…",
+        "workshop_asset_pack" => "Working with the Blender asset library…",
         "Bash" | "PowerShell" => "Running a command…",
         "WebSearch" | "web_search" => "Searching the web…",
         "Read" | "read_file" => "Reading a file…",
@@ -271,6 +272,7 @@ fn instructions(store: &Store, a: &Attempt) -> Result<String> {
         instructions.push_str(" For an explicit request to inspect or edit the connected Blender scene, use its Blender MCP tools when available. When the creator asks for a new or revised asset in this chat, call workshop_generate_asset. You choose the generator, give it a complete brief, and can select the model and effort within the creator's settings. Omit those fields to route automatically. Use reference_image=chat when revising a posted image or sketch, or source_asset to revise a saved design. Only the lead can call this tool. For a standalone asset, call it directly as the specialist assignment, including when automatic project delegation is enabled. The tool verifies and delivers the finished file. Use its result as evidence of delivery. Delegate additional project work when the request calls for it. Continue the conversation here. Use workshop_send_image for an existing project image. Use workshop_import_asset when the request also needs the file in the project.");
     }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
+    instructions.push_str(" For Blender art packs or a matching project prop, use workshop_asset_pack. Inspect the pack's art direction and individual preview images, reuse an existing member when suitable, and publish finished members when asked to build a pack. Pass style_pack when generating a matching model. The library is shared by project chats and workers.");
     Ok(instructions)
 }
 
@@ -289,7 +291,12 @@ async fn open_thread(
     let mut instructions = instructions(store, a)?;
     if let Some(bridge) = legacy_assets {
         params["config"]["mcp_servers.workshop_assets"] = bridge.codex_config()?;
-        instructions.push_str(" In this resumed chat, the asset tool is named mcp__workshop_assets__workshop_generate_asset.");
+        instructions.push_str(" In this resumed chat use mcp__workshop_assets__workshop_asset_pack for the Blender library.");
+        if !store.worker {
+            instructions.push_str(
+                " Use mcp__workshop_assets__workshop_generate_asset for style-matched models.",
+            );
+        }
     }
     if a.session.is_empty() {
         params["dynamicTools"] = team::tools(store.worker);
@@ -418,15 +425,14 @@ impl Connection {
         let mut io = Self::spawn(store.work(a.id), stderr)?;
         // Codex keeps the original dynamic tool list on resume. Older chats receive
         // the missing capability via the same local MCP transport used by ACP.
-        if !store.worker
-            && !a.session.is_empty()
+        if !a.session.is_empty()
             && !store.db.lock().unwrap().query_row(
-                "SELECT EXISTS(SELECT 1 FROM codex_asset_sessions WHERE session=?1)",
+                "SELECT EXISTS(SELECT 1 FROM codex_asset_sessions WHERE session=?1 AND pack_tools=1)",
                 [&a.session],
                 |r| r.get::<_, bool>(0),
             )?
         {
-            io.gemini_bridge = Some(gemini::Bridge::legacy_assets()?);
+            io.gemini_bridge = Some(gemini::Bridge::legacy_assets(store.worker)?);
         }
         Ok(io)
     }
@@ -498,7 +504,7 @@ fn team_preference(store: &Store, id: i64) -> Result<Option<String>> {
             enabled.join(", ")
         ));
     }
-    message.push_str(" For a standalone image or 3D model, call workshop_generate_asset directly from this lead session. It assigns the specialist and delivers the file. Project workers handle any additional project deliverables.");
+    message.push_str(" To create a new standalone image or 3D model, call workshop_generate_asset directly from this lead session. To reuse an existing Blender pack member, use workshop_asset_pack. It assigns the specialist and delivers the file. Project workers handle any additional project deliverables.");
     for role in [TaskRole::Images, TaskRole::Models] {
         let providers: Vec<_> = PROVIDERS
             .into_iter()
@@ -742,14 +748,15 @@ async fn codex_exchange(
     let mut external_blocker = None;
     let mut runner_failure = None;
     let mut deadline = Some(Instant::now() + Duration::from_secs(90));
-    type ToolFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>>;
+    type ToolFuture<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<team::ToolOutput>> + 'a>>;
     let mut pending_tool: Option<(Option<Value>, ToolFuture<'_>)> = None;
     let mut bridge_tick = tokio::time::interval(Duration::from_millis(100));
     enum Next {
         Deadline,
         Input(Option<Control>),
         Line(Option<String>),
-        Tool(Result<String>),
+        Tool(Result<team::ToolOutput>),
         Bridge,
     }
     loop {
@@ -804,7 +811,7 @@ async fn codex_exchange(
                     let args = json!({"tool":call["name"],"arguments":call["arguments"]});
                     pending_tool = Some((
                         None,
-                        Box::pin(async move { team::dispatch(store, a, &args, notify).await }),
+                        Box::pin(async move { team::dispatch_tool(store, a, &args, notify).await }),
                     ));
                 }
             }
@@ -817,9 +824,11 @@ async fn codex_exchange(
                         .reply(result)?;
                     continue;
                 }
-                let success = result.is_ok();
-                let text = result.unwrap_or_else(|e| format!("{e:#}"));
-                send(stdin,json!({"id":id,"result":{"success":success,"contentItems":[{"type":"inputText","text":text}]}})).await?;
+                send(
+                    stdin,
+                    json!({"id":id,"result":team::ToolOutput::codex(result)}),
+                )
+                .await?;
             }
             Next::Deadline => {
                 if cancelling {
@@ -932,9 +941,9 @@ async fn codex_exchange(
                             let args = v["params"].clone();
                             pending_tool = Some((
                                 Some(v["id"].clone()),
-                                Box::pin(
-                                    async move { team::dispatch(store, a, &args, notify).await },
-                                ),
+                                Box::pin(async move {
+                                    team::dispatch_tool(store, a, &args, notify).await
+                                }),
                             ));
                         }
                         continue;
@@ -1125,9 +1134,9 @@ async fn codex_exchange(
                                 v["result"]["model"].as_str().unwrap_or_default(),
                                 v["result"]["reasoningEffort"].as_str().unwrap_or_default(),
                             )?;
-                            if a.session.is_empty() && !store.worker {
+                            if a.session.is_empty() {
                                 store.db.lock().unwrap().execute(
-                                    "INSERT OR IGNORE INTO codex_asset_sessions VALUES(?1)",
+                                    "INSERT OR REPLACE INTO codex_asset_sessions(session,pack_tools) VALUES(?1,1)",
                                     [&*session],
                                 )?;
                             }
