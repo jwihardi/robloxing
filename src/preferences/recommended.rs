@@ -1,6 +1,9 @@
-use super::{Provider, Row, checked, command, install_skill, plugins, skills};
+use super::{
+    Provider, Row, SKILL_SOURCE_FILE, checked, command, install_skill, plugins, skill_roots, skills,
+};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
+use std::{fs, path::Path};
 
 struct Pick {
     key: &'static str,
@@ -42,6 +45,62 @@ impl Marketplace {
 
 const PICKS: &[Pick] = &[
     Pick {
+        key: "roblox-studio-workflow",
+        title: "Roblox Studio Workflow",
+        publisher: "gamedev-skills",
+        description: "Edit a place or Rojo project and verify the change with the right Studio playtest.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/other-engines/roblox-studio-workflow",
+        claude: None,
+    },
+    Pick {
+        key: "roblox-luau",
+        title: "Roblox Luau",
+        publisher: "gamedev-skills",
+        description: "Write typed Luau, organize modules and choose where client and server scripts run.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/other-engines/roblox-luau",
+        claude: None,
+    },
+    Pick {
+        key: "roblox-networking",
+        title: "Roblox Networking",
+        publisher: "gamedev-skills",
+        description: "Build multiplayer features with RemoteEvents, server validation and two-client playtests.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/other-engines/roblox-networking",
+        claude: None,
+    },
+    Pick {
+        key: "roblox-ui",
+        title: "Roblox UI",
+        publisher: "gamedev-skills",
+        description: "Build HUDs and menus in ScreenGui with safe areas, touch controls and gamepad focus.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/other-engines/roblox-ui",
+        claude: None,
+    },
+    Pick {
+        key: "game-ui-ux",
+        title: "Game UI & UX",
+        publisher: "gamedev-skills",
+        description: "Design readable HUDs, inventory screens and menus across phones, controllers and wide displays.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/disciplines/game-ui-ux",
+        claude: None,
+    },
+    Pick {
+        key: "roblox-building",
+        title: "Roblox Building",
+        publisher: "TabooHarmony",
+        description: "Model props and maps in Studio. Check scale, collisions and where players can go.",
+        skill_url: "https://github.com/TabooHarmony/roblox-brain/tree/main/skills/gameplay/roblox-building",
+        claude: None,
+    },
+    Pick {
+        key: "3d-modeling",
+        title: "3D Modeling",
+        publisher: "omer-metin",
+        description: "Plan game-ready meshes in Blender or Maya, unwrap UVs and build levels of detail for export.",
+        skill_url: "https://github.com/omer-metin/skills-for-antigravity/tree/main/skills/3d-modeling",
+        claude: None,
+    },
+    Pick {
         key: "image-to-sculpt",
         title: "Image to Sculpt",
         publisher: "gokayfem",
@@ -52,6 +111,22 @@ const PICKS: &[Pick] = &[
             name: "image-to-sculpt",
             repo: "gokayfem/image-to-sculpt",
         }),
+    },
+    Pick {
+        key: "prototype-fast",
+        title: "Gameplay Prototyping",
+        publisher: "gamedev-skills",
+        description: "Build a playable version of one mechanic and playtest whether it’s fun before adding content.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/workflows/prototype-fast",
+        claude: None,
+    },
+    Pick {
+        key: "game-feel",
+        title: "Game Feel",
+        publisher: "gamedev-skills",
+        description: "Tune hit-stop, camera shake and animation timing so jumps, hits and pickups feel responsive.",
+        skill_url: "https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/main/skills/disciplines/game-feel",
+        claude: None,
     },
     Pick {
         key: "frontend-design",
@@ -95,15 +170,22 @@ pub(super) async fn list(p: Provider) -> Result<Vec<Row>> {
         .iter()
         .map(|pick| {
             let market = pick.marketplace(p);
-            let skill_installed = local.iter().any(|row| row.label == pick.key);
+            let local_skill = local.iter().find(|row| row.label == pick.key);
             let plugin = installed.as_ref().ok().and_then(|rows| {
                 rows.iter().find(|row| {
                     market.is_some_and(|m| m.plugin == row.id)
                         || (pick.key == "caveman" && row.id == "caveman@caveman")
                 })
             });
-            let (action, button) = if skill_installed || plugin.is_some() {
+            let (action, button) = if plugin.is_some() {
                 ("", "Installed")
+            } else if let Some(row) = local_skill {
+                let source = fs::read_to_string(Path::new(&row.id).join(SKILL_SOURCE_FILE));
+                if source.is_ok_and(|url| url == pick.skill_url) {
+                    ("", "Installed")
+                } else {
+                    ("", "In Skills")
+                }
             } else if market.is_some() && installed.is_err() {
                 ("", "Unavailable")
             } else if market.is_some() {
@@ -114,6 +196,11 @@ pub(super) async fn list(p: Provider) -> Result<Vec<Row>> {
             let mut detail = format!("{} · {}", pick.publisher, pick.description);
             if button == "Unavailable" {
                 detail.push_str(" Check the Claude CLI, then refresh.");
+            } else if button == "In Skills" {
+                detail.push_str(&format!(
+                    " Skills already contains a folder named {}.",
+                    pick.key
+                ));
             }
             Row {
                 id: pick.key.into(),
@@ -150,7 +237,7 @@ pub(super) async fn install(p: Provider, key: &str) -> Result<String> {
         }
         checked(command(p.program()?).args(["plugin", "install", market.plugin])).await?;
     } else {
-        install_skill(p, pick.skill_url).await?;
+        install_skill(pick.skill_url, &skill_roots(p)?[0]).await?;
     }
     let manager = if pick.marketplace(p).is_some() {
         "Installed plugins"
@@ -169,9 +256,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    #[ignore = "downloads the published skill folders from GitHub"]
+    async fn published_recommendations_install_under_their_catalog_keys() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for pick in PICKS {
+            install_skill(pick.skill_url, root.path())
+                .await
+                .with_context(|| format!("Installing {}", pick.skill_url))?;
+            let folder = root.path().join(pick.key);
+            ensure!(
+                folder.join("SKILL.md").is_file(),
+                "Missing skill for {}",
+                pick.title
+            );
+            assert_eq!(
+                fs::read_to_string(folder.join(SKILL_SOURCE_FILE))?,
+                pick.skill_url
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn existing_marketplace_matches_its_publisher_for_supported_claude_source_formats() {
-        let market = PICKS[0].claude.as_ref().unwrap();
+        let market = PICKS
+            .iter()
+            .find(|p| p.key == "image-to-sculpt")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap();
         assert!(
             market.matches_source(&json!({"source":"github","repo":"gokayfem/image-to-sculpt"}))
         );

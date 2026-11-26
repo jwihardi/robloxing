@@ -77,19 +77,33 @@ $env:WORKSHOP_GEMINI = $env:WORKSHOP_CODEX
 $env:WORKSHOP_ANTIGRAVITY = $env:WORKSHOP_CODEX
 $env:CODEX_HOME = Join-Path $root 'codex'
 $env:CLAUDE_CONFIG_DIR = Join-Path $root 'claude'
-# Route only this public skill URL to a temporary fixture. The normal Git installer runs offline.
-$upstream = Join-Path $root 'skill-source'
-$subdir = Join-Path $upstream 'skills/image-to-sculpt'
-[void](New-Item -ItemType Directory -Path $subdir -Force)
-Set-Content (Join-Path $subdir 'SKILL.md') 'Image to Sculpt fixture'
-& git init -q -b main $upstream
-& git -C $upstream add skills
-& git -C $upstream -c user.name=Fixture -c user.email=fixture@localhost commit -qm 'Skill source'
-if ($LASTEXITCODE -ne 0) { throw 'Could not create the test skill source' }
-$idx = [int]$env:GIT_CONFIG_COUNT
-[Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$idx", "url.$(([uri]$upstream).AbsoluteUri).insteadOf")
-[Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$idx", 'https://github.com/gokayfem/image-to-sculpt.git')
-$env:GIT_CONFIG_COUNT = $idx + 1
+$env:USERPROFILE = (New-Item -ItemType Directory -Path (Join-Path $root 'profile')).FullName
+# Exercise sparse Git installs offline with the same repository and folder boundaries as upstream.
+function New-SkillFixture([string]$repo, [hashtable]$files) {
+    $upstream = Join-Path $root ($repo.Replace('/', '-'))
+    foreach ($file in $files.GetEnumerator()) {
+        $path = Join-Path $upstream $file.Key
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+        Set-Content -LiteralPath $path -Value $file.Value
+    }
+    & git init -q -b main $upstream
+    & git -C $upstream add .
+    & git -C $upstream -c user.name=Fixture -c user.email=fixture@localhost commit -qm 'Skill source'
+    if ($LASTEXITCODE -ne 0) { throw "Could not create the test skill source for $repo" }
+    $idx = [int]$env:GIT_CONFIG_COUNT
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$idx", "url.$(([uri]$upstream).AbsoluteUri).insteadOf")
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$idx", "https://github.com/$repo.git")
+    $env:GIT_CONFIG_COUNT = $idx + 1
+}
+New-SkillFixture 'gokayfem/image-to-sculpt' @{ 'skills/image-to-sculpt/SKILL.md' = 'Image to Sculpt fixture' }
+New-SkillFixture 'gamedev-skills/awesome-gamedev-agent-skills' @{
+    'skills/other-engines/roblox-networking/SKILL.md' = 'Networking fixture'
+    'skills/other-engines/roblox-networking/references/validation-and-testing.md' = 'Two-client test'
+    'skills/disciplines/game-feel/SKILL.md' = 'Game feel fixture'
+}
+$localLuau = Join-Path $env:CODEX_HOME 'skills/roblox-luau'
+[void](New-Item -ItemType Directory -Path $localLuau -Force)
+Set-Content (Join-Path $localLuau 'SKILL.md') 'Existing Luau skill'
 # Simulated interactive sign-in must never allocate a terminal on the user's desktop.
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe /r:System.Web.Extensions.dll "/out:$env:WORKSHOP_CODEX" (Join-Path $PSScriptRoot 'FixtureProvider.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile fixture' }
@@ -335,7 +349,7 @@ function Test-NavigationLayout {
         Snapshot 'providers'
         Check-Center 'Refresh' 'providers'
         Click 'Codex'
-        Section 'Settings sections' 'Plugins' 'Install skill Image to Sculpt'
+        Section 'Settings sections' 'Plugins' 'Roblox Studio Workflow'
         Snapshot 'plugins'
         Click 'Browse plugins'
         Wait-For { Named 'Calendar' } 'marketplace'
@@ -446,13 +460,27 @@ function Test-ChatGoals {
     Write-Output "Chat goal command, continuation, editing, pause, resume and navigation passed. Screenshots in $root"
 }
 function Test-Recommendations {
-    Wait-For { (Named 'Install skill Image to Sculpt') -and (Named 'Caveman') -and (Named 'Frontend Design') } 'Codex recommendations'
-    $filter = (Named 'Filter list').GetCurrentPattern($valuePattern)
-    $filter.SetValue('terse')
-    Wait-For { (Named 'Caveman') -and !(Named 'Image to Sculpt') } 'search recommendations by use case'
-    $filter.SetValue('')
-    Wait-For { Named 'Install skill Image to Sculpt' } 'restore recommended list'
+    Wait-For { Named 'Install skill Roblox Studio Workflow' } 'Codex recommendations'
     Save-PrivateWindow (Join-Path $root 'recommended.png')
+    $filter = (Named 'Filter list').GetCurrentPattern($valuePattern)
+    foreach ($item in ([ordered]@{
+        'screenGui' = 'Roblox UI'; 'inventory' = 'Game UI & UX'; 'collisions' = 'Roblox Building'
+        'Maya' = '3D Modeling'; 'fun' = 'Gameplay Prototyping'; 'pickups' = 'Game Feel'; 'terse' = 'Caveman'
+    }).GetEnumerator()) {
+        $filter.SetValue($item.Key)
+        Wait-For { (Named $item.Value) -and !(Named 'Roblox Studio Workflow') } "search for $($item.Key)"
+    }
+    $filter.SetValue('roblox-luau')
+    Wait-For { (Named 'In Skills') -and !(Named 'Install skill Roblox Luau') } 'existing skill with the same name'
+    $filter.SetValue('multiplayer')
+    Wait-For { Named 'Install skill Roblox Networking' } 'multiplayer recommendation'
+    Click 'Install skill Roblox Networking'
+    Wait-For { (Named 'Installed') -and !(Named 'Install skill Roblox Networking') } 'install individual Roblox skill'
+    if ((Get-Content (Join-Path $env:CODEX_HOME 'skills/roblox-networking/references/validation-and-testing.md')) -ne 'Two-client test' -or
+        (Get-Content (Join-Path $localLuau 'SKILL.md')) -ne 'Existing Luau skill' -or
+        (Test-Path (Join-Path $env:CODEX_HOME 'skills/game-feel'))) { throw 'Skill install crossed its selected folder' }
+    $filter.SetValue('Blender')
+    Wait-For { (Named '3D Modeling') -and (Named 'Install skill Image to Sculpt') } 'modeling recommendations'
     $normal = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow).Current.BoundingRectangle
     $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
     [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](800*$scale),[int](650*$scale),0x16)
@@ -462,18 +490,25 @@ function Test-Recommendations {
     Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'recommended skill installed'
     if ((Get-Content (Join-Path $env:CODEX_HOME 'skills/image-to-sculpt/SKILL.md')) -ne 'Image to Sculpt fixture') { throw 'Wrong skill source' }
     [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int]$normal.Width,[int]$normal.Height,0x16)
+    Click 'Antigravity'
+    (Named 'Filter list').GetCurrentPattern($valuePattern).SetValue('pickups')
+    Wait-For { Named 'Install skill Game Feel' } 'Antigravity game skill'
+    Click 'Install skill Game Feel'
+    Wait-For { Named 'Installed' } 'Antigravity skill installed'
+    if ((Get-Content (Join-Path $env:USERPROFILE '.gemini/config/skills/game-feel/SKILL.md')) -ne 'Game feel fixture') { throw 'Wrong Antigravity skill location' }
     Click 'Claude Code'
+    (Named 'Filter list').GetCurrentPattern($valuePattern).SetValue('Blender')
     Wait-For { Named 'Install plugin Image to Sculpt' } 'provider-specific plugin recommendation'
     $installHold = Join-Path $root 'plugin.install.hold'
     $refreshHold = Join-Path $root 'recommend.refresh.hold'
     Set-Content $installHold 'hold'
     Set-Content $refreshHold 'hold'
-    $before = (Named 'Frontend Design').Current.BoundingRectangle
+    $before = (Named '3D Modeling').Current.BoundingRectangle
     Click 'Install plugin Image to Sculpt'
-    Wait-For { (Named 'Installing… Image to Sculpt') -and (Named 'Frontend Design') } 'inline installation progress'
+    Wait-For { (Named 'Installing… Image to Sculpt') -and (Named '3D Modeling') } 'inline installation progress'
     Remove-Item -LiteralPath $installHold
     Wait-For { Test-Path (Join-Path $root 'recommend.refresh.ready') } 'install complete and provider reread pending'
-    if (!(Named 'Installed') -or !(Named 'Caveman') -or $before -ne (Named 'Frontend Design').Current.BoundingRectangle) {
+    if (!(Named 'Installed') -or $before -ne (Named '3D Modeling').Current.BoundingRectangle) {
         throw 'Recommendation rows disappeared or shifted during install'
     }
     Remove-Item -LiteralPath $refreshHold
@@ -485,8 +520,10 @@ function Test-Recommendations {
     Click 'Confirm'
     Wait-For { !(Named 'Image to Sculpt') -and (Named 'Plugin uninstalled. No plugins installed.') } 'removed recommended plugin'
     Click 'Recommended'
+    (Named 'Filter list').GetCurrentPattern($valuePattern).SetValue('Blender')
     Wait-For { Named 'Install plugin Image to Sculpt' } 'recommendation available after uninstall'
     Click 'Codex'
+    (Named 'Filter list').GetCurrentPattern($valuePattern).SetValue('Blender')
     Wait-For { (Named 'Installed') -and !(Named 'Install skill Image to Sculpt') } 'Codex installation survives provider switch'
     Set-Content (Join-Path $root 'many.plugins') 'large catalog'
     Click 'Browse plugins'
@@ -500,7 +537,7 @@ function Test-Recommendations {
     Wait-For { !(Named 'Show more') } 'remaining marketplace results'
     $count = @(Get-Content (Join-Path $root 'browse.requests')).Count
     Click 'Recommended'
-    Wait-For { Named 'Caveman' } 'back to recommendations'
+    Wait-For { Named 'Roblox Studio Workflow' } 'back to recommendations'
     Set-Content (Join-Path $root 'browse.fail') 'offline'
     Click 'Browse plugins'
     Wait-For { (Named 'Calendar') -and (Named 'Show more') } 'cached marketplace'
@@ -511,8 +548,8 @@ function Test-Recommendations {
     Click 'Refresh'
     Wait-For { (Named 'Calendar') -and !(Named 'Show more') -and !(Named 'Codex plugin catalog: Fixture marketplace offline') } 'retry updates the catalog'
     Click 'Recommended'
-    Wait-For { Named 'Caveman' } 'return to recommendations'
-    'Recommended catalog, search and both provider install paths passed'
+    Wait-For { Named 'Roblox Studio Workflow' } 'return to recommendations'
+    'Game skill discovery, existing skills, provider installs and marketplace browsing passed'
 }
 function Test-Delivery {
     function Draft($text) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($text) }

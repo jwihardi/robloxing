@@ -561,7 +561,9 @@ fn copy_skill(source: &Path, dest: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn install_folder(source: &Path, root: &Path) -> Result<()> {
+const SKILL_SOURCE_FILE: &str = ".workshop-source";
+
+fn install_folder(source: &Path, root: &Path, source_url: Option<&str>) -> Result<()> {
     ensure!(
         source.join("SKILL.md").is_file(),
         "Select a skill folder containing SKILL.md"
@@ -585,13 +587,15 @@ fn install_folder(source: &Path, root: &Path) -> Result<()> {
         .prefix(".install-")
         .tempdir_in(root)?;
     copy_skill(source, staged.path())?;
+    if let Some(url) = source_url {
+        fs::write(staged.path().join(SKILL_SOURCE_FILE), url)?;
+    }
     fs::rename(staged.path(), dest)?;
     Ok(())
 }
-async fn install_skill(p: Provider, source: &str) -> Result<()> {
-    let roots = skill_roots(p)?;
+async fn install_skill(source: &str, root: &Path) -> Result<()> {
     if Path::new(source).is_absolute() {
-        return install_folder(Path::new(source), &roots[0]);
+        return install_folder(Path::new(source), root, None);
     }
     let url = source
         .trim_end_matches('/')
@@ -641,7 +645,7 @@ async fn install_skill(p: Provider, source: &str) -> Result<()> {
         src.canonicalize()?.starts_with(checkout.canonicalize()?),
         "Skill source is outside the selected repository"
     );
-    install_folder(&src, &roots[0])
+    install_folder(&src, root, Some(source.trim_end_matches('/')))
 }
 
 pub async fn change(
@@ -751,7 +755,7 @@ pub async fn change(
     ensure!(tab == "Skills", "Unknown settings page");
     match act {
         "install" | "folder" => {
-            install_skill(p, arg).await?;
+            install_skill(arg, &skill_roots(p)?[0]).await?;
             Ok("Skill installed.".into())
         }
         "remove" => {

@@ -86,7 +86,9 @@ Workshop’s Claude picker shows the model versions reported by your installed C
 
 For Claude headless use, list selection IDs, supported effort levels, and resolved model IDs with `workshop-cli models --provider claude`. For example, `workshop-cli run --provider claude --model sonnet "Describe this project"` starts a Claude chat. To pair a Codex lead with a Claude worker in a new project, use `workshop-cli team --lead-model gpt-6.2-sol --worker-model claude:sonnet`. Claude runs in the isolated Git copy with its native edit permissions. Its account meter uses the limit information the CLI reports.
 
-**Settings → Plugins → Recommended** offers three optional installs. **Image to Sculpt** turns reference art into a Blender sculpt, **Frontend Design** helps with interface layout and styling, and **Caveman** gives you terse replies on request. Select Codex, Claude Code, or Antigravity before installing. Manage installed skills under **Skills** and marketplace plugins under **Installed**. Image to Sculpt requires Python with its scientific packages and Blender 5.2+. Its generated views use a paid fal API key. [Image to Sculpt setup](https://github.com/gokayfem/image-to-sculpt#install)
+In **Settings → Plugins → Recommended**, choose Codex, Claude Code or Antigravity and search by task, such as “multiplayer,” “Blender” or “playtest.” Each game development skill installs individually for that provider. **In Skills** identifies an existing folder with the same skill name whose source Workshop cannot confirm. You can inspect its location under **Settings → Skills**. [Recommended game development skills](#recommended-game-development-skills)
+
+Recommended also includes **Frontend Design** for interface layout, **Caveman** for terse replies and **Image to Sculpt** for turning reference art into a Blender sculpt. Image to Sculpt requires Python with its scientific packages and Blender 5.2+. Its generated views use a paid fal API key. [Image to Sculpt setup](https://github.com/gokayfem/image-to-sculpt#install)
 
 In **Settings → Plugins → Browse plugins**, search the selected provider’s official marketplaces by plugin name, ID or available description. Clear **Official marketplaces** to include your other configured sources.
 
@@ -95,6 +97,22 @@ In **Settings → Plugins → Browse plugins**, search the selected provider’s
 When the lead delegates, expand its dispatch in the conversation or open **Activity** in the chat header to see all workers. Select a worker to see its assignment, acceptance criteria, dependencies, file scope, latest activity and reported usage. **Stop worker** interrupts that assignment while its sibling can continue. **Stop response** interrupts the whole team. Start a new chat to use delegation on projects with conversations created before H2.
 
 Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
+
+## Recommended game development skills
+
+The install counts below are rounded figures reported by the skills.sh directory for each individual skill on November 25, 2026.
+
+| Skill | When to use it | Recorded installs |
+| --- | --- | ---: |
+| Roblox Studio Workflow | Edit an existing place or Rojo project and verify it in Studio. | [12K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/roblox-studio-workflow) |
+| Roblox Luau | Write typed scripts and decide what belongs on the client or server. | [15K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/roblox-luau) |
+| Roblox Networking | Design multiplayer remotes and test replication with two clients. | [12K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/roblox-networking) |
+| Roblox UI | Implement a HUD or shop in ScreenGui with touch and gamepad navigation. | [12K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/roblox-ui) |
+| Game UI & UX | Lay out an inventory or menu that stays readable across screen sizes. Pairs with Roblox UI. | [21K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/game-ui-ux) |
+| Roblox Building | Build props and maps in Studio and check scale, collisions and traversal. | [4.4K](https://www.skills.sh/tabooharmony/roblox-brain/roblox-building) |
+| 3D Modeling | Plan topology, unwrap UVs and prepare levels of detail for a game mesh in Blender or Maya. | [1.3K](https://www.skills.sh/omer-metin/skills-for-antigravity/3d-modeling) |
+| Gameplay Prototyping | Build and playtest one mechanic to decide whether to keep it. | [15K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/prototype-fast) |
+| Game Feel | Give actions more impact with timing, hit-stop, shake and squash-and-stretch. | [21K+](https://www.skills.sh/gamedev-skills/awesome-gamedev-agent-skills/game-feel) |
 
 ## Images and 3D models in chat
 
