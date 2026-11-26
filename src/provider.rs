@@ -5,6 +5,7 @@ use crate::{
 pub mod antigravity;
 mod art;
 pub mod blender_mcp;
+mod bundled_skills;
 mod catalog;
 mod claude;
 pub mod gemini;
@@ -275,6 +276,11 @@ fn instructions(store: &Store, a: &Attempt) -> Result<String> {
     }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
     instructions.push_str(" For Blender art packs or a matching project prop, use workshop_asset_pack. Inspect the pack's art direction and individual preview images, reuse an existing member when suitable, and publish finished members when asked to build a pack. Pass style_pack when generating a matching model. The library is shared by project chats and workers.");
+    let skill = bundled_skills::game_ui_taste(&store.preferences_home)?.join("SKILL.md");
+    instructions.push_str(&format!(
+        " For in-game UI design, implementation or critique, use the game-ui-taste skill. Read its instructions at {} and resolve its resources relative to that file.",
+        skill.display()
+    ));
     Ok(instructions)
 }
 

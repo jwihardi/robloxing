@@ -24,6 +24,8 @@ For automation, pass `--headless` first to run a command in the desktop executab
 
 ## Working with agents
 
+Workshop includes Game UI Taste for in-game menus, HUDs and other player interfaces. Ask the lead or a worker to design or review a screen, or mention `game-ui-taste` by name. The Windows binaries include the instructions, references, review template and Python review script for offline use. [Skill files and license](skills/game-ui-taste/)
+
 To delete a conversation, hover over its row in **Chats** and click the trash icon, or choose **Chat options → Delete chat**. Confirm the title to remove the conversation and its private working copies. Accepted project files, saved assets and album screenshots stay available. From the CLI, use `workshop-cli --project PATH delete-chat ID` with the ID from `list`.
 
 Give Workshop the outcome and any constraints. The lead handles quick questions directly. Automatic delegation is on by default. For a divisible project task the lead can assign independent work in parallel and add dependent work as results arrive. Each dependent worker receives the integrated files and its prerequisites’ findings, including read-only reviews. Overlapping edit scopes run in order.

@@ -1,0 +1,22 @@
+{
+  "scope": "new-screen",
+  "target": "",
+  "style_contract": "",
+  "acceptance_criteria": [],
+  "references": [],
+  "baseline_note": "",
+  "captures": [],
+  "refinement_note": "",
+  "checks": {
+    "identity": {"status": "untested", "note": "", "evidence": []},
+    "hierarchy": {"status": "untested", "note": "", "evidence": []},
+    "craft": {"status": "untested", "note": "", "evidence": []},
+    "copy": {"status": "untested", "note": "", "evidence": []},
+    "state-truth": {"status": "untested", "note": "", "evidence": []},
+    "interaction": {"status": "untested", "note": "", "evidence": []},
+    "scaling": {"status": "untested", "note": "", "evidence": []},
+    "accessibility": {"status": "untested", "note": "", "evidence": []},
+    "stress": {"status": "untested", "note": "", "evidence": []},
+    "performance": {"status": "untested", "note": "", "evidence": []}
+  }
+}

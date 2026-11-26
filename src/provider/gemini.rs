@@ -183,10 +183,18 @@ fn model_name<'a>(inference: (&'a str, &str)) -> Result<&'a str> {
 }
 
 pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Connection> {
+    let skill = bundled_skills::game_ui_taste(&store.preferences_home)?;
+    let skill_dir = skill.to_str().context("Invalid bundled skill path")?;
     if a.provider == "antigravity" {
         let mut io = spawn_cli(
             &store.work(a.id),
-            &["acp", "--stdio", "--dangerously-skip-permissions"],
+            &[
+                "acp",
+                "--stdio",
+                "--dangerously-skip-permissions",
+                "--add-dir",
+                skill_dir,
+            ],
             stderr,
             (antigravity::program()?, None),
             "Antigravity CLI",
@@ -196,7 +204,13 @@ pub(super) fn connection(store: &Store, a: &Attempt, stderr: File) -> Result<Con
         return Ok(io);
     }
     let model = model_name((&a.model, &a.effort))?;
-    let mut args = vec!["--acp", "--approval-mode", "yolo"];
+    let mut args = vec![
+        "--acp",
+        "--approval-mode",
+        "yolo",
+        "--include-directories",
+        skill_dir,
+    ];
     let bridge = Bridge::new(store.worker, store.gemini_project_trusted())?;
     if bridge.project_trusted
         && std::env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() != Ok("false")
