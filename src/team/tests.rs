@@ -423,6 +423,75 @@ fn queue_validates_the_complete_dependency_graph_before_inserting() -> Result<()
 }
 
 #[test]
+fn queued_worker_limits_survive_settings_changes_and_refresh_on_retry() -> Result<()> {
+    use crate::provider_permissions::{ProviderPermissions, TaskRole};
+    use crate::worker_policy::WorkerPolicy;
+    let tmp = tempdir()?;
+    let home = tmp.path().join("data");
+    let project = tmp.path().join("project");
+    let store = Store::open(&project, &home)?;
+    let lead = store.prepare("Review files", "", None)?;
+    let tasks = [
+        assignment("first", &[], &[]),
+        assignment("second", &[], &[]),
+    ];
+    let policy = WorkerPolicy {
+        models: vec!["small".into(), "claude:sonnet".into()],
+        max_effort: "high".into(),
+    };
+    store.save_worker_defaults(&policy)?;
+    ProviderPermissions::set(&home, "claude", TaskRole::Workers, false)?;
+    store.queue(lead.id, &tasks)?;
+    let rows = store.workers(lead.id)?;
+    let snapshot = rows[0].limits.as_ref().unwrap();
+    assert_eq!(snapshot.policy, policy);
+    assert!(!snapshot.permits_provider("claude:sonnet"));
+    ProviderPermissions::set(&home, "claude", TaskRole::Workers, true)?;
+    store.save_worker_defaults(&WorkerPolicy::default())?;
+    store.worker_state(rows[1].id, "blocked", "Retry")?;
+    store.queue(lead.id, &tasks)?;
+    drop(store);
+    let reopened = Store::open(&project, &home)?;
+    let latest = reopened.workers(lead.id)?;
+    assert_eq!(latest[0].limits.as_ref(), Some(snapshot));
+    let retry = latest[1].limits.as_ref().unwrap();
+    assert!(retry.permits_provider("claude:sonnet"));
+    assert_eq!(retry.policy, WorkerPolicy::default());
+    Ok(())
+}
+
+#[test]
+fn older_worker_rows_recover_known_inference_without_guessing_limits() -> Result<()> {
+    let tmp = tempdir()?;
+    let home = tmp.path().join("data");
+    let project = tmp.path().join("project");
+    let store = Store::open(&project, &home)?;
+    let lead = store.prepare("Review files", "", None)?;
+    store.queue(lead.id, &[assignment("review", &[], &[])])?;
+    let worker = store.workers(lead.id)?.remove(0);
+    let child = store.child_store(lead.id, worker.id)?;
+    let attempt = child.prepare("Review files", "", None)?;
+    child.bind_session(attempt.id, "thread", "small", "medium")?;
+    drop(child);
+    store.db.lock().unwrap().execute(
+        "UPDATE workers SET run=?1 WHERE id=?2",
+        params![attempt.id, worker.id],
+    )?;
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("ALTER TABLE workers DROP COLUMN inference_limits")?;
+    drop(store);
+    let reopened = Store::open(&project, &home)?;
+    let worker = reopened.workers(lead.id)?.remove(0);
+    assert_eq!(worker.model.as_deref(), Some("small"));
+    assert_eq!(worker.effort.as_deref(), Some("medium"));
+    assert!(worker.limits.is_none());
+    Ok(())
+}
+
+#[test]
 fn dispatch_receipts_track_only_accepted_assignments_in_chat_order() -> Result<()> {
     let tmp = tempdir()?;
     let project = tmp.path().join("project");
@@ -650,6 +719,7 @@ fn worker_policy_inherits_across_projects_and_overrides_per_chat() -> Result<()>
 
 #[test]
 fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()> {
+    use crate::provider_permissions::TaskRole;
     use crate::worker_policy::WorkerPolicy;
     let tmp = tempdir()?;
     let store = Store::open(&tmp.path().join("p"), &tmp.path().join("d"))?;
@@ -678,25 +748,49 @@ fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()
     let mut task = assignment("one", &[], &[]);
     task.effort = "xhigh".into();
     assert_eq!(
-        rt.block_on(store.worker_inference(&policy, &task, "codex"))?,
+        rt.block_on(store.policy_inference(
+            TaskRole::Workers,
+            &policy,
+            &task.model,
+            &task.effort,
+            "codex"
+        ))?,
         ("large".into(), "medium".into())
     );
     task.model = "small".into();
     assert!(
-        rt.block_on(store.worker_inference(&policy, &task, "codex"))
-            .is_err()
+        rt.block_on(store.policy_inference(
+            TaskRole::Workers,
+            &policy,
+            &task.model,
+            &task.effort,
+            "codex"
+        ))
+        .is_err()
     );
     policy.models.push("small".into());
     task.effort = "low".into();
     assert_eq!(
-        rt.block_on(store.worker_inference(&policy, &task, "codex"))?,
+        rt.block_on(store.policy_inference(
+            TaskRole::Workers,
+            &policy,
+            &task.model,
+            &task.effort,
+            "codex"
+        ))?,
         ("small".into(), "low".into())
     );
     task.model = "large".into();
     policy.max_effort = "low".into();
     assert!(
-        rt.block_on(store.worker_inference(&policy, &task, "codex"))
-            .is_err()
+        rt.block_on(store.policy_inference(
+            TaskRole::Workers,
+            &policy,
+            &task.model,
+            &task.effort,
+            "codex"
+        ))
+        .is_err()
     );
     Ok(())
 }
@@ -764,7 +858,15 @@ async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() ->
         default_effort: "low".into(),
     });
     assert_eq!(
-        store.worker_inference(&policy, &task, "claude").await?,
+        store
+            .policy_inference(
+                TaskRole::Workers,
+                &policy,
+                &task.model,
+                &task.effort,
+                "claude"
+            )
+            .await?,
         ("".into(), "".into())
     );
     let pinned = WorkerPolicy {
@@ -773,7 +875,13 @@ async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() ->
     };
     assert!(
         store
-            .worker_inference(&pinned, &task, "claude")
+            .policy_inference(
+                TaskRole::Workers,
+                &pinned,
+                &task.model,
+                &task.effort,
+                "claude"
+            )
             .await
             .is_err()
     );
@@ -781,7 +889,13 @@ async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() ->
     explicit.model = "claude:default".into();
     assert!(
         store
-            .worker_inference(&policy, &explicit, "codex")
+            .policy_inference(
+                TaskRole::Workers,
+                &policy,
+                &explicit.model,
+                &explicit.effort,
+                "codex"
+            )
             .await
             .is_err()
     );
@@ -818,13 +932,27 @@ async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() ->
     }
     assert!(
         second
-            .worker_inference(&policy, &task, "codex")
+            .policy_inference(
+                TaskRole::Workers,
+                &policy,
+                &task.model,
+                &task.effort,
+                "codex"
+            )
             .await
             .is_err()
     );
     ProviderPermissions::set(&home, "claude", TaskRole::Workers, true)?;
     assert_eq!(
-        store.worker_inference(&pinned, &task, "codex").await?,
+        store
+            .policy_inference(
+                TaskRole::Workers,
+                &pinned,
+                &task.model,
+                &task.effort,
+                "codex"
+            )
+            .await?,
         ("claude:default".into(), "low".into())
     );
     Ok(())

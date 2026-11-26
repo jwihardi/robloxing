@@ -22,7 +22,7 @@ import { Studio, StudioPage, ModelInspector } from "studio.slint";
 export { Studio, StudioItem } from "studio.slint";
 import { ListView, ScrollView, Palette, CheckBox, LineEdit } from "std-widgets.slint";
 
-export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, stats: string, running: bool }
+export struct WorkerRow { id: int, title: string, state: string, assignment: string, detail: string, criteria: string, dependencies: string, inference: string, limits: string, stats: string, running: bool }
 export struct ChatTurn { from-user: bool, delivery-notice: bool, body: string, dispatch-id: int, workers: [WorkerRow], shot: string, sketch: image, image-path: string, original-path: string, markup-path: string, previous-output: bool, asset-id: int, asset-sound: bool, asset-model: bool, maker: string }
 export struct OutputItem { sound: bool, title: string, open-label: string, detail: string, shot: string, path: string, preview: string, asset-id: int }
 export struct AlbumItem { key: string, project: string, date: string }
@@ -114,7 +114,11 @@ component WorkerGroup inherits VerticalLayout {
                     }
                     Text { text: agent.state; color: Theme.state-color(agent.state); vertical-alignment: center; font-family: Theme.mono; font-size: 13px; }
                 }
+                VerticalLayout { padding-left: 10px; padding-bottom: 5px;
+                    Text { text: agent.inference; color: Theme.symbol; font-size: 13px; wrap: word-wrap; }
+                }
                 if root.expanded-worker == agent.id: VerticalLayout { padding-left: 10px; padding-bottom: 9px; spacing: 5px;
+                    Text { text: agent.limits; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     Text { text: agent.assignment; color: Theme.text; font-size: 14px; wrap: word-wrap; }
                     if agent.detail != "" && agent.detail != agent.assignment: Text { text: agent.detail; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                     if agent.criteria != "": Text { text: "Acceptance · " + agent.criteria; color: Theme.muted; font-size: 13px; wrap: word-wrap; }

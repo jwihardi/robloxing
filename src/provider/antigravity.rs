@@ -23,7 +23,7 @@ pub fn program() -> Result<PathBuf> {
         .context("Install Antigravity CLI, then refresh Workshop")
 }
 
-fn variant<'a>(id: &'a str, label: &'a str) -> (&'a str, &'a str, Option<&'static str>) {
+pub(super) fn variant<'a>(id: &'a str, label: &'a str) -> (&'a str, &'a str, Option<&'static str>) {
     if let Some((base, suffix)) = id.rsplit_once('-')
         && let Some((name, level)) = label.strip_suffix(')').and_then(|s| s.rsplit_once(" ("))
         && level.eq_ignore_ascii_case(suffix)

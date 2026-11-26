@@ -371,13 +371,7 @@ fn policy_choices(
         })
         .map(|e| PickerOption {
             value: e.into(),
-            label: if e == "none" {
-                "No reasoning".into()
-            } else if e == "xhigh" {
-                "Extra high".into()
-            } else {
-                capitalized(e).into()
-            },
+            label: effort_label(e).into(),
         })
         .collect();
     efforts.push(PickerOption {
@@ -412,6 +406,33 @@ fn title(state: &str) -> &str {
         _ => state,
     }
 }
+fn effort_label(value: &str) -> String {
+    match value {
+        "none" => "No reasoning".into(),
+        "xhigh" => "Extra high".into(),
+        other => capitalized(other),
+    }
+}
+
+fn worker_model_label(catalog: &provider::Catalog, id: &str) -> String {
+    if id.is_empty() || id.ends_with(":default") {
+        return format!(
+            "{} default",
+            workshop::provider_permissions::provider_label(provider::provider_for(id))
+        );
+    }
+    // Antigravity reports a concrete effort variant while its picker groups those variants.
+    if id.starts_with("antigravity:")
+        && catalog.display_name(id).is_none()
+        && let Some((family, suffix)) = id.rsplit_once('-')
+        && EFFORTS.contains(&suffix)
+        && let Some(label) = catalog.display_name(family)
+    {
+        return label.to_owned();
+    }
+    model_label(catalog, id)
+}
+
 fn worker_row(w: workshop::team::Worker, catalog: &provider::Catalog) -> WorkerRow {
     let scope = if w.assignment.files.is_empty() {
         "Read only".into()
@@ -419,17 +440,72 @@ fn worker_row(w: workshop::team::Worker, catalog: &provider::Catalog) -> WorkerR
         w.assignment.files.join(", ")
     };
     let mut stats = vec![scope];
-    if let Some(id) = &w.model {
-        let mut label = if id.is_empty() {
-            String::from("Codex default")
+    let inference = if let Some(id) = &w.model {
+        let model = worker_model_label(catalog, id);
+        let effort = w
+            .effort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(effort_label)
+            .unwrap_or_else(|| "Provider default".into());
+        format!("Model · {model}     Effort · {effort}")
+    } else if w.run.is_some() && w.state != "queued" {
+        "Model and effort unavailable for this run".into()
+    } else {
+        let model = if w.assignment.model.is_empty() {
+            "Automatic".into()
         } else {
-            model_label(catalog, id)
+            worker_model_label(catalog, &w.assignment.model)
         };
-        if let Some(effort) = w.effort.as_deref().filter(|s| !s.is_empty()) {
-            label.push_str(&format!(" ({effort})"));
-        }
-        stats.push(label);
-    }
+        let effort = if w.assignment.effort.is_empty() {
+            "Automatic".into()
+        } else {
+            effort_label(&w.assignment.effort)
+        };
+        format!("Requested model · {model}     Requested effort · {effort}")
+    };
+    let limits = w
+        .limits
+        .as_ref()
+        .map(|limits| {
+            let models = if limits.providers.is_empty() {
+                "None".into()
+            } else if limits.policy.models.is_empty() {
+                if limits.providers.len() == PROVIDERS.len() {
+                    "Any available".into()
+                } else {
+                    format!(
+                        "Any from {}",
+                        limits
+                            .providers
+                            .iter()
+                            .map(|p| workshop::provider_permissions::provider_label(p))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            } else {
+                let names: Vec<_> = limits
+                    .policy
+                    .models
+                    .iter()
+                    .filter(|id| limits.permits_provider(id))
+                    .map(|id| worker_model_label(catalog, id))
+                    .collect();
+                if names.is_empty() {
+                    "None".into()
+                } else {
+                    names.join(", ")
+                }
+            };
+            let cap = if limits.policy.max_effort.is_empty() {
+                "Any".into()
+            } else {
+                effort_label(&limits.policy.max_effort)
+            };
+            format!("Allowed models · {models}     Maximum effort · {cap}")
+        })
+        .unwrap_or_else(|| "Dispatch limits unavailable".into());
     if w.tries > 1 {
         let retries = w.tries - 1;
         stats.push(if retries == 1 {
@@ -460,6 +536,8 @@ fn worker_row(w: workshop::team::Worker, catalog: &provider::Catalog) -> WorkerR
         detail: w.detail.into(),
         criteria: w.assignment.acceptance.into(),
         dependencies: w.assignment.depends_on.join(", ").into(),
+        inference: inference.into(),
+        limits: limits.into(),
         stats: stats.join(" · ").into(),
     }
 }
@@ -1940,6 +2018,7 @@ impl App {
                                 Update::AccountUsage(store.project.clone(), source.into(), windows)
                             }
                             provider::ReplyUpdate::Usage(_)
+                            | provider::ReplyUpdate::WorkerInference(..)
                             | provider::ReplyUpdate::WorkerPromptSent => return,
                             provider::ReplyUpdate::Activity(label) => {
                                 Update::Activity(a.id, label.to_owned())

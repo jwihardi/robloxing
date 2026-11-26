@@ -612,6 +612,7 @@ pub(super) async fn exchange(
     let blender = blender_mcp::configured(&store.preferences_home)?;
     let provider = if agy { "Antigravity" } else { "Gemini CLI" };
     let mut set_edit_mode = false;
+    let mut worker_inference: Option<(String, String)> = None;
     let mut first = content(prompt)?;
     let instructions = instructions(store, a)?;
     if instructions != bridge.instructions {
@@ -659,6 +660,9 @@ pub(super) async fn exchange(
             notify(ReplyUpdate::Activity("Waiting for a reply…"));
             if first_prompt {
                 prompt.record_followup(store, a, notify)?;
+                if let Some((model, effort)) = worker_inference.take() {
+                    notify(ReplyUpdate::WorkerInference(&model, &effort));
+                }
                 first_prompt = false;
             }
             if let Some(direction) = direction {
@@ -835,6 +839,28 @@ pub(super) async fn exchange(
                 } else {
                     Some(model_name((&a.model, &a.effort))?).filter(|&m| m != "default")
                 };
+                if store.worker
+                    && let Some(raw) = model
+                        .or_else(|| reply["models"]["currentModelId"].as_str())
+                        .filter(|s| !s.is_empty())
+                {
+                    let reported_effort = if agy {
+                        let name = reply["models"]["availableModels"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|m| m["modelId"] == raw)
+                            .and_then(|m| m["name"].as_str())
+                            .unwrap_or(raw);
+                        antigravity::variant(raw, name).2
+                    } else {
+                        None
+                    };
+                    worker_inference = Some((
+                        format!("{}:{raw}", a.provider),
+                        reported_effort.unwrap_or(&a.effort).to_owned(),
+                    ));
+                }
                 if let Some(model) = model
                     && reply["models"]["currentModelId"] != model
                 {

@@ -489,6 +489,14 @@ pub(super) async fn exchange(
                 );
                 io.session = session.into();
                 store.session(a.id, session)?;
+                if store.worker
+                    && let Some(model) = event["model"].as_str().filter(|s| !s.is_empty())
+                {
+                    notify(ReplyUpdate::WorkerInference(
+                        &format!("claude:{model}"),
+                        &a.effort,
+                    ));
+                }
                 deadline = None;
             }
             "stream_event" => {

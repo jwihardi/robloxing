@@ -760,7 +760,9 @@ function Test-Delivery {
         Wait-For { (Named 'Dispatched 2 subagents') -and (Test-Path (Join-Path $root 'waiting-worker')) } 'running worker'
         Click 'Dispatched 2 subagents'
         Wait-For { Named 'Write left' } 'dispatched workers'
+        if ($DeliveryOnly) { Wait-For { Named 'Model · fixture-deep     Effort · High' } 'worker model and confirmed effort on the collapsed worker' }
         Click 'Write left'
+        if ($DeliveryOnly) { Wait-For { Named 'Allowed models · Any available     Maximum effort · Any' } 'worker dispatch limits' }
         Wait-For { Named 'Send direction' } 'worker controls'
         Click 'Send direction'
         Wait-For { Named 'Return to lead' } 'addressed composer'

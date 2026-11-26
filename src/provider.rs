@@ -475,6 +475,7 @@ pub enum ReplyUpdate<'a> {
     TranscriptChanged,
     WorkersChanged,
     WorkerPromptSent,
+    WorkerInference(&'a str, &'a str),
     Usage(i64),
     Context(ContextUsage),
     AccountUsage(&'static str, Vec<UsageWindow>),
@@ -1141,6 +1142,20 @@ async fn codex_exchange(
                                 v["result"]["model"].as_str().unwrap_or_default(),
                                 v["result"]["reasoningEffort"].as_str().unwrap_or_default(),
                             )?;
+                            if store.worker {
+                                let reported = &v["result"];
+                                let model = if a.model.is_empty() {
+                                    reported["model"].as_str().unwrap_or_default()
+                                } else {
+                                    &a.model
+                                };
+                                let effort = if a.effort.is_empty() {
+                                    reported["reasoningEffort"].as_str().unwrap_or_default()
+                                } else {
+                                    &a.effort
+                                };
+                                notify(ReplyUpdate::WorkerInference(model, effort));
+                            }
                             if a.session.is_empty() {
                                 store.db.lock().unwrap().execute(
                                     "INSERT OR REPLACE INTO codex_asset_sessions(session,pack_tools) VALUES(?1,1)",
@@ -1251,7 +1266,7 @@ pub fn run(
                 .map(|w| {
                     json!({
                         "id": w.id, "key": w.assignment.key, "state": w.state,
-                        "retries": w.tries.saturating_sub(1), "tokens": w.tokens, "model": w.model, "effort": w.effort
+                        "retries": w.tries.saturating_sub(1), "tokens": w.tokens, "model": w.model, "effort": w.effort, "limits": w.limits
                     })
                 })
                 .collect();

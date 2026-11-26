@@ -359,7 +359,8 @@ class FixtureProvider {
                 string instructions = (string)p["developerInstructions"];
                 studioKind = instructions.StartsWith("Summarize the supplied") ? "summary" :
                     instructions.StartsWith("Design a game sound effect") ? "sound" : instructions.StartsWith("Design a cohesive") ? "design" : "image";
-                Send(new {id=id,result=new {thread=new {id=session}}});
+                if (worker && Mode("delivery-mode")) Send(new {id=id,result=new {thread=new {id=session},model="fixture-deep",reasoningEffort="high"}});
+                else Send(new {id=id,result=new {thread=new {id=session}}});
             }
             if(method=="thread/loaded/list") Send(new {id=id,result=new {data=new[]{session}}});
             if(method=="turn/start"){

@@ -1,7 +1,6 @@
 use crate::{
     Store, provider,
     provider_permissions::{PROVIDERS, ProviderPermissions, TaskRole},
-    team::Assignment,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -16,6 +15,32 @@ pub const EFFORTS: &[&str] = &[
 pub struct WorkerPolicy {
     pub models: Vec<String>,
     pub max_effort: String,
+}
+
+/// The policy and provider permissions used for one routing decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceLimits {
+    pub policy: WorkerPolicy,
+    pub providers: Vec<String>,
+}
+
+impl InferenceLimits {
+    pub(crate) fn load(home: &Path, role: TaskRole, policy: &WorkerPolicy) -> Result<Self> {
+        let permissions = ProviderPermissions::load(home)?;
+        Ok(Self {
+            policy: policy.clone(),
+            providers: PROVIDERS
+                .into_iter()
+                .filter(|p| permissions.allows(p, role))
+                .map(str::to_owned)
+                .collect(),
+        })
+    }
+    pub fn permits_provider(&self, model: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p == provider::provider_for(model))
+    }
 }
 
 impl WorkerPolicy {
@@ -240,22 +265,6 @@ impl Store {
         fresh
     }
 
-    pub(crate) async fn worker_inference(
-        &self,
-        policy: &WorkerPolicy,
-        task: &Assignment,
-        lead_provider: &str,
-    ) -> Result<(String, String)> {
-        self.policy_inference(
-            TaskRole::Workers,
-            policy,
-            &task.model,
-            &task.effort,
-            lead_provider,
-        )
-        .await
-    }
-
     pub(crate) async fn policy_inference(
         &self,
         role: TaskRole,
@@ -264,17 +273,29 @@ impl Store {
         effort: &str,
         preferred: &str,
     ) -> Result<(String, String)> {
-        let permissions = ProviderPermissions::load(&self.preferences_home)?;
-        let allows = |p: &str| permissions.allows(p, role);
+        let limits = InferenceLimits::load(&self.preferences_home, role, policy)?;
+        self.select_inference(role, &limits, model, effort, preferred)
+            .await
+    }
+
+    pub(crate) async fn select_inference(
+        &self,
+        role: TaskRole,
+        limits: &InferenceLimits,
+        model: &str,
+        effort: &str,
+        preferred: &str,
+    ) -> Result<(String, String)> {
         let task = role.label();
-        let enabled: Vec<_> = PROVIDERS.into_iter().filter(|p| allows(p)).collect();
+        let policy = &limits.policy;
+        let enabled: Vec<_> = limits.providers.iter().map(String::as_str).collect();
         ensure!(
             !enabled.is_empty(),
             "Enable a provider for {task} in Settings → Providers."
         );
         if !model.is_empty() {
             ensure!(
-                allows(provider::provider_for(model)),
+                limits.permits_provider(model),
                 "The provider for {model} is disabled for {task} in Settings → Providers."
             );
         }

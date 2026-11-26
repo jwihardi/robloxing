@@ -250,6 +250,7 @@ impl Store {
             ),
             ("workers", "model", "TEXT"),
             ("workers", "effort", "TEXT"),
+            ("workers", "inference_limits", "TEXT"),
             ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
             ("chat_goals", "recoverable", "INTEGER NOT NULL DEFAULT 0"),
             ("queued_messages", "steering", "INTEGER NOT NULL DEFAULT 0"),
@@ -263,6 +264,9 @@ impl Store {
                 tx.execute_batch(&format!(
                     "ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 ))?;
+                if table == "workers" && column == "inference_limits" {
+                    team::recover_worker_inference(&tx, &dir)?;
+                }
                 if table == "chat_goals" && column == "recoverable" {
                     tx.execute(
                         "UPDATE chat_goals SET recoverable=1 WHERE status='paused' AND detail=?1

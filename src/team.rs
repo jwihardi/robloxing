@@ -1,4 +1,6 @@
-use crate::{Attempt, Store, git, provider};
+use crate::{
+    Attempt, Store, git, provider, provider_permissions::TaskRole, worker_policy::InferenceLimits,
+};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -49,12 +51,44 @@ pub struct Worker {
     pub tokens: Option<i64>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub limits: Option<InferenceLimits>,
 }
 
 pub(crate) struct WorkerControl {
     input: tokio::sync::mpsc::UnboundedSender<provider::Control>,
     // Taken when discovery finishes so later directions use live steering.
     preparing: Option<Vec<provider::Message>>,
+}
+
+// Earlier releases kept provider-reported defaults only in the worker's own attempt.
+pub(crate) fn recover_worker_inference(
+    db: &rusqlite::Transaction<'_>,
+    dir: &std::path::Path,
+) -> Result<()> {
+    let mut q = db.prepare("SELECT id,run FROM workers WHERE run IS NOT NULL AND (COALESCE(model,'')='' OR COALESCE(effort,'')='')")?;
+    let rows = q
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, run) in rows {
+        let path = dir
+            .join("workers")
+            .join(id.to_string())
+            .join("workshop.sqlite");
+        let saved =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|child| {
+                    child.query_row(
+                        "SELECT model,effort FROM attempts WHERE id=?1",
+                        [run],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )
+                });
+        if let Ok((model, effort)) = saved {
+            db.execute("UPDATE workers SET model=COALESCE(NULLIF(model,''),?2),effort=COALESCE(NULLIF(effort,''),?3) WHERE id=?1",
+                params![id,model,effort])?;
+        }
+    }
+    Ok(())
 }
 
 fn clipped(s: &str, limit: usize) -> String {
@@ -207,7 +241,7 @@ impl Store {
     }
     pub fn workers(&self, lead: i64) -> Result<Vec<Worker>> {
         let db = self.db.lock().unwrap();
-        let mut q=db.prepare("SELECT id,spec,state,run,tries,detail,repeats,tokens,model,effort FROM workers WHERE lead=?1 ORDER BY id")?;
+        let mut q=db.prepare("SELECT id,spec,state,run,tries,detail,repeats,tokens,model,effort,inference_limits FROM workers WHERE lead=?1 ORDER BY id")?;
         let rows = q.query_map([lead], |r| {
             Ok((
                 r.get(0)?,
@@ -220,10 +254,12 @@ impl Store {
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
+                r.get::<_, Option<String>>(10)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, spec, state, run, tries, detail, repeats, tokens, model, effort) = row?;
+            let (id, spec, state, run, tries, detail, repeats, tokens, model, effort, limits) =
+                row?;
             Ok(Worker {
                 id,
                 assignment: serde_json::from_str(&spec)?,
@@ -233,6 +269,7 @@ impl Store {
                 detail,
                 repeats,
                 tokens,
+                limits: limits.as_deref().map(serde_json::from_str).transpose()?,
                 model,
                 effort,
             })
@@ -302,6 +339,12 @@ impl Store {
                 "Unknown dependency or dependency cycle in delegated tasks"
             );
         }
+        let policy = self.effective_worker_policy(lead)?;
+        let limits = serde_json::to_string(&InferenceLimits::load(
+            &self.preferences_home,
+            TaskRole::Workers,
+            &policy,
+        )?)?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let mut dispatched = Vec::new();
@@ -309,11 +352,11 @@ impl Store {
             let next_id = crate::chat_history::next_worker_id(&tx)?;
             let id = tx
                 .query_row(
-                    "INSERT INTO workers(lead,name,spec,state,id) VALUES(?1,?2,?3,'queued',?4)
-                 ON CONFLICT(lead,name) DO UPDATE SET state='queued',spec=excluded.spec
+                    "INSERT INTO workers(lead,name,spec,state,id,inference_limits) VALUES(?1,?2,?3,'queued',?4,?5)
+                 ON CONFLICT(lead,name) DO UPDATE SET state='queued',spec=excluded.spec,inference_limits=excluded.inference_limits,model=NULL,effort=NULL
                  WHERE workers.state='blocked' AND workers.repeats<2 AND workers.tries<4
                  RETURNING id",
-                    params![lead, a.key, serde_json::to_string(a)?, next_id],
+                    params![lead, a.key, serde_json::to_string(a)?, next_id, limits],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -600,10 +643,15 @@ impl Store {
         let lead_provider = self.attempt(lead)?.provider;
         let mut directions = String::new();
         let mut files = std::collections::BTreeSet::new();
+        let limits = InferenceLimits::load(&self.preferences_home, TaskRole::Workers, policy)?;
+        self.db.lock().unwrap().execute(
+            "UPDATE workers SET inference_limits=?2 WHERE id=?1",
+            params![w.id, serde_json::to_string(&limits)?],
+        )?;
         let (model, effort) = tokio::select! {
             biased;
             _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
-            result = self.worker_inference(policy, &w.assignment, &lead_provider) => result?,
+            result = self.select_inference(TaskRole::Workers, &limits, &w.assignment.model, &w.assignment.effort, &lead_provider) => result?,
         };
         let preparing = self
             .controls
@@ -653,16 +701,11 @@ impl Store {
         let result = provider::worker_turn(&child, &a, controls, &|event| {
             let updated = match event {
                 provider::ReplyUpdate::AccountUsage(..) => return notify(event),
-                provider::ReplyUpdate::WorkerPromptSent => self
-                    .db
-                    .lock()
-                    .unwrap()
-                    .execute(
-                        "DELETE FROM pending_worker_directions WHERE worker=?1",
-                        [w.id],
-                    )
-                    .map(|_| ())
-                    .map_err(Into::into),
+                provider::ReplyUpdate::WorkerInference(model, effort) => self.db.lock().unwrap().execute(
+                    "UPDATE workers SET model=COALESCE(NULLIF(?2,''),model),effort=COALESCE(NULLIF(?3,''),effort) WHERE id=?1",
+                    params![w.id,model,effort]).map(|_| ()).map_err(Into::into),
+                provider::ReplyUpdate::WorkerPromptSent => self.db.lock().unwrap().execute(
+                    "DELETE FROM pending_worker_directions WHERE worker=?1", [w.id]).map(|_| ()).map_err(Into::into),
                 provider::ReplyUpdate::TranscriptChanged => (|| {
                     for message in child.messages_after(a.id, last_event.get())? {
                         last_event.set(message.id);

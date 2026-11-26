@@ -47,6 +47,8 @@ Sketches open inline above the composer from **Add to message**. **Annotate** op
 
 During a run, Enter steers the lead. The arrow beside Send opens delivery options. Pending follow-ups sit above the composer in a short scrollable list, each with its own remove action. Selecting **Send direction** on an expanded worker addresses the same composer to that worker. The recipient stays visible until the direction is sent or the user returns to the lead.
 
+Worker rows show the model and effort under the title. Expanded details put the allowed models and maximum effort before the assignment. The chat and Activity share the same row.
+
 ## Project tools, settings and album
 
 Task settings uses the full content pane. One tab selects the task. Each supported provider has a heading and an enable switch, with its models arranged in columns underneath. Reserve the bottom of the pane for the effort limit and worker scheduling. When a catalog exceeds the available space, page the grid and repeat the provider heading on continuations. The per-run editor uses the same grid with read-only provider permissions.
