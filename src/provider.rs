@@ -131,12 +131,28 @@ impl From<&str> for Message {
     }
 }
 impl Message {
+    fn record_direction(
+        &self,
+        store: &Store,
+        chat: i64,
+        notify: &dyn Fn(ReplyUpdate<'_>),
+    ) -> Result<()> {
+        if self.queued_id.is_some() {
+            store.message_event(chat, "steer/sent", self)?;
+            notify(ReplyUpdate::TranscriptChanged);
+        }
+        Ok(())
+    }
+
     fn record_followup(
         &self,
         store: &Store,
         a: &Attempt,
         notify: &dyn Fn(ReplyUpdate<'_>),
     ) -> Result<()> {
+        if store.worker {
+            notify(ReplyUpdate::WorkerPromptSent);
+        }
         if !a.session.is_empty() {
             store.message_event(a.id, "user/followup", self)?;
             notify(ReplyUpdate::TranscriptChanged);
@@ -452,6 +468,7 @@ pub enum ReplyUpdate<'a> {
     Stored,
     TranscriptChanged,
     WorkersChanged,
+    WorkerPromptSent,
     Usage(i64),
     Context(ContextUsage),
     AccountUsage(&'static str, Vec<UsageWindow>),
@@ -583,7 +600,12 @@ impl Repairs {
         if store.worker {
             return unavailable.map_or(Ok(Finish::Done), Err);
         }
-        if !used_tools && !has_workers && self.goal.is_none() && unavailable.is_none() {
+        if !used_tools
+            && !has_workers
+            && self.goal.is_none()
+            && unavailable.is_none()
+            && !store.has_open_blocker(a.id)?
+        {
             return Ok(Finish::Done);
         }
         let verified = if let Some(error) = unavailable {
@@ -597,9 +619,8 @@ impl Repairs {
                     input = controls.recv() => match input {
                         None | Some(Control::Cancel) => return Ok(Finish::Cancelled),
                         Some(Control::Steer(message)) => {
-                            store.message_event(a.id, "steer/sent", &message)?;
+                            let message = store.stage_direction(a.id, message)?;
                             self.reset_goal_reports(store, a.id)?;
-                            notify(ReplyUpdate::TranscriptChanged);
                             return Ok(Finish::Continue(message));
                         }
                         Some(Control::Queue(message)) => {
@@ -624,7 +645,7 @@ impl Repairs {
             return Err(error.context("A worker was stopped by the user."));
         }
         let feedback = format!("{error:#}");
-        let tree = crate::git::capture(&store.work(a.id), &a.base)?.0;
+        let tree = crate::git::working_tree(&store.work(a.id))?;
         let fingerprint = (tree, feedback.clone());
         if self.count >= 2 || self.previous.as_ref() == Some(&fingerprint) {
             return Err(error.context("Automatic repair stopped. Review the remaining blocker."));
@@ -646,6 +667,11 @@ impl Repairs {
     }
 }
 
+struct TurnResult {
+    finished: bool,
+    reuse_connection: bool,
+}
+
 async fn exchange(
     io: &mut Connection,
     store: &Store,
@@ -654,13 +680,36 @@ async fn exchange(
     controls: &mut Controls,
     stream: bool,
     notify: &dyn Fn(ReplyUpdate<'_>),
+) -> Result<TurnResult> {
+    let result = match a.provider.as_str() {
+        "claude" => claude::exchange(io, store, a, prompt, controls, stream, notify).await,
+        "gemini" | "antigravity" => {
+            gemini::exchange(io, store, a, prompt, controls, stream, notify).await
+        }
+        _ => codex_exchange(io, store, a, prompt, controls, stream, notify).await,
+    };
+    let unconfirmed = store.finish_pending_directions(Some(a.id))?;
+    if unconfirmed {
+        notify(ReplyUpdate::TranscriptChanged);
+    }
+    let finished = result?;
+    // A late reply for an unconfirmed input belongs to this connection. A
+    // fresh process can resume the session without consuming that stale reply.
+    Ok(TurnResult {
+        finished,
+        reuse_connection: finished && !io.used_tools && !unconfirmed,
+    })
+}
+
+async fn codex_exchange(
+    io: &mut Connection,
+    store: &Store,
+    a: &Attempt,
+    prompt: &Message,
+    controls: &mut Controls,
+    stream: bool,
+    notify: &dyn Fn(ReplyUpdate<'_>),
 ) -> Result<bool> {
-    if a.provider == "claude" {
-        return claude::exchange(io, store, a, prompt, controls, stream, notify).await;
-    }
-    if matches!(a.provider.as_str(), "gemini" | "antigravity") {
-        return gemini::exchange(io, store, a, prompt, controls, stream, notify).await;
-    }
     let mut log = append(&store.folder(a.id).join("events.jsonl"))?;
     store.artifact(a.id, "events", "events.jsonl")?;
     store.artifact(a.id, "stderr", "provider.stderr.log")?;
@@ -686,6 +735,7 @@ async fn exchange(
     let mut turn = String::new();
     let mut next_id = 10;
     let mut directions = std::collections::VecDeque::<Message>::new();
+    let mut awaiting_ack = std::collections::HashMap::new();
     let mut cancelling = false;
     let mut stopped_keys = std::collections::HashSet::new();
     let mut repairs = Repairs::start(store, a)?;
@@ -708,17 +758,18 @@ async fn exchange(
                 match message.input() {
                     Ok(input) => {
                         send(stdin,json!({"id":next_id,"method":"turn/steer","params":{"threadId":session,"expectedTurnId":turn,"input":input}})).await?;
+                        awaiting_ack.insert(next_id, message);
                         next_id += 1;
-                        store.message_event(a.id, "steer/sent", &message)?;
-                        repairs.reset_goal_reports(store, a.id)?;
                     }
-                    Err(error) => store.event(
-                        a.id,
-                        "steer/unavailable",
-                        Some(&format!("Could not send direction: {error:#}")),
-                    )?,
+                    Err(error) => {
+                        store.direction_unavailable(
+                            a.id,
+                            &message,
+                            &format!("Could not send direction: {error:#}"),
+                        )?;
+                        notify(ReplyUpdate::TranscriptChanged);
+                    }
                 }
-                notify(ReplyUpdate::TranscriptChanged);
             }
         }
         let timeout = async {
@@ -796,16 +847,16 @@ async fn exchange(
                         stopped_keys.insert(worker.assignment.key);
                     }
                 }
-                Some(Control::Steer(text)) => {
+                Some(Control::Steer(message)) => {
                     if cancelling {
-                        store.event(
+                        store.direction_unavailable(
                             a.id,
-                            "steer/unavailable",
-                            Some("The run is stopping. Send your direction after it stops."),
+                            &message,
+                            "The run is stopping. Send your direction after it stops.",
                         )?;
                         notify(ReplyUpdate::TranscriptChanged);
                     } else {
-                        directions.push_back(text);
+                        directions.push_back(store.stage_direction(a.id, message)?);
                     }
                 }
                 Some(Control::Queue(message)) => {
@@ -824,14 +875,29 @@ async fn exchange(
                 }
                 let v: Value = serde_json::from_str(&line).context("Invalid Codex event")?;
                 let id = v["id"].as_i64();
+                if v.get("method").is_none()
+                    && let Some(message) = id.and_then(|id| awaiting_ack.remove(&id))
+                {
+                    if v["error"].is_null() {
+                        message.record_direction(store, a.id, notify)?;
+                        repairs.reset_goal_reports(store, a.id)?;
+                    } else {
+                        store.direction_unavailable(
+                            a.id,
+                            &message,
+                            v["error"]["message"]
+                                .as_str()
+                                .unwrap_or("Codex rejected this direction."),
+                        )?;
+                        notify(ReplyUpdate::TranscriptChanged);
+                    }
+                    if id != Some(3) {
+                        continue;
+                    }
+                }
                 if !v["error"].is_null() {
                     if id == Some(5) && v["error"]["code"] == -32601 {
                         open_thread(stdin, store, a, legacy_assets.as_ref()).await?;
-                        continue;
-                    }
-                    if id.is_some_and(|id| id >= 10) {
-                        store.event(a.id, "steer/error", v["error"]["message"].as_str())?;
-                        notify(ReplyUpdate::TranscriptChanged);
                         continue;
                     }
                     bail!("Codex: {}", v["error"]["message"]);
@@ -1007,10 +1073,8 @@ async fn exchange(
                         let workers = store.workers(a.id)?;
                         let unavailable = if let Some(reason) = &runner_failure
                             && !workers.iter().any(|w| w.state == "finished")
-                            && crate::git::capture(&store.work(a.id), &a.base)?
-                                .1
-                                .is_empty()
                             && (!store.worker || store.reported_result(a.id)?.is_none())
+                            && crate::git::unchanged_since(&store.work(a.id), &a.base)?
                         {
                             Some(anyhow::anyhow!(
                                 "Workspace command runner unavailable: {reason}"
@@ -1037,6 +1101,9 @@ async fn exchange(
                         };
                         start_turn(stdin, session, &direction, a, team_preference.as_deref())
                             .await?;
+                        if direction.queued_id.is_some() {
+                            awaiting_ack.insert(3, direction);
+                        }
                         turn.clear();
                         deadline = Some(Instant::now() + Duration::from_secs(90));
                         continue;
@@ -1109,18 +1176,16 @@ pub(crate) async fn worker_turn(
             &mut io, store, a, &message, &mut rx, false, notify,
         ))
         .await
+        .map(|result| result.finished)
     }
     .await;
     rx.close();
     while let Ok(control) = rx.try_recv() {
         if let Control::Steer(message) = control {
-            store.event(
+            store.direction_unavailable(
                 a.id,
-                "steer/unavailable",
-                Some(&format!(
-                    "The worker finished before receiving: {}",
-                    message.text
-                )),
+                &message,
+                "The worker finished before receiving this direction.",
             )?;
             notify(ReplyUpdate::TranscriptChanged);
         }
@@ -1197,53 +1262,61 @@ pub fn run_turn(
     let notify = |event: ReplyUpdate<'_>| observer.borrow_mut()(event);
     let mut attempt = a.clone();
     let mut prompt = prompt.into();
-    loop {
-        let finished = run_one_turn(
-            cached,
-            store,
-            &attempt,
-            prompt,
-            &mut controls,
-            stream,
-            &notify,
-        )?;
-        if !finished {
-            break;
-        }
-        // The review snapshot can take time. Honor input received after the
-        // provider finished and before claiming the next message.
-        let mut stopped = false;
-        while let Ok(control) = controls.try_recv() {
-            match control {
-                Control::Cancel => stopped = true,
-                Control::Queue(message) => store.save_queued(a.id, &message, true)?,
-                Control::Steer(message) => {
-                    store.event(
-                        a.id,
-                        "steer/unavailable",
-                        Some(&format!(
-                            "The run ended before this direction could be sent: {}",
-                            message.text
-                        )),
-                    )?;
-                }
-                Control::SteerWorker(id, text) => {
-                    route_worker_direction(store, a.id, id, &text, &notify)?
-                }
-                Control::StopWorker(_) => {}
+    let outcome = (|| -> Result<()> {
+        loop {
+            let finished = run_one_turn(
+                cached,
+                store,
+                &attempt,
+                prompt,
+                &mut controls,
+                stream,
+                &notify,
+            )?;
+            if !finished
+                || drain_finished_controls(store, a.id, &mut controls, &notify)?
+                || controls.is_closed()
+            {
+                return Ok(());
             }
+            let Some(next) = store.claim_queued(a.id, false)? else {
+                return Ok(());
+            };
+            (attempt, prompt) = next;
             notify(ReplyUpdate::TranscriptChanged);
         }
-        if stopped || controls.is_closed() {
-            break;
+    })();
+    // Close before the final drain so every successful send during snapshotting
+    // or shutdown gets either a queued follow-up or a delivery receipt.
+    controls.close();
+    drain_finished_controls(store, a.id, &mut controls, &notify)?;
+    outcome
+}
+
+fn drain_finished_controls(
+    store: &Store,
+    chat: i64,
+    controls: &mut Controls,
+    notify: &dyn Fn(ReplyUpdate<'_>),
+) -> Result<bool> {
+    let mut stopped = false;
+    while let Ok(control) = controls.try_recv() {
+        match control {
+            Control::Cancel => stopped = true,
+            Control::Queue(message) => store.save_queued(chat, &message, true)?,
+            Control::Steer(message) => store.direction_unavailable(
+                chat,
+                &message,
+                "The run ended before this direction could be sent.",
+            )?,
+            Control::SteerWorker(id, text) => {
+                route_worker_direction(store, chat, id, &text, notify)?
+            }
+            Control::StopWorker(_) => {}
         }
-        let Some(next) = store.resume_queued(a.id)? else {
-            break;
-        };
-        (attempt, prompt) = next;
         notify(ReplyUpdate::TranscriptChanged);
     }
-    Ok(())
+    Ok(stopped)
 }
 
 fn run_one_turn(
@@ -1257,7 +1330,7 @@ fn run_one_turn(
 ) -> Result<bool> {
     let queued_id = prompt.queued_id;
     let result: Result<bool> = (|| {
-        if a.session.is_empty() {
+        if a.session.is_empty() && prompt.files.is_empty() {
             prompt.files = store.task_attachments(a.task)?;
         }
         let mut session = match cached.take() {
@@ -1284,7 +1357,7 @@ fn run_one_turn(
             }
             None => Session::open(store, a)?,
         };
-        let finished = session.runtime.block_on(exchange(
+        let result = session.runtime.block_on(exchange(
             &mut session.io,
             store,
             a,
@@ -1293,10 +1366,10 @@ fn run_one_turn(
             stream,
             notify,
         ))?;
-        if finished && !session.io.used_tools {
+        if result.reuse_connection {
             *cached = Some(session);
         }
-        Ok(finished)
+        Ok(result.finished)
     })();
     if !matches!(result, Ok(true)) {
         if let Some(id) = queued_id {

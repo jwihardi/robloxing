@@ -83,8 +83,10 @@ impl Store {
             return Ok(pair.markup.as_ref().unwrap_or(&pair.original).clone());
         }
         let last_input: Option<i64> = db.query_row(
-            "SELECT MAX(id) FROM events WHERE attempt=?1 AND kind IN ('user/followup','steer/sent')",
-            [lead.id], |r| r.get(0))?;
+            "SELECT MAX(id) FROM delivered_user_inputs WHERE attempt=?1",
+            [lead.id],
+            |r| r.get(0),
+        )?;
         let (sql, id) = match last_input {
             Some(event) => (
                 "SELECT path FROM event_files WHERE event=?1 ORDER BY rowid",

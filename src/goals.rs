@@ -62,14 +62,22 @@ impl Store {
     }
 
     pub fn recover_goal(&self, requested: Option<i64>) -> Result<Option<(crate::Attempt, String)>> {
+        self.recover_matching_goal(requested, None)
+    }
+
+    pub(crate) fn recover_matching_goal(
+        &self,
+        requested: Option<i64>,
+        objective: Option<&str>,
+    ) -> Result<Option<(crate::Attempt, String)>> {
         let (id, objective, progress) = {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             let saved: Option<(i64, String, String)> = tx
                 .query_row(
                     "SELECT attempt,objective,detail FROM recoverable_goals
-                 WHERE ?1 IS NULL OR attempt=?1 ORDER BY attempt LIMIT 1",
-                    [requested],
+                 WHERE (?1 IS NULL OR attempt=?1) AND (?2 IS NULL OR objective=?2) ORDER BY attempt LIMIT 1",
+                    params![requested,objective],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
@@ -78,7 +86,7 @@ impl Store {
                 self.work(saved.0).is_dir(),
                 "The saved working copy is missing."
             );
-            Self::mark_resuming(&tx, saved.0)?;
+            crate::run_state::Resume::InterruptedGoal.claim(&tx, saved.0)?;
             tx.execute("UPDATE chat_goals SET status='active',recoverable=0,detail=CASE WHEN detail=?2 THEN '' ELSE detail END WHERE attempt=?1",
                 params![saved.0, INTERRUPTED])?;
             tx.commit()?;
@@ -381,6 +389,37 @@ mod tests {
             upgraded.recover_goal(None)?.unwrap().0.session,
             "legacy-session"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resubmitting_an_early_interrupted_goal_keeps_both_sets_of_attachments() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("project");
+        let home = dir.path().join("home");
+        let first = dir.path().join("original.txt");
+        let next = dir.path().join("revision.txt");
+        std::fs::write(&first, "Original")?;
+        std::fs::write(&next, "Revision")?;
+        let store = Store::open(&project, &home)?;
+        let objective = "Review both designs";
+        let chat = store.prepare_with_files(
+            "/goal Review both designs",
+            "",
+            None,
+            None,
+            std::slice::from_ref(&first),
+        )?;
+        drop(store);
+        let store = Store::open(&project, &home)?;
+        assert!(store.resume(chat.id).is_err());
+        let message =
+            crate::provider::Message::compose(objective, vec![first.clone(), next.clone()]);
+        let (resumed, prompt) = store.resume_chat(chat.id, message, Some(objective))?;
+        assert_eq!(resumed.id, chat.id);
+        assert_eq!(prompt.files, [first, next]);
+        assert!(prompt.text.contains("Continue the interrupted goal"));
+        assert!(prompt.text.contains("revision.txt"));
         Ok(())
     }
 

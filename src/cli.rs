@@ -66,6 +66,9 @@ enum Action {
         lead_effort: Option<String>,
         #[arg(long)]
         worker_effort: Option<String>,
+        /// Clear this project's worker model and effort overrides and follow the global defaults.
+        #[arg(long, conflicts_with_all = ["worker_model", "worker_effort"])]
+        inherit_workers: bool,
         #[arg(long)]
         parallelism: Option<usize>,
         /// Automatically assign divisible work. Set false to delegate only by request.
@@ -462,6 +465,7 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             worker_model,
             lead_effort,
             worker_effort,
+            inherit_workers,
             parallelism,
             auto_delegate,
             check_args,
@@ -472,12 +476,20 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             }
             if let Some(v) = worker_model {
                 s.worker_model = v;
+                s.override_worker_model = true;
             }
             if let Some(v) = lead_effort {
                 s.lead_effort = v;
             }
             if let Some(v) = worker_effort {
                 s.worker_effort = v;
+                s.override_worker_effort = true;
+            }
+            if inherit_workers {
+                s.worker_model.clear();
+                s.worker_effort.clear();
+                s.override_worker_model = false;
+                s.override_worker_effort = false;
             }
             if let Some(v) = auto_delegate {
                 s.auto_delegate = v;
@@ -489,7 +501,9 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                 s.check_args = serde_json::from_str(&v)?;
             }
             store.configure_team(&s)?;
-            println!("{}", serde_json::to_string_pretty(&s)?);
+            let mut result = serde_json::to_value(&s)?;
+            result["worker_policy"] = serde_json::to_value(store.worker_defaults()?)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Action::Open => println!(
             "Opened {}\nRecords: {}",
@@ -556,10 +570,8 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
             }
         }
         Action::Retry { id } => {
-            let a = store.attempt(id)?;
-            let retry = store.prepare(&a.prompt, &a.model, Some(id))?;
-            let direction = store.retry_prompt(&retry)?;
-            run(&store, retry, direction.as_str().into())?;
+            let (attempt, message) = store.retry_chat(id)?;
+            run(&store, attempt, message)?;
         }
         Action::Resume { id, direction } => {
             let goal = crate::goals::command(&direction);
@@ -571,11 +583,9 @@ pub fn execute(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
                     println!("No goal set for this chat.");
                 }
             } else {
-                run(
-                    &store,
-                    store.resume_with_goal(id, goal)?,
-                    goal.unwrap_or(&direction).into(),
-                )?;
+                let (attempt, message) =
+                    store.resume_chat(id, goal.unwrap_or(&direction).into(), goal)?;
+                run(&store, attempt, message)?;
             }
         }
         Action::SendNext { id } => {

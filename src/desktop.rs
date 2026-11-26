@@ -734,10 +734,9 @@ impl App {
         let selected = self.selected_policy(store)?;
         ui.set_custom_subagents(selected.is_some());
         ui.set_inherit_policy(selected.is_none());
-        let policy = match selected {
-            Some(p) => p,
-            None => store.worker_defaults()?,
-        };
+        let (defaults, from_project) = store.worker_defaults_with_source()?;
+        ui.set_project_worker_defaults(from_project);
+        let policy = selected.unwrap_or(defaults);
         let choices = policy_choices(
             &policy,
             catalog,
@@ -1128,6 +1127,7 @@ impl App {
             );
             ui.set_can_discard(done);
             ui.set_can_resume(done && !a.session.is_empty());
+            ui.set_can_send_next(done && (!a.session.is_empty() || !a.base.is_empty()));
             ui.set_can_retry(done || a.state == "discarded" || a.state == "accepted");
             self.refresh_chat(store, a)?;
         }
@@ -1753,7 +1753,7 @@ impl App {
         let store = self.store.borrow().clone().context("Open a project.")?;
         let id = self.id.get();
         let objective = objective.map(str::to_owned);
-        let mut draft = if matches!(op, "submit" | "resume") {
+        let draft = if matches!(op, "submit" | "resume") {
             if let Some(text) = objective.as_deref() {
                 if from_composer {
                     self.message_with_attachments(text)?
@@ -1789,55 +1789,34 @@ impl App {
             None
         };
         self.start(move |events| {
-            if matches!(
-                op.as_str(),
-                "submit" | "retry" | "resume" | "send-next" | "recover-goal"
-            ) {
-                let a = match op.as_str() {
-                    "submit" => store.prepare_with_files(
-                        &objective
+            if matches!(op.as_str(), "submit" | "retry" | "resume" | "send-next") {
+                let (a, prompt) = match op.as_str() {
+                    "submit" => {
+                        let text = objective
                             .as_ref()
-                            .map_or_else(|| draft.text.clone(), |goal| format!("/goal {goal}")),
-                        "",
-                        None,
-                        draft_policy.as_ref(),
-                        &draft.files,
+                            .map_or(draft.text, |goal| format!("/goal {goal}"));
+                        let attempt = store.prepare_with_files(
+                            &text,
+                            "",
+                            None,
+                            draft_policy.as_ref(),
+                            &draft.files,
+                        )?;
+                        store.bind_draft_screenshots(attempt.id)?;
+                        let prompt = attempt.prompt.as_str().into();
+                        (attempt, prompt)
+                    }
+                    "retry" => store.retry_chat(id.context("Select a chat.")?)?,
+                    "send-next" => store
+                        .resume_queued(id.context("Select a chat.")?)?
+                        .context("The queue is empty.")?,
+                    _ => store.resume_chat(
+                        id.context("Select a chat.")?,
+                        draft,
+                        objective.as_deref(),
                     )?,
-                    "retry" => {
-                        let old = store.attempt(id.context("Select a task.")?)?;
-                        store.prepare(&old.prompt, &old.model, Some(old.id))?
-                    }
-                    "send-next" => {
-                        let (attempt, next) = store
-                            .resume_queued(id.context("Select a chat.")?)?
-                            .context("The queue is empty.")?;
-                        draft = next;
-                        attempt
-                    }
-                    "recover-goal" => {
-                        let (attempt, direction) = store
-                            .recover_goal(Some(id.context("Select a chat.")?))?
-                            .context("This goal is no longer waiting for recovery.")?;
-                        draft = direction.as_str().into();
-                        attempt
-                    }
-                    _ => store
-                        .resume_with_goal(id.context("Select a task.")?, objective.as_deref())?,
                 };
-                let prompt = if matches!(op.as_str(), "resume" | "send-next" | "recover-goal") {
-                    draft
-                } else if op == "retry" {
-                    store.retry_prompt(&a)?.as_str().into()
-                } else {
-                    a.prompt.as_str().into()
-                };
-                if op == "submit" {
-                    store.bind_draft_screenshots(a.id)?;
-                }
-                events.send(Update::Started(
-                    a.id,
-                    !matches!(op.as_str(), "send-next" | "recover-goal") && from_composer,
-                ))?;
+                events.send(Update::Started(a.id, op != "send-next" && from_composer))?;
                 let active_goal = store.chat_goal(a.id)?.filter(|g| g.status == "active");
                 let earlier_output = store.last_asset_output(a.id)?.map_or(0, |(id, _)| id);
                 let earlier_checkpoint = store.current_checkpoint(a.id)?;
@@ -1851,7 +1830,8 @@ impl App {
                             provider::ReplyUpdate::AccountUsage(source, windows) => {
                                 Update::AccountUsage(store.project.clone(), source.into(), windows)
                             }
-                            provider::ReplyUpdate::Usage(_) => return,
+                            provider::ReplyUpdate::Usage(_)
+                            | provider::ReplyUpdate::WorkerPromptSent => return,
                             provider::ReplyUpdate::Activity(label) => {
                                 Update::Activity(a.id, label.to_owned())
                             }
@@ -2198,11 +2178,7 @@ fn main() -> Result<()> {
     let a = app.clone();
     ui.on_run_goal(move |objective| {
         if let Err(e) = a.operate_with_goal(
-            if a.ui.unwrap().get_recoverable_goal()
-                && objective.trim() == a.ui.unwrap().get_goal_objective().as_str()
-            {
-                "recover-goal"
-            } else if a.id.get().is_some() {
+            if a.id.get().is_some() {
                 "resume"
             } else {
                 "submit"

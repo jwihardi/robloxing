@@ -24,12 +24,8 @@ impl App {
             _ => bail!("Unknown task settings."),
         };
         let defaults = if role == TaskRole::Workers {
-            let agent = match self.store.borrow().as_ref() {
-                Some(store) => store.worker_defaults()?,
-                None => WorkerPolicy::global(&home)?.unwrap_or_default(),
-            };
             TaskSettings {
-                agent,
+                agent: WorkerPolicy::global(&home)?.unwrap_or_default(),
                 ..Default::default()
             }
         } else {

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, attempt INTEGER NOT NU
     recorded TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, summary TEXT);
 CREATE TABLE IF NOT EXISTS event_images(event INTEGER PRIMARY KEY REFERENCES events(id), path TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS event_files(event INTEGER NOT NULL REFERENCES events(id), path TEXT NOT NULL, PRIMARY KEY(event,path));
+CREATE TABLE IF NOT EXISTS pending_worker_directions(event INTEGER PRIMARY KEY REFERENCES events(id), worker INTEGER NOT NULL REFERENCES workers(id));
 CREATE TABLE IF NOT EXISTS annotation_sources(attachment TEXT PRIMARY KEY, original TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS chat_image_events ON events(attempt,id) WHERE kind='workshop/image';
 CREATE TABLE IF NOT EXISTS decisions(attempt INTEGER PRIMARY KEY REFERENCES attempts, decision TEXT NOT NULL,
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, attempt INTEGER NOT
 CREATE TABLE IF NOT EXISTS team_settings(id INTEGER PRIMARY KEY CHECK(id=1), lead_model TEXT NOT NULL,
     worker_model TEXT NOT NULL, parallelism INTEGER NOT NULL CHECK(parallelism IN (1,2)), check_args TEXT NOT NULL,
     auto_delegate INTEGER NOT NULL DEFAULT 1,
-    lead_effort TEXT NOT NULL DEFAULT '', worker_effort TEXT NOT NULL DEFAULT '');
+    lead_effort TEXT NOT NULL DEFAULT '', worker_effort TEXT NOT NULL DEFAULT '',
+    override_worker_model INTEGER NOT NULL DEFAULT 0, override_worker_effort INTEGER NOT NULL DEFAULT 0);
 INSERT OR IGNORE INTO team_settings(id,lead_model,worker_model,parallelism,check_args) VALUES(1,'','',2,'[]');
 CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL REFERENCES attempts,
     name TEXT NOT NULL, spec TEXT NOT NULL, state TEXT NOT NULL, run INTEGER, tries INTEGER NOT NULL DEFAULT 0,
@@ -31,6 +33,8 @@ CREATE TABLE IF NOT EXISTS workers(id INTEGER PRIMARY KEY, lead INTEGER NOT NULL
     tokens INTEGER, model TEXT, effort TEXT, UNIQUE(lead,name));
 CREATE TABLE IF NOT EXISTS checkpoints(lead INTEGER PRIMARY KEY REFERENCES attempts, decisions TEXT NOT NULL, next_task TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_by_attempt ON events(attempt,id);
+CREATE VIEW IF NOT EXISTS delivered_user_inputs AS
+    SELECT id,attempt,summary FROM events WHERE kind IN ('user/followup','steer/sent');
 CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts(task,id);
 CREATE INDEX IF NOT EXISTS blocker_events ON events(attempt,id)
     WHERE kind IN ('workshop/blocker','workshop/blocker_resolved');
@@ -38,7 +42,8 @@ CREATE TABLE IF NOT EXISTS codex_asset_sessions(session TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, tokens INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queued_messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT, attempt INTEGER NOT NULL REFERENCES attempts,
-    body TEXT NOT NULL, files TEXT NOT NULL, sending INTEGER NOT NULL DEFAULT 0);
+    body TEXT NOT NULL, files TEXT NOT NULL, sending INTEGER NOT NULL DEFAULT 0,
+    steering INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS queue_by_chat ON queued_messages(attempt,id);
 CREATE TABLE IF NOT EXISTS context_usage(attempt INTEGER PRIMARY KEY REFERENCES attempts, used INTEGER, capacity INTEGER);
 CREATE TABLE IF NOT EXISTS verified_team(lead INTEGER PRIMARY KEY REFERENCES attempts, tree TEXT NOT NULL, check_args TEXT NOT NULL);

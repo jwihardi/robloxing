@@ -14,7 +14,7 @@ impl Store {
         );
         let work = self.work(id);
         ensure!(
-            git::capture(&work, &a.base)?.0 == a.candidate,
+            git::working_tree(&work)? == a.candidate,
             "The working copy changed since review. Resume or retry before checking."
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -30,7 +30,7 @@ impl Store {
         }
         let msg = runtime.block_on(self.run_check(id, args, &a.candidate))?;
         ensure!(
-            git::capture(&work, &a.base)?.0 == a.candidate,
+            git::working_tree(&work)? == a.candidate,
             "Check modified the reviewed files. Resume or retry to review its edits."
         );
         if configured {
@@ -88,5 +88,46 @@ impl Store {
             "{msg}. {}",
             String::from_utf8_lossy(&preview).trim()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checking_a_stale_copy_leaves_only_the_reviewed_revision_pinned() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let store = Store::open(
+            &scratch.path().join("project"),
+            &scratch.path().join("home"),
+        )?;
+        let chat = store.prepare("Make an asset", "", None)?;
+        let work = store.work(chat.id);
+        let asset = work.join("asset.bin");
+        std::fs::write(&asset, [0, 1, 2])?;
+        store.finish(chat.id, "review", "Ready")?;
+        let refs = || {
+            git::git(
+                &work,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/workshop/reviews",
+                ],
+            )
+        };
+        let before = refs()?;
+        assert_eq!(before.lines().count(), 1);
+        std::fs::write(asset, [3, 4, 5])?;
+        assert!(
+            store
+                .check(chat.id, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("changed since review")
+        );
+        assert_eq!(refs()?, before);
+        Ok(())
     }
 }

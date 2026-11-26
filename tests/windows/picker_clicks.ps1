@@ -128,7 +128,10 @@ function Wait-For([scriptblock]$condition, $description, [int]$seconds = 8) {
 }
 function Click($name, [double]$fraction = 0.5) {
     $el = Named $name
-    if (!$el) { throw "Missing $name" }
+    if (!$el) {
+        Wait-For { Named $name } "control '$name'"
+        $el = Named $name
+    }
     $rect = $el.Current.BoundingRectangle
     $point = [WorkshopPointer+Point]::new()
     $point.X = [int]($rect.X + $rect.Width * $fraction)
@@ -606,6 +609,21 @@ function Test-Delivery {
         Wait-For { (Named 'New chat').Current.IsEnabled -and !(Named 'Return to lead') } 'directed completion'
         if (!(Select-String -Quiet -LiteralPath (Join-Path $root 'lead-feedback') -Pattern 'Use the blue version')) { throw 'Missing lead receipt' }
         if (Select-String -Quiet -LiteralPath (Join-Path $root 'delivery.log') -Pattern 'Follow up discard|Keep my draft') { throw 'Sent an unrequested message' }
+        Click 'New chat'
+        $initHold = Join-Path $root 'init.hold'
+        [void](New-Item -ItemType File -Path $initHold)
+        try {
+            Draft 'Follow up on the original brief'
+            Click 'Send message'
+            Wait-For { (Named 'Stop response') -and (Test-Path -LiteralPath (Join-Path $root 'init.ready')) } 'provider waiting to initialize'
+            Queue-Draft 'Follow up with the second brief'
+            Click 'Stop response'
+            Wait-For { Named 'Send next' } 'queue recovery before the provider opened a session'
+        } finally { Remove-Item -LiteralPath $initHold }
+        Click 'Send next'
+        Wait-For { (Named 'New chat').Current.IsEnabled -and !(Named 'Remove queued message') } 'sessionless queue delivered'
+        $latest = Get-Content -LiteralPath (Join-Path $root 'delivery.log') -Tail 2
+        if (($latest -join '|') -ne 'Follow up on the original brief|Follow up with the second brief') { throw 'Unexpected recovery message order' }
         'Queued delivery, removal, pause, draft retention and direct worker steering passed'
     } finally { Remove-Item -LiteralPath $mode }
 }

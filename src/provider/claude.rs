@@ -383,12 +383,13 @@ pub(super) async fn exchange(
                     Some(Control::Steer(message)) => {
                         match user_message(&message, preference) {
                             Ok(input) => {
-                                queued.push_back(input);
-                                store.message_event(a.id, "steer/sent", &message)?;
+                                queued.push_back((input, store.stage_direction(a.id, message)?));
                             }
-                            Err(error) => store.event(a.id, "steer/unavailable", Some(&error.to_string()))?,
+                            Err(error) => {
+                                store.direction_unavailable(a.id, &message, &error.to_string())?;
+                                notify(ReplyUpdate::TranscriptChanged);
+                            }
                         }
-                        notify(ReplyUpdate::TranscriptChanged);
                     }
                     Some(Control::Queue(message)) => {
                         store.queue_message(a.id, &message)?;
@@ -591,7 +592,7 @@ pub(super) async fn exchange(
                 if let Some(reason) = blocker.take() {
                     bail!("Task blocked: {reason}");
                 }
-                let input = if let Some(input) = queued.pop_front() {
+                let (input, direction) = if let Some(input) = queued.pop_front() {
                     repairs.reset_goal_reports(store, a.id)?;
                     input
                 } else {
@@ -610,11 +611,14 @@ pub(super) async fn exchange(
                     {
                         Finish::Done => return Ok(true),
                         Finish::Cancelled => return Ok(false),
-                        Finish::Continue(direction) => user_message(&direction, preference)?,
+                        Finish::Continue(direction) => {
+                            (user_message(&direction, preference)?, direction)
+                        }
                     }
                 };
                 last_message.clear();
                 send(&mut io.stdin, input).await?;
+                direction.record_direction(store, a.id, notify)?;
                 deadline = Some(Instant::now() + Duration::from_secs(90));
             }
             _ => {}

@@ -158,12 +158,14 @@ def stop_preparing_worker(case):
     proc = case.run("run", "delegate")
     try:
         wait_for(lambda: (case.root / "catalog.ready").exists(), "worker never requested models")
-        proc.stdin.write(b"/stop-worker 1\n")
+        proc.stdin.write(b"/steer-worker 1 Keep the lobby entrance\n/stop-worker 1\n")
         proc.stdin.flush()
         wait_for(lambda: case.workers()[0][1] == "blocked",
                  "worker ignored stop during model discovery", timeout=10)
         with sqlite3.connect(case.db) as db:
             assert db.execute("SELECT run FROM workers WHERE id=1").fetchone() == (None,)
+            notices = db.execute("SELECT summary FROM events WHERE kind='worker/delivery_error'").fetchall()
+            assert len(notices) == 1 and "Keep the lobby entrance" in notices[0][0], notices
     finally:
         case.release("catalog")
         proc.communicate(timeout=60)
@@ -214,6 +216,46 @@ def steer_preparing_worker(case):
     assert len(requests) == 2
     for request in requests:
         assert ("Creator direction: Preserve the original proportions" in request) == request.startswith("Write left\n")
+    with sqlite3.connect(case.db) as db:
+        assert not db.execute("SELECT 1 FROM pending_worker_directions").fetchone()
+        assert not db.execute("SELECT 1 FROM events WHERE kind='worker/delivery_error'").fetchone()
+
+
+def interrupted_worker_directions(case):
+    case.call("team", "--parallelism", "1", "--worker-model", "fixture-fast")
+    for crash in (False, True):
+        case.hold("catalog")
+        proc = case.run("run", "delegate")
+        marker = case.root / "catalog.ready"
+        try:
+            wait_for(marker.exists, "worker did not start model discovery")
+            with sqlite3.connect(case.db) as db:
+                worker, lead = db.execute("SELECT id, lead FROM workers WHERE state='running'").fetchone()
+            proc.stdin.write(("/steer-worker %d Preserve the original proportions\n" % worker).encode())
+            proc.stdin.flush()
+            def pending():
+                with sqlite3.connect(case.db) as db:
+                    return db.execute("SELECT 1 FROM pending_worker_directions WHERE worker=?", (worker,)).fetchone()
+            wait_for(pending, "preparing worker direction was not saved")
+            if crash:
+                proc.kill()
+            else:
+                proc.stdin.write(b"/cancel\n")
+                proc.stdin.flush()
+            proc.communicate(timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+            case.release("catalog")
+        marker.unlink()
+        case.call("open")
+        case.call("open")
+        assert not pending()
+        with sqlite3.connect(case.db) as db:
+            notices = db.execute("SELECT summary FROM events WHERE attempt=? AND kind='worker/delivery_error'", (lead,)).fetchall()
+            assert len(notices) == 1 and "Preserve the original proportions" in notices[0][0], notices
+            assert "Queued for Write left" in notices[0][0], notices
 
 
 def overlap(case):
@@ -357,6 +399,22 @@ def external_blocker(case):
     case.call("accept", "1")
     assert (case.project / "answer.txt").read_text() == "correct"
 
+    (case.root / "direct-repair").unlink()
+    marker.touch()
+    case.call("run", "Confirm the release destination.", ok=False)
+    marker.unlink()
+    (case.root / "small-talk").touch()
+    check = [case.env["WORKSHOP_CODEX"], "check"]
+    case.call("team", "--check-args", json.dumps(check))
+    (case.root / "fail-check").touch()
+    case.call("resume", "2", "Use the playtest destination.", ok=False)
+    case.call("accept", "2", ok=False)
+    (case.root / "fail-check").unlink()
+    case.call("resume", "2", "Confirmed. The checks are ready.")
+    case.call("accept", "2")
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT count(*) FROM events WHERE attempt=2 AND kind='workshop/blocker_resolved'").fetchone() == (1,)
+
 
 def cancel_check(case):
     (case.root / "direct-repair").touch()
@@ -403,8 +461,19 @@ def steer_during_check(case):
 
 def model_effort(case):
     (case.root / "record-inference").touch()
+    global_policy = {"models": ["claude:default"], "max_effort": "medium"}
+    with sqlite3.connect(case.home / "preferences.sqlite") as db:
+        db.execute("INSERT INTO worker_defaults(id, policy) VALUES(1, ?)", (json.dumps(global_policy),))
+    other = case.root / "second-project"
+    other.mkdir()
+    def other_policy():
+        data = subprocess.check_output([case.cmd[0], "--project", str(other), "team"], env=case.env)
+        return json.loads(data)["worker_policy"]
+    assert json.loads(case.call("team"))["worker_policy"] == global_policy == other_policy()
+    assert json.loads(case.call("team", "--worker-model", "fixture-fast"))["worker_policy"] == {
+        "models": ["fixture-fast"], "max_effort": "medium"}
     case.call("team", "--lead-model", "fixture-deep", "--lead-effort", "high",
-              "--worker-model", "fixture-fast", "--worker-effort", "low")
+              "--worker-effort", "low")
     case.call("run", "delegate")
     case.call("team", "--auto-delegate", "false")
     case.call("resume", "1", "Use workers for the follow-up.")
@@ -420,6 +489,11 @@ def model_effort(case):
             assert len(hints) == 2
             assert any("automatic delegation]" in hint for hint in hints)
             assert any("delegation by request]" in hint for hint in hints)
+    assert other_policy() == global_policy
+    assert json.loads(case.call("team", "--inherit-workers"))["worker_policy"] == global_policy
+    assert json.loads(case.call("team", "--worker-effort", "low"))["worker_policy"] == {
+        "models": ["claude:default"], "max_effort": "low"}
+    assert other_policy() == global_policy
 
 
 def claude_worker_stop_and_resume(case):
@@ -485,6 +559,9 @@ def delivery(case, provider):
     send("Actually use green")
     finish(proc, True)
     assert (case.root / "delivery.log").read_text().splitlines()[-1] == "Actually use green"
+    with sqlite3.connect(case.db) as db:
+        assert db.execute("SELECT kind,summary FROM events WHERE attempt=2 AND kind LIKE 'steer/%'").fetchall() == [
+            ("steer/sent", "Actually use green")]
     proc = case.run("run", "--provider", provider, "Wait for a correction")
     wait_for(lambda: (case.root / "delivery.log").read_text().count("Wait for a correction") == 2,
              "second lead did not start")
@@ -497,6 +574,106 @@ def delivery(case, provider):
     case.call("send-next", "3")
     assert not pending()
     assert (case.root / "delivery.log").read_text().splitlines().count("Follow up after restart") == 1
+
+
+def interrupted_directions(case):
+    case.env["WORKSHOP_GEMINI"] = case.env["WORKSHOP_ANTIGRAVITY"] = case.env["WORKSHOP_CODEX"]
+    (case.root / "record-queue").touch()
+    (case.root / "delivery-mode").touch()
+    original = "Follow up with the lobby plan"
+    direction = "Change the lobby entrance"
+    followup = "Follow up with a review"
+    original_file = case.root / "brief.txt"
+    queued_file = case.root / "reference.txt"
+    original_file.write_text("original attachment marker")
+    queued_file.write_text("queued attachment marker")
+    wire = case.root / "queue-wire.jsonl"
+    for provider in ("codex", "claude", "gemini", "antigravity"):
+        case.hold("init")
+        proc = case.run("run", "--provider", provider, original)
+        try:
+            wait_for(lambda: (case.root / "init.ready").exists(), provider + " never reached initialization")
+            with sqlite3.connect(case.db) as db:
+                attempt = db.execute("SELECT max(id) FROM attempts").fetchone()[0]
+            proc.stdin.write((direction + "\n/queue " + followup + "\n").encode())
+            proc.stdin.flush()
+            def pending():
+                with sqlite3.connect(case.db) as db:
+                    return db.execute("SELECT body FROM queued_messages WHERE attempt=? ORDER BY id", (attempt,)).fetchall()
+            wait_for(lambda: pending() == [(direction,), (followup,)], provider + " did not retain the inputs")
+            with sqlite3.connect(case.db) as db:
+                assert not db.execute("SELECT 1 FROM events WHERE attempt=? AND kind='steer/sent'", (attempt,)).fetchone()
+            if provider == "gemini":
+                proc.kill()
+                proc.communicate(timeout=10)
+            else:
+                proc.stdin.write(b"/cancel\n")
+                proc.stdin.flush()
+                finish(proc, True)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+            case.release("init")
+        (case.root / "init.ready").unlink()
+        case.call("open")
+        case.call("open")
+        assert pending() == [(followup,)]
+        with sqlite3.connect(case.db) as db:
+            notices = db.execute("SELECT kind,summary FROM events WHERE attempt=? AND kind LIKE 'steer/%'", (attempt,)).fetchall()
+            assert len(notices) == 1 and notices[0][0] == "steer/unavailable" and direction in notices[0][1], (provider, notices)
+            assert db.execute("SELECT session FROM attempts WHERE id=?", (attempt,)).fetchone() == ("",)
+            # A desktop sender can attach files to its original and queued messages.
+            db.execute("INSERT INTO task_attachments(task,path) SELECT task,? FROM attempts WHERE id=?",
+                       (str(original_file), attempt))
+            db.execute("UPDATE queued_messages SET files=? WHERE attempt=?", (json.dumps([str(queued_file)]), attempt))
+        count = len(wire.read_text().splitlines()) if wire.is_file() else 0
+        retry = provider == "claude"
+        case.call("retry" if retry else "send-next", str(attempt))
+        frames = wire.read_text().splitlines()[count:]
+        assert len(frames) == 2, (provider, frames)
+        assert original in frames[0] and "original attachment marker" in frames[0] and "queued attachment marker" not in frames[0]
+        assert followup in frames[1] and "queued attachment marker" in frames[1] and "original attachment marker" not in frames[1]
+        with sqlite3.connect(case.db) as db:
+            current = db.execute("SELECT max(id) FROM attempts").fetchone()[0]
+            assert (current != attempt) == retry, (provider, current, attempt)
+            assert not db.execute("SELECT 1 FROM queued_messages").fetchone()
+            assert db.execute("SELECT summary FROM events WHERE attempt=? AND kind='user/followup'",
+                              (current,)).fetchall() == [(followup,)]
+
+
+def rejected_codex_direction(case):
+    (case.root / "reject-direction").touch()
+    (case.root / "delivery-mode").touch()
+    proc = case.run("run", "Wait for a correction")
+    try:
+        wait_for(lambda: (case.root / "delivery.log").exists(), "lead did not start")
+        proc.stdin.write(b"Actually use blue\n")
+        proc.stdin.flush()
+        def rejected():
+            with sqlite3.connect(case.db) as db:
+                return db.execute("SELECT kind,summary FROM events WHERE kind LIKE 'steer/%'").fetchall()
+        wait_for(lambda: rejected(), "missing provider receipt")
+        assert rejected() == [("steer/unavailable", "Turn no longer accepts directions\nActually use blue")]
+    finally:
+        proc.stdin.write(b"/cancel\n")
+        proc.stdin.flush()
+        finish(proc, True)
+
+
+def late_codex_receipt(case):
+    (case.root / "late-receipt").touch()
+    (case.root / "delivery-mode").touch()
+    proc = case.run("run", "Wait for a correction")
+    wait_for(lambda: (case.root / "delivery.log").exists(), "lead did not start")
+    proc.stdin.write(b"/queue Follow up on the same chat\nActually use green\n")
+    proc.stdin.flush()
+    finish(proc, True)
+    assert (case.root / "delivery.log").read_text().splitlines() == ["Wait for a correction", "Follow up on the same chat"]
+    with sqlite3.connect(case.db) as db:
+        receipts = db.execute("SELECT kind,summary FROM events WHERE kind LIKE 'steer/%' OR kind='user/followup' ORDER BY id").fetchall()
+        assert [kind for kind, _ in receipts] == ["steer/unavailable", "user/followup"], receipts
+        assert "Actually use green" in receipts[0][1]
 
 
 def shared_blender_connection(case):
@@ -555,9 +732,9 @@ def main():
         compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
         subprocess.run([str(compiler), "/nologo", "/r:System.Web.Extensions.dll",
                         "/out:" + str(fixture), str(Path(__file__).with_name("FixtureProvider.cs"))], check=True)
-        for test in (shared_blender_connection, interrupted_goal, autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
+        for test in (shared_blender_connection, interrupted_goal, interrupted_directions, rejected_codex_direction, late_codex_receipt, autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
                      small_talk, chat_goals, manual_recheck, external_blocker, mixed_plan, conflict,
-                     stop_one, stop_preparing_worker, steer_preparing_worker, cancel_check, steer_during_check, overlap,
+                     stop_one, stop_preparing_worker, steer_preparing_worker, interrupted_worker_directions, cancel_check, steer_during_check, overlap,
                      repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,
                      mixed_provider_conflict, claude_without_codex):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))

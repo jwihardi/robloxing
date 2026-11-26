@@ -358,6 +358,20 @@ fn dispatch_receipts_track_only_accepted_assignments_in_chat_order() -> Result<(
 }
 
 #[test]
+fn a_worker_inherits_the_latest_delivered_direction() -> Result<()> {
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("project"), &tmp.path().join("home"))?;
+    let lead = store.prepare("Make a menu", "", None)?;
+    store.event(lead.id, "user/followup", Some("Use red"))?;
+    store.event(lead.id, "steer/sent", Some("Use blue"))?;
+    store.direction_unavailable(lead.id, &"Use orange".into(), "Delivery interrupted.")?;
+    let context = store.assignment_context(lead.id, &assignment("menu", &[], &["menu"]))?;
+    assert!(context.contains("Current request: Use blue"));
+    assert!(!context.contains("Use orange"));
+    Ok(())
+}
+
+#[test]
 fn interrupted_worker_integration_recovers_once_and_checks_the_combined_revision() -> Result<()> {
     let tmp = tempdir()?;
     let project = tmp.path().join("project");
@@ -422,12 +436,23 @@ fn older_projects_keep_model_settings_and_accept_per_chat_effort() -> Result<()>
         "ALTER TABLE attempts DROP COLUMN effort;
          ALTER TABLE team_settings DROP COLUMN lead_effort;
          ALTER TABLE team_settings DROP COLUMN worker_effort;
+         ALTER TABLE team_settings DROP COLUMN override_worker_model;
+         ALTER TABLE team_settings DROP COLUMN override_worker_effort;
          ALTER TABLE team_settings DROP COLUMN auto_delegate;
          UPDATE team_settings SET worker_model='existing-worker';",
     )?;
     drop(store);
     let store = Store::open(&project, &home)?;
     assert_eq!(store.team_settings()?.worker_model, "existing-worker");
+    assert_eq!(
+        store.worker_defaults_with_source()?.0.models,
+        ["existing-worker"]
+    );
+    store.save_worker_defaults(&crate::worker_policy::WorkerPolicy::default())?;
+    assert_eq!(
+        store.worker_defaults_with_source()?,
+        (Default::default(), false)
+    );
     assert!(store.team_settings()?.auto_delegate);
     assert_eq!(store.attempt(a.id)?.model, "existing-model");
     assert!(store.attempt(a.id)?.effort.is_empty());
@@ -495,12 +520,28 @@ fn worker_policy_inherits_across_projects_and_overrides_per_chat() -> Result<()>
     assert_eq!(first.effective_worker_policy(a.id)?, expanded);
     let retry = first.prepare("try again", "", Some(a.id))?;
     assert_eq!(first.effective_worker_policy(retry.id)?, expanded);
+    let mut settings = first.team_settings()?;
+    settings.worker_model = "project-model".into();
+    settings.override_worker_model = true;
+    first.configure_team(&settings)?;
+    assert_eq!(first.effective_worker_policy(a.id)?, expanded);
     first.set_chat_worker_policy(a.id, None)?;
+    assert_eq!(
+        first.effective_worker_policy(a.id)?,
+        WorkerPolicy {
+            models: vec!["project-model".into()],
+            max_effort: "low".into()
+        }
+    );
     other.save_worker_defaults(&WorkerPolicy::default())?;
     assert_eq!(
         first.effective_worker_policy(a.id)?,
-        WorkerPolicy::default()
+        WorkerPolicy {
+            models: vec!["project-model".into()],
+            max_effort: String::new()
+        }
     );
+    assert_eq!(other.worker_defaults()?, WorkerPolicy::default());
     assert_eq!(first.effective_worker_policy(retry.id)?, expanded);
     Ok(())
 }
@@ -554,6 +595,47 @@ fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()
     assert!(
         rt.block_on(store.worker_inference(&policy, &task, "codex"))
             .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn inherited_route_skips_unavailable_providers_but_keeps_native_defaults() -> Result<()> {
+    use crate::provider_permissions::{ProviderPermissions, TaskRole};
+    use crate::worker_policy::WorkerPolicy;
+
+    let tmp = tempdir()?;
+    let home = tmp.path().join("data");
+    let mut store = Store::open(&tmp.path().join("project"), &home)?;
+    let allowed = WorkerPolicy::default();
+    let model = serde_json::json!({
+        "model": "antigravity:default", "isDefault": false,
+        "defaultReasoningEffort": "", "supportedReasoningEfforts": []
+    });
+    store.cache_worker_catalog(&provider::Catalog {
+        models: vec![serde_json::from_value(model)?],
+        ..Default::default()
+    });
+    // An uncached provider cannot start discovery in this directory.
+    store.project = tmp.path().join("missing-catalog-directory");
+    assert_eq!(
+        store
+            .policy_inference(TaskRole::Images, &allowed, "", "", "claude")
+            .await?,
+        ("antigravity:default".into(), String::new()),
+    );
+    assert_eq!(
+        store
+            .policy_inference(TaskRole::Images, &allowed, "", "", "codex")
+            .await?,
+        (String::new(), String::new()),
+    );
+    ProviderPermissions::set(&home, "antigravity", TaskRole::Images, false)?;
+    assert_eq!(
+        store
+            .policy_inference(TaskRole::Images, &allowed, "", "", "claude")
+            .await?,
+        (String::new(), String::new()),
     );
     Ok(())
 }

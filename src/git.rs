@@ -111,7 +111,7 @@ pub fn project(dir: &Path) -> Result<PathBuf> {
 
 // Copy the real index so staged additions, including force-added files, participate.
 // All subsequent staging for this snapshot happens in the temporary index.
-fn tree(dir: &Path) -> Result<String> {
+pub(crate) fn working_tree(dir: &Path) -> Result<String> {
     let tmp = tempdir()?;
     let index = tmp.path().join("index");
     let real = git(
@@ -130,12 +130,17 @@ fn tree(dir: &Path) -> Result<String> {
     string(run(&["write-tree"])?)
 }
 
+pub(crate) fn unchanged_since(work: &Path, base: &str) -> Result<bool> {
+    let base_tree = git(work, &["rev-parse", &format!("{base}^{{tree}}")])?;
+    Ok(working_tree(work)? == base_tree)
+}
+
 pub fn isolate(source: &Path, work: &Path, head: &str) -> Result<String> {
     let base = git(
         source,
         &[
             "commit-tree",
-            &tree(source)?,
+            &working_tree(source)?,
             "-p",
             head,
             "-m",
@@ -155,7 +160,7 @@ pub fn isolate(source: &Path, work: &Path, head: &str) -> Result<String> {
 }
 
 pub fn capture(work: &Path, base: &str) -> Result<(String, Vec<u8>)> {
-    let candidate = tree(work)?;
+    let candidate = working_tree(work)?;
     let bytes = diff(work, base, &candidate, &[])?;
     // Keep even an uncommitted candidate reachable across gc and process restarts.
     git(
@@ -219,7 +224,7 @@ impl Review<'_> {
         );
         let original = entries(self.work, self.base)?;
         let proposed = entries(self.work, self.candidate)?;
-        let current = entries(self.source, &tree(self.source)?)?;
+        let current = entries(self.source, &working_tree(self.source)?)?;
         let mut pending = Vec::new();
         let mut changed = 0;
         for name in original

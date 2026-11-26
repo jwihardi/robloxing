@@ -30,6 +30,14 @@ class FixtureProvider {
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
     static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }
+    static void RecordQueuePrompt(string frame) {
+        if (Mode("record-queue")) File.AppendAllText(Path.Combine(Dir,"queue-wire.jsonl"),frame+"\n");
+    }
+    static void WaitForInit() {
+        if (!Mode("init.hold")) return;
+        File.WriteAllText(Path.Combine(Dir,"init.ready"), "ready");
+        while (Mode("init.hold")) Thread.Sleep(20);
+    }
     static string GoalEvidence(bool first) {
         if (first) {
             File.WriteAllText("first.txt","one");
@@ -123,6 +131,7 @@ class FixtureProvider {
             var frame = Json.Deserialize<Dictionary<string,object>>(line);
             switch ((string)frame["type"]) {
                 case "control_request":
+                    if (Convert.ToString(((Dictionary<string,object>)frame["request"])["subtype"]) == "initialize") WaitForInit();
                     if (Convert.ToString(frame["request_id"]) == "workshop-usage") {
                         Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {
                             rate_limits_available=true,rate_limits=new {five_hour=new {utilization=25},seven_day=new {utilization=48}}}}});
@@ -140,6 +149,7 @@ class FixtureProvider {
                     Send(new {type="control_response",response=new {subtype="success",request_id=frame["request_id"],response=new {models=models}}});
                     break;
                 case "user":
+                    RecordQueuePrompt(line);
                     Send(new {type="system",subtype="init",session_id=session});
                     var msg=(Dictionary<string,object>)frame["message"];
                     var blocks=(System.Collections.ArrayList)msg["content"];
@@ -170,7 +180,7 @@ class FixtureProvider {
             var frame=Json.Deserialize<Dictionary<string,object>>(line);
             var id=frame["id"]; var p=(Dictionary<string,object>)frame["params"];
             switch(Convert.ToString(frame["method"])) {
-                case "initialize": Send(new {id=id,result=new {protocolVersion=1}}); break;
+                case "initialize": WaitForInit(); Send(new {id=id,result=new {protocolVersion=1}}); break;
                 case "session/new": case "session/load":
                     if(Mode("capture-mcp") && line.Contains("workshop"))
                         File.WriteAllText(Path.Combine(Dir,"mcp-"+provider+".json"),Json.Serialize(p["mcpServers"]));
@@ -179,6 +189,7 @@ class FixtureProvider {
                         models=new {currentModelId="gemini-test-high",availableModels=new[]{new {modelId="gemini-test-high",name="Gemini Test (High)"}}}}}); break;
                 case "session/set_model": case "session/set_mode": Send(new {id=id,result=new {}});break;
                 case "session/prompt":
+                    RecordQueuePrompt(line);
                     Send(new {method="session/update",@params=new {sessionId=sid,update=new {sessionUpdate="agent_thought_chunk",content=new {type="text",text="fixture"}}}});
                     while(Mode("thinking.hold")) Thread.Sleep(30);
                     string reply = Mode("goal-mode") ? GoalReply() : "Hello.";
@@ -297,7 +308,7 @@ class FixtureProvider {
             if(method=="initialized") continue;
             var p=(Dictionary<string,object>)msg["params"];
             var id=msg["id"];
-            if(method=="initialize") Send(new {id=id,result=new {}});
+            if(method=="initialize") { WaitForInit(); Send(new {id=id,result=new {}}); }
             if(method=="plugin/list"){
                 File.AppendAllText(Path.Combine(Dir,"browse.requests"),"list\n");
                 if(Mode("browse.fail")) { Send(new {id=id,error=new {code=-32000,message="Fixture marketplace offline"}}); continue; }
@@ -338,6 +349,7 @@ class FixtureProvider {
             }
             if(method=="thread/loaded/list") Send(new {id=id,result=new {data=new[]{session}}});
             if(method=="turn/start"){
+                RecordQueuePrompt(line);
                 if(File.Exists(Path.Combine(Dir,"record-inference")))
                     File.WriteAllText(Path.Combine(Dir,(studio ? "studio-"+studioKind+"-" : worker ? "worker-" : "lead-")+Guid.NewGuid()+".json"),Json.Serialize(p));
                 turn=Guid.NewGuid().ToString();
@@ -435,6 +447,12 @@ class FixtureProvider {
                 Send(new {id="assignment",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="call",tool="workshop_delegate",arguments=new {tasks=tasks}}});
             }
             if(method=="turn/steer"){
+                if(Mode("late-receipt")) {
+                    Done("The original turn has finished.");
+                    Send(new {id=id,error=new {code=-32000,message="Previous turn ended"}});
+                    continue;
+                }
+                if(Mode("reject-direction")) { Send(new {id=id,error=new {code=-32000,message="Turn no longer accepts directions"}}); continue; }
                 Send(new {id=id,result=new {}});
                 var direction=(Dictionary<string,object>)((System.Collections.IList)p["input"])[0];
                 Delivery((string)direction["text"]);

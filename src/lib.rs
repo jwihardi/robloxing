@@ -7,6 +7,7 @@ mod message_queue;
 pub use image_comparison::ImageComparison;
 pub mod provider;
 pub mod provider_permissions;
+mod run_state;
 pub mod screenshots;
 pub mod studio;
 pub mod team;
@@ -64,9 +65,7 @@ pub struct Store {
     _lock: File,
     worker: bool,
     worker_catalog: Mutex<std::sync::Arc<provider::CatalogSources>>,
-    controls: Mutex<
-        std::collections::HashMap<i64, tokio::sync::mpsc::UnboundedSender<provider::Control>>,
-    >,
+    controls: Mutex<std::collections::HashMap<i64, team::WorkerControl>>,
 }
 
 pub struct ChatMessage {
@@ -212,7 +211,6 @@ impl Store {
         let project = git::project(&folder)?;
         let mut db = Connection::open(dir.join("workshop.sqlite"))?;
         db.execute_batch(include_str!("schema.sql"))?;
-        db.execute("UPDATE queued_messages SET sending=0 WHERE sending=1", [])?;
         if !worker {
             db.execute(
                 "ATTACH DATABASE ?1 AS preferences",
@@ -228,6 +226,16 @@ impl Store {
             ("team_settings", "worker_effort", "TEXT NOT NULL DEFAULT ''"),
             (
                 "team_settings",
+                "override_worker_model",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "team_settings",
+                "override_worker_effort",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "team_settings",
                 "auto_delegate",
                 "INTEGER NOT NULL DEFAULT 1",
             ),
@@ -235,6 +243,7 @@ impl Store {
             ("workers", "effort", "TEXT"),
             ("attempts", "effort", "TEXT NOT NULL DEFAULT ''"),
             ("chat_goals", "recoverable", "INTEGER NOT NULL DEFAULT 0"),
+            ("queued_messages", "steering", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let missing: bool = tx.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
@@ -254,13 +263,14 @@ impl Store {
                 }
             }
         }
-        // Older databases acquire the recovery marker in the migration above.
-        tx.execute_batch("CREATE VIEW IF NOT EXISTS recoverable_goals AS
-            SELECT g.attempt,g.objective,g.detail FROM chat_goals g JOIN attempts a ON a.id=g.attempt
-            WHERE g.recoverable=1 AND g.status='paused' AND a.state='interrupted'
-              AND NOT EXISTS(SELECT 1 FROM attempts newer WHERE newer.task=a.task AND newer.id>a.id)
-              AND coalesce((SELECT kind FROM events WHERE attempt=a.id AND kind IN ('workshop/blocker','workshop/blocker_resolved')
-                            ORDER BY id DESC LIMIT 1),'') <> 'workshop/blocker'")?;
+        run_state::migrate(&tx)?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS pending_directions ON queued_messages(attempt,id) WHERE steering=1",
+        )?;
+        tx.execute(
+            "UPDATE queued_messages SET sending=0 WHERE sending=1 AND steering=0",
+            [],
+        )?;
         tx.commit()?;
         studio::reports::recover(&dir, &mut db)?;
         db.execute("UPDATE studio_jobs SET state='Interrupted', detail='Workshop closed during this run.' WHERE state IN ('Running','Queued')", [])?;
@@ -281,6 +291,7 @@ impl Store {
             controls: Default::default(),
         };
         store.recover_workers()?;
+        store.finish_pending_directions(None)?;
         store.db.lock().unwrap().execute(
             "UPDATE chat_goals SET status='paused',recoverable=1,
              detail=CASE WHEN detail='' THEN ?1 ELSE detail END WHERE status IN ('active','verifying')",
@@ -522,10 +533,13 @@ impl Store {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             ensure!(tx.query_row("SELECT count(*) FROM attempts WHERE state IN ('preparing','running','applying')", [], |r|r.get::<_,i64>(0))? == 0, "Finish the active operation first.");
-            let task = if let Some(id) = retry {
-                tx.query_row("SELECT task FROM attempts WHERE id=?1", [id], |r| {
-                    r.get::<_, i64>(0)
-                })?
+            let (task, inherit_queue) = if let Some(id) = retry {
+                tx.query_row(
+                    "SELECT a.task, a.session='' AND h.attempt=a.id FROM attempts a
+                     JOIN task_heads h ON h.task=a.task WHERE a.id=?1",
+                    [id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                )?
             } else {
                 tx.execute(
                     "INSERT INTO tasks(milestone,prompt) VALUES(1,?1)",
@@ -538,10 +552,16 @@ impl Store {
                         params![task, path.to_str().context("Unreadable attachment path")?],
                     )?;
                 }
-                task
+                (task, false)
             };
             tx.execute("INSERT INTO attempts(task,head,model,effort,provider,state,action) VALUES(?1,?2,?3,?4,?5,'preparing','Creating isolated copy')",params![task,head,model,effort,provider::provider_for(model)])?;
             let id = tx.last_insert_rowid();
+            if inherit_queue && let Some(previous) = retry {
+                tx.execute(
+                    "UPDATE queued_messages SET attempt=?1 WHERE attempt=?2 AND sending=0 AND steering=0",
+                    params![id, previous],
+                )?;
+            }
             if let Some(objective) = goal {
                 goals::set(&tx, id, objective)?;
             } else if let Some(previous) = retry {
@@ -572,42 +592,6 @@ impl Store {
         self.attempt(id)
     }
 
-    pub fn resume(&self, id: i64) -> Result<Attempt> {
-        self.resume_with_goal(id, None)
-    }
-
-    fn mark_resuming(db: &Connection, id: i64) -> Result<()> {
-        let changed = db.execute(
-            "UPDATE attempts SET state='running',action='Resuming session' WHERE id=?1
-             AND state IN ('interrupted','failed','cancelled','review')
-             AND NOT EXISTS (SELECT 1 FROM attempts WHERE state IN ('running','preparing','applying'))",
-            [id],
-        )?;
-        ensure!(changed == 1, "Finish the active operation first.");
-        Ok(())
-    }
-
-    pub fn resume_with_goal(&self, id: i64, objective: Option<&str>) -> Result<Attempt> {
-        let a = self.attempt(id)?;
-        ensure!(
-            !a.session.is_empty()
-                && matches!(
-                    a.state.as_str(),
-                    "interrupted" | "failed" | "cancelled" | "review"
-                ),
-            "This attempt has no resumable session."
-        );
-        {
-            let mut db = self.db.lock().unwrap();
-            let tx = db.transaction()?;
-            Self::mark_resuming(&tx, id)?;
-            if let Some(objective) = objective {
-                goals::set(&tx, id, objective)?;
-            }
-            tx.commit()?;
-        }
-        self.attempt(id)
-    }
     pub fn status(&self, id: i64, state: &str, action: &str) -> Result<()> {
         self.db.lock().unwrap().execute(
             "UPDATE attempts SET state=?2,action=?3 WHERE id=?1",
@@ -637,6 +621,19 @@ impl Store {
     ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        Self::insert_event(&tx, id, kind, action, image, message)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn insert_event(
+        tx: &rusqlite::Transaction<'_>,
+        id: i64,
+        kind: &str,
+        action: Option<&str>,
+        image: Option<&PathBuf>,
+        message: Option<&provider::Message>,
+    ) -> Result<i64> {
         if let Some(queued) = message.and_then(|m| m.queued_id) {
             ensure!(
                 tx.execute(
@@ -671,8 +668,7 @@ impl Store {
                 params![id, action],
             )?;
         }
-        tx.commit()?;
-        Ok(())
+        Ok(event)
     }
     pub fn session(&self, id: i64, session: &str) -> Result<()> {
         self.bind_session(id, session, "", "")

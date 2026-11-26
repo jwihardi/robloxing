@@ -16,7 +16,7 @@ pub struct WorkItem {
     pub queued_messages: i64,
 }
 
-// Each row is the latest attempt at a task. Read the same chat, worker and goal
+// Each row is the current attempt at a task. Read the same chat, worker and goal
 // records the scheduler writes, in a single SQLite snapshot.
 fn page(db: &Connection, offset: usize, limit: usize) -> Result<Vec<WorkItem>> {
     let mut stmt = db.prepare_cached(
@@ -26,14 +26,11 @@ fn page(db: &Connection, offset: usize, limit: usize) -> Result<Vec<WorkItem>> {
                   (SELECT detail FROM workers WHERE lead=a.id AND state='blocked' ORDER BY id LIMIT 1) worker_blocker,
                   (SELECT count(*) FROM workers WHERE lead=a.id AND state='running') running,
                   (SELECT count(*) FROM workers WHERE lead=a.id AND state='queued') waiting,
-                  (SELECT count(*) FROM queued_messages WHERE attempt=a.id) messages
-           FROM attempts a JOIN tasks t ON t.id=a.task
+                  (SELECT count(*) FROM queued_messages WHERE attempt=a.id AND sending=0) messages
+           FROM task_heads h JOIN attempts a ON a.id=h.attempt JOIN tasks t ON t.id=h.task
            LEFT JOIN chat_goals g ON g.attempt=a.id LEFT JOIN checkpoints c ON c.lead=a.id
-           LEFT JOIN events b ON b.id=(SELECT id FROM events WHERE attempt=a.id
-                 AND kind IN ('workshop/blocker','workshop/blocker_resolved') ORDER BY id DESC LIMIT 1)
-                 AND b.kind='workshop/blocker'
+           LEFT JOIN open_workshop_blockers b ON b.attempt=a.id
            WHERE a.state NOT IN ('accepted','discarded')
-             AND NOT EXISTS (SELECT 1 FROM attempts newer WHERE newer.task=a.task AND newer.id>a.id)
          ), ranked AS (
            SELECT *, CASE
              WHEN state='applying' AND action LIKE 'Acceptance needs attention.%' THEN 0
@@ -93,6 +90,7 @@ pub fn read(project: &Path, home: &Path, offset: usize, limit: usize) -> Result<
     }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .context("Could not read the project's work queue")?;
+    crate::run_state::prepare_reader(&db)?;
     page(&db, offset, limit)
 }
 
@@ -141,6 +139,79 @@ mod tests {
         assert_eq!((rows[0].id, rows[0].status), (paused.id, "Paused"));
         assert_eq!(rows[0].next_action, "Waiting for the playtest");
         assert_eq!(rows.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn resuming_an_older_attempt_moves_the_task_and_its_checkpoint_together() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let project = scratch.path().join("project");
+        let home = scratch.path().join("data");
+        let store = Store::open(&project, &home)?;
+        let first = store.prepare("Build the lobby", "", None)?;
+        store.session(first.id, "first-session")?;
+        store.queue_message(first.id, &"Review the doors".into())?;
+        store.finish(first.id, "review", "First pass")?;
+        let (retry, _) = store.retry_chat(first.id)?;
+        store.session(retry.id, "retry-session")?;
+        store.finish(retry.id, "cancelled", "Stopped")?;
+        assert!(read(&project, &home, 0, 1)?.is_empty());
+        let (_, queued) = store.resume_queued(first.id)?.unwrap();
+        let rows = read(&project, &home, 0, 1)?;
+        assert_eq!((rows[0].id, rows[0].status), (first.id, "In progress"));
+        store.message_event(first.id, "user/followup", &queued)?;
+        store.finish(first.id, "review", "Checked")?;
+        store.resume(retry.id)?;
+        store.finish(retry.id, "cancelled", "Stopped")?;
+        let objective = "Finish the doors";
+        store.resume_chat(first.id, objective.into(), Some(objective))?;
+        let mut goal = crate::goals::GoalRun::start(&store, first.id)?.unwrap();
+        store.report_goal(first.id, "progress", "Hung the left door")?;
+        goal.advance(&store, first.id)?;
+        drop(store);
+        let store = Store::open(&project, &home)?;
+        let rows = read(&project, &home, 0, 1)?;
+        assert_eq!((rows[0].id, rows[0].status), (first.id, "Paused"));
+        let (resumed, message) = store.resume_chat(first.id, objective.into(), Some(objective))?;
+        assert_eq!(resumed.session, "first-session");
+        assert!(message.text.contains("Hung the left door"));
+        assert!(store.recover_goal(None)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_status_handles_old_projects_without_migrating_them() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let project = scratch.path().join("project");
+        std::fs::create_dir(&project)?;
+        let home = scratch.path().join("data");
+        let dir = Store::project_data_dir(&project, &home)?;
+        std::fs::create_dir_all(&dir)?;
+        let db = Connection::open(dir.join("workshop.sqlite"))?;
+        db.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY,prompt TEXT);
+            CREATE TABLE attempts(id INTEGER PRIMARY KEY,task INTEGER,provider TEXT,state TEXT,action TEXT,patch TEXT);
+            CREATE TABLE events(id INTEGER PRIMARY KEY,attempt INTEGER,kind TEXT,summary TEXT);
+            INSERT INTO tasks VALUES(1,'Older project');
+            INSERT INTO attempts VALUES(1,1,'codex','running','Resuming',''),(2,1,'codex','cancelled','Stopped','');")?;
+        let rows = read(&project, &home, 0, 20)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].id, rows[0].status), (1, "In progress"));
+        assert!(!db.table_exists(None, "task_heads")?);
+        db.execute_batch(
+            "UPDATE attempts SET state='review',patch='asset' WHERE id=1;
+            INSERT INTO events VALUES(1,1,'user/followup','Earlier edit');",
+        )?;
+        // No evidence the old edit took place after the newer retry.
+        assert!(read(&project, &home, 0, 20)?.is_empty());
+        db.execute_batch("INSERT INTO events VALUES(2,2,'agent/message','Retry finished'),(3,1,'user/followup','Continue the original');")?;
+        let rows = read(&project, &home, 0, 20)?;
+        assert_eq!((rows[0].id, rows[0].status), (1, "Review"));
+        crate::run_state::migrate(&db)?;
+        assert_eq!(
+            db.query_row("SELECT attempt FROM task_heads WHERE task=1", [], |r| r
+                .get::<_, i64>(0))?,
+            1
+        );
         Ok(())
     }
 }

@@ -74,8 +74,8 @@ impl Store {
     ) -> Result<Option<ImageComparison>> {
         let input: Option<Option<String>> = db
             .query_row(
-                "SELECT i.path FROM events e LEFT JOIN event_images i ON i.event=e.id
-             WHERE e.attempt=?1 AND e.id<?2 AND e.kind IN ('user/followup','steer/sent')
+                "SELECT i.path FROM delivered_user_inputs e LEFT JOIN event_images i ON i.event=e.id
+             WHERE e.attempt=?1 AND e.id<?2
              ORDER BY e.id DESC LIMIT 1",
                 params![attempt, event],
                 |r| r.get(0),

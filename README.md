@@ -40,7 +40,7 @@ Open the model and effort pill beside Send. Select the header showing the effort
 
 In **Settings → Providers**, each provider shows how many tasks it can handle. Expand it to check or uncheck individual tasks across projects. **Choose providers** in task settings opens the same controls. Each provider has independent choices for workers, model design and decompilation summaries. Codex and Antigravity can also generate chat images. Clear a task for every provider to turn off its AI routing.
 
-Use **Settings → Tasks → Workers** to set allowed models and maximum effort. To customize one chat, open **Subagents** beside **+** and turn off **Use global defaults**. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
+Use **Settings → Tasks → Workers** to set global allowed models and maximum effort. For one project, `workshop-cli team --worker-model claude:sonnet` sets its worker model and `--worker-effort low` sets its effort limit. Each field you omit continues to use its existing setting. Run `workshop-cli team` to see the effective `worker_policy` or `workshop-cli team --inherit-workers` to restore the global defaults. To customize one chat, open **Subagents** beside **+** and turn off **Use global defaults** or **Use project defaults**. Turn it back on to follow future default changes. The lead can choose a different allowed model and a lower effort for each assignment. The parallel worker limit remains a project setting.
 
 While the lead is working, Enter or **Steer now** sends a correction to the current run. For a separate follow-up, open **Send options** beside the send arrow and choose **Send after this run**. Messages wait above the composer in the order you added them. You can remove one before it starts. Each follow-up starts after the preceding run finishes its checks. Stopping a run or encountering a failure pauses delivery. The queue stays with the chat after restart. Choose **Send next** to continue.
 
@@ -102,7 +102,7 @@ When the lead delegates, expand its dispatch in the conversation or open **Activ
 
 Workers edit separate Git copies. Workshop integrates their changes into the lead’s copy and checks the combined revision. Open **Activity → Project handoff** to see the proposed decisions and next task. **Accept change** applies the verified edit to your project and saves the handoff for future chats. A decision-only turn uses **Accept decisions**.
 
-**Chats → Work queue** shows what needs your attention across the current project. Each row gives the chat, provider, worker activity and next action. Open a row to answer a blocker, resume work or review a change. The queue uses the latest attempt for each task. A plain chat reply drops out of the queue when it finishes. From another terminal, `workshop-cli --project PATH status --json` reads the same queue while the desktop is running. Use `--offset` and `--limit` to page through it.
+**Chats → Work queue** shows what needs your attention across the current project. Each row gives the chat, provider, worker activity and next action. Open a row to answer a blocker, resume work or review a change. The queue follows the attempt you most recently started or resumed, including an older retry. A plain chat reply drops out of the queue when it finishes. From another terminal, `workshop-cli --project PATH status --json` reads the same queue while the desktop is running. Use `--offset` and `--limit` to page through it.
 
 After a shutdown interrupts an active goal, open the chat’s **Goal paused → Resume goal** or run `workshop-cli --project PATH recover-goal`. Both continue in the saved working copy with the original provider and last recorded progress. Pass a chat ID to the command to select a particular goal. Headless recovery skips manually paused goals and outstanding requests for your input. Completed changes follow the usual review and acceptance flow.
 
@@ -179,7 +179,7 @@ Search returns run IDs and up to eight matching function locations per run. Use 
 
 Use `team --parallelism 2` to enable the second worker. Use `team --check-args` with a JSON argument array such as `["cargo","test","--locked"]` to set the combined-revision check. The default is Git’s whitespace check. Worker state events include IDs for `/stop-worker ID` on stdin. After a turn, `agents ID` lists that chat’s assignments and handoff.
 
-On stdin, plain text steers the lead, `/steer-worker ID MESSAGE` directs one worker, and `/queue MESSAGE` adds a follow-up. After a stopped run, `workshop-cli send-next ID` continues that chat’s saved queue.
+On stdin, plain text steers the lead, `/steer-worker ID MESSAGE` directs one worker, and `/queue MESSAGE` adds a follow-up. The chat records a direction when Workshop sends it to the provider. If delivery is interrupted, the transcript shows the original direction with a delivery notice. After a stopped run, `workshop-cli send-next ID` continues that chat’s saved queue. If startup stopped before the provider saved a session, **Send next** reopens the original request in its working copy and delivers the follow-ups in order. **Retry** carries that queue into the new attempt.
 
 ## What acceptance applies
 

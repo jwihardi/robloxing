@@ -140,28 +140,47 @@ impl WorkerPolicy {
 
 impl Store {
     pub fn worker_defaults(&self) -> Result<WorkerPolicy> {
-        let row: Option<String> = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT policy FROM preferences.worker_defaults WHERE id=1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(policy) = row {
-            return Ok(serde_json::from_str(&policy)?);
-        }
-        let legacy = self.team_settings()?;
-        Ok(WorkerPolicy {
-            models: if legacy.worker_model.is_empty() {
+        Ok(self.worker_defaults_with_source()?.0)
+    }
+
+    /// Effective defaults and whether this project contributes either setting.
+    pub fn worker_defaults_with_source(&self) -> Result<(WorkerPolicy, bool)> {
+        let db = self.db.lock().unwrap();
+        let (model, effort, override_model, override_effort, global) = db.query_row(
+            "SELECT worker_model, worker_effort, override_worker_model, override_worker_effort,
+                    (SELECT policy FROM preferences.worker_defaults WHERE id=1)
+             FROM team_settings WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        let uses_project = override_model
+            || override_effort
+            || (global.is_none() && (!model.is_empty() || !effort.is_empty()));
+        let mut policy: WorkerPolicy = global
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        // Before global defaults existed, projects stored both fields here.
+        if override_model || global.is_none() {
+            policy.models = if model.is_empty() {
                 vec![]
             } else {
-                vec![legacy.worker_model]
-            },
-            max_effort: legacy.worker_effort,
-        })
+                vec![model]
+            };
+        }
+        if override_effort || global.is_none() {
+            policy.max_effort = effort;
+        }
+        Ok((policy, uses_project))
     }
 
     pub fn save_worker_defaults(&self, policy: &WorkerPolicy) -> Result<()> {
@@ -272,35 +291,35 @@ impl Store {
             !sources.is_empty(),
             "The allowed models for {task} do not match an enabled provider. Check the model choices and Settings → Providers."
         );
-        if policy.models.is_empty() {
-            if model.is_empty() && sources.contains(&preferred) {
-                sources.retain(|p| *p == preferred);
-            }
-            if model.is_empty()
-                && effort.is_empty()
-                && policy.max_effort.is_empty()
-                && (sources.len() == 1 || sources[0] == "codex")
-            {
-                let source = sources[0];
-                let selection = if source == "codex" {
-                    String::new()
-                } else {
-                    format!("{source}:default")
-                };
-                return Ok((selection, String::new()));
-            }
+        let inherited_model = policy.models.is_empty() && model.is_empty();
+        if inherited_model && sources.contains(&preferred) {
+            sources.retain(|p| *p == preferred);
+        }
+        let use_native_default =
+            inherited_model && effort.is_empty() && policy.max_effort.is_empty();
+        let native_default = |source: &str| {
+            let selection = if source == "codex" {
+                String::new()
+            } else {
+                format!("{source}:default")
+            };
+            (selection, String::new())
+        };
+        if use_native_default && sources.len() == 1 {
+            return Ok(native_default(sources[0]));
         }
         let cache = self.worker_catalog.lock().unwrap().clone();
         let mut errors = Vec::new();
         for source in sources {
-            let available = match cache.get(&self.project, source).await {
-                Ok(catalog) => catalog,
-                Err(e) => {
-                    errors.push(format!("{source}: {e:#}"));
-                    continue;
+            let choice = cache.get(&self.project, source).await.and_then(|catalog| {
+                if use_native_default {
+                    ensure!(!catalog.models.is_empty(), "Provider returned no models");
+                    Ok(native_default(source))
+                } else {
+                    policy.resolve(model, effort, catalog, source)
                 }
-            };
-            match policy.resolve(model, effort, available, source) {
+            });
+            match choice {
                 Ok(choice) => return Ok(choice),
                 Err(e) => errors.push(format!("{source}: {e:#}")),
             }

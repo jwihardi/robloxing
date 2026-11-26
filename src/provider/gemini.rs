@@ -510,7 +510,7 @@ pub(super) async fn exchange(
     if let Some(pref) = team_preference(store, a.id)? {
         first.push(json!({"type":"text","text":pref}));
     }
-    let mut queued = VecDeque::from([first]);
+    let mut queued = VecDeque::from([(first, None::<Message>)]);
     let mut waiting = io.session.is_empty();
     let mut first_prompt = true;
     let mut thinking = false;
@@ -534,7 +534,7 @@ pub(super) async fn exchange(
     loop {
         if !waiting
             && !started
-            && let Some(blocks) = queued.pop_front()
+            && let Some((blocks, direction)) = queued.pop_front()
         {
             rpc(
                 &mut io.stdin,
@@ -548,6 +548,9 @@ pub(super) async fn exchange(
             if first_prompt {
                 prompt.record_followup(store, a, notify)?;
                 first_prompt = false;
+            }
+            if let Some(direction) = direction {
+                direction.record_direction(store, a.id, notify)?;
             }
             started = true;
         }
@@ -566,10 +569,9 @@ pub(super) async fn exchange(
                     Some(Control::Queue(message)) => store.queue_message(a.id, &message)?,
                     Some(Control::Steer(message)) => match content(&message) {
                         Ok(blocks) => {
-                            queued.push_back(blocks);
-                            store.message_event(a.id, "steer/sent", &message)?;
+                            queued.push_back((blocks, Some(store.stage_direction(a.id, message)?)));
                         }
-                        Err(e) => store.event(a.id, "steer/unavailable", Some(&e.to_string()))?,
+                        Err(e) => store.direction_unavailable(a.id, &message, &e.to_string())?,
                     },
                     Some(Control::SteerWorker(id, direction)) => route_worker_direction(store, a.id, id, &direction, notify)?,
                     Some(Control::StopWorker(id)) => {
@@ -699,7 +701,7 @@ pub(super) async fn exchange(
                     } else {
                         "Gemini has disabled Workshop tools in this checkout. To use workers, trust this project in Settings → Providers → Gemini project tools. If it is already trusted, check the Gemini MCP policy."
                     };
-                    if let Some(first) = queued.front_mut() {
+                    if let Some((first, _)) = queued.front_mut() {
                         first.push(json!({"type":"text","text":format!("{notice} If asked to delegate, explain how to enable Workshop tools.")}));
                     }
                     if store.worker {
@@ -773,7 +775,7 @@ pub(super) async fn exchange(
                     {
                         Finish::Done => return Ok(true),
                         Finish::Cancelled => return Ok(false),
-                        Finish::Continue(m) => queued.push_back(content(&m)?),
+                        Finish::Continue(m) => queued.push_back((content(&m)?, Some(m))),
                     }
                 } else {
                     repairs.reset_goal_reports(store, a.id)?;

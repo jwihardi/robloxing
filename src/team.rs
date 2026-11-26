@@ -12,6 +12,10 @@ pub struct Settings {
     pub worker_model: String,
     pub lead_effort: String,
     pub worker_effort: String,
+    #[serde(default)]
+    pub override_worker_model: bool,
+    #[serde(default)]
+    pub override_worker_effort: bool,
     pub parallelism: usize,
     pub auto_delegate: bool,
     pub check_args: Vec<String>,
@@ -44,6 +48,12 @@ pub struct Worker {
     pub tokens: Option<i64>,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+pub(crate) struct WorkerControl {
+    input: tokio::sync::mpsc::UnboundedSender<provider::Control>,
+    // Taken when discovery finishes so later directions use live steering.
+    preparing: Option<Vec<provider::Message>>,
 }
 
 fn clipped(s: &str, limit: usize) -> String {
@@ -134,7 +144,8 @@ impl Store {
     pub fn team_settings(&self) -> Result<Settings> {
         let (mut settings, argv) = self.db.lock().unwrap().query_row(
             "SELECT lead_model, worker_model, parallelism, check_args, lead_effort,
-                    worker_effort, auto_delegate FROM team_settings WHERE id=1",
+                    worker_effort, auto_delegate, override_worker_model, override_worker_effort
+             FROM team_settings WHERE id=1",
             [],
             |row| {
                 Ok((
@@ -145,6 +156,8 @@ impl Store {
                         lead_effort: row.get(4)?,
                         worker_effort: row.get(5)?,
                         auto_delegate: row.get(6)?,
+                        override_worker_model: row.get(7)?,
+                        override_worker_effort: row.get(8)?,
                         check_args: Vec::new(),
                     },
                     row.get::<_, String>(3)?,
@@ -166,9 +179,17 @@ impl Store {
                 .is_none_or(|x| !x.trim().is_empty()),
             "Choose a check executable"
         );
+        if settings.override_worker_effort {
+            ensure!(
+                settings.worker_effort.is_empty()
+                    || crate::worker_policy::EFFORTS.contains(&settings.worker_effort.as_str()),
+                "Unknown maximum worker effort"
+            );
+        }
         self.db.lock().unwrap().execute(
             "UPDATE team_settings SET lead_model=?1, worker_model=?2, parallelism=?3,
-             check_args=?4, lead_effort=?5, worker_effort=?6, auto_delegate=?7 WHERE id=1",
+             check_args=?4, lead_effort=?5, worker_effort=?6, auto_delegate=?7,
+             override_worker_model=?8, override_worker_effort=?9 WHERE id=1",
             params![
                 settings.lead_model.trim(),
                 settings.worker_model.trim(),
@@ -176,7 +197,9 @@ impl Store {
                 serde_json::to_string(&settings.check_args)?,
                 settings.lead_effort,
                 settings.worker_effort,
-                settings.auto_delegate
+                settings.auto_delegate,
+                settings.override_worker_model,
+                settings.override_worker_effort
             ],
         )?;
         Ok(())
@@ -309,6 +332,7 @@ impl Store {
         if self.worker {
             return Ok(());
         }
+        self.cancel_preparing_directions(None, None)?;
         let pending: Vec<(i64, i64, Option<i64>, String)> = {
             let db = self.db.lock().unwrap();
             let mut q = db.prepare(
@@ -382,7 +406,7 @@ impl Store {
     fn assignment_context(&self, lead: i64, assignment: &Assignment) -> Result<String> {
         let attempt = self.attempt(lead)?;
         let latest: Option<String> = self.db.lock().unwrap().query_row(
-            "SELECT summary FROM events WHERE attempt=?1 AND kind='user/followup' ORDER BY id DESC LIMIT 1",
+            "SELECT summary FROM delivered_user_inputs WHERE attempt=?1 ORDER BY id DESC LIMIT 1",
             [lead], |row| row.get(0),
         ).optional()?;
         let mut context = format!("Project request: {}", clipped(&attempt.prompt, 3500));
@@ -474,6 +498,7 @@ impl Store {
     }
     pub(crate) fn interrupt_workers(&self, lead: i64, cancelled: bool) -> Result<()> {
         self.controls.lock().unwrap().clear();
+        self.cancel_preparing_directions(Some(lead), None)?;
         let reason = if cancelled {
             "Interrupted by the creator. Resume to retry this assignment."
         } else {
@@ -492,6 +517,7 @@ impl Store {
             .unwrap()
             .get(&worker)
             .context("Worker has already stopped")?
+            .input
             .send(provider::Control::Cancel)
             .map_err(|_| anyhow::anyhow!("Worker has already stopped"))
     }
@@ -500,17 +526,37 @@ impl Store {
             !message.text.trim().is_empty() || !message.files.is_empty(),
             "Enter a direction for this worker."
         );
-        let controls = self.controls.lock().unwrap();
+        let mut controls = self.controls.lock().unwrap();
         let worker = self
             .workers(lead)?
             .into_iter()
             .find(|w| w.id == id && w.state == "running")
             .context("This worker has finished. Your direction was not sent.")?;
+        let control = controls.get_mut(&id).context("This worker has stopped.")?;
+        if let Some(preparing) = &mut control.preparing {
+            let receipt = format!("Queued for {} · {}", worker.assignment.title, message.text);
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            let event = Self::insert_event(
+                &tx,
+                lead,
+                "worker/direction",
+                Some(&receipt),
+                self.attached_chat_image(&message.files),
+                Some(&message),
+            )?;
+            tx.execute(
+                "INSERT INTO pending_worker_directions(event,worker) VALUES(?1,?2)",
+                params![event, id],
+            )?;
+            tx.commit()?;
+            preparing.push(message);
+            return Ok(());
+        }
         let receipt = format!("To {} · {}", worker.assignment.title, message.text);
         let image = self.attached_chat_image(&message.files).cloned();
-        controls
-            .get(&id)
-            .context("This worker has stopped.")?
+        control
+            .input
             .send(provider::Control::Steer(message))
             .map_err(|_| anyhow::anyhow!("This worker has stopped."))?;
         self.event_with_image(
@@ -520,6 +566,25 @@ impl Store {
             image.as_ref(),
             None,
         )
+    }
+
+    fn cancel_preparing_directions(&self, lead: Option<i64>, worker: Option<i64>) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "UPDATE events SET kind='worker/delivery_error',
+                 summary='The worker stopped before delivery could be confirmed.' || char(10) || summary
+             WHERE id IN (SELECT p.event FROM pending_worker_directions p JOIN workers w ON w.id=p.worker
+                          WHERE (?1 IS NULL OR w.lead=?1) AND (?2 IS NULL OR w.id=?2))",
+            params![lead,worker],
+        )?;
+        tx.execute(
+            "DELETE FROM pending_worker_directions WHERE event IN
+             (SELECT p.event FROM pending_worker_directions p JOIN events e ON e.id=p.event WHERE e.kind='worker/delivery_error')",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     async fn run_assignment(
         &self,
@@ -532,22 +597,23 @@ impl Store {
         let lead_provider = self.attempt(lead)?.provider;
         let mut directions = String::new();
         let mut files = std::collections::BTreeSet::new();
-        let inference = self.worker_inference(policy, &w.assignment, &lead_provider);
-        tokio::pin!(inference);
-        let (model, effort) = loop {
-            tokio::select! {
-                biased;
-                input = controls.recv() => match input {
-                    Some(provider::Control::Steer(message)) => {
-                        directions.push_str("\nCreator direction: ");
-                        directions.push_str(&message.text);
-                        files.extend(message.files);
-                    }
-                    _ => anyhow::bail!("Worker stopped during preparation"),
-                },
-                result = &mut inference => break result?,
-            }
+        let (model, effort) = tokio::select! {
+            biased;
+            _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
+            result = self.worker_inference(policy, &w.assignment, &lead_provider) => result?,
         };
+        let preparing = self
+            .controls
+            .lock()
+            .unwrap()
+            .get_mut(&w.id)
+            .and_then(|control| control.preparing.take())
+            .context("Worker stopped during preparation")?;
+        for message in preparing {
+            directions.push_str("\nCreator direction: ");
+            directions.push_str(&message.text);
+            files.extend(message.files);
+        }
         let child = self.child_store(lead, w.id)?;
         let last = if let Some(run) = w.run {
             let previous = child.attempt(run)?;
@@ -584,6 +650,16 @@ impl Store {
         let result = provider::worker_turn(&child, &a, controls, &|event| {
             let updated = match event {
                 provider::ReplyUpdate::AccountUsage(..) => return notify(event),
+                provider::ReplyUpdate::WorkerPromptSent => self
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "DELETE FROM pending_worker_directions WHERE worker=?1",
+                        [w.id],
+                    )
+                    .map(|_| ())
+                    .map_err(Into::into),
                 provider::ReplyUpdate::TranscriptChanged => (|| {
                     for message in child.messages_after(a.id, last_event.get())? {
                         last_event.set(message.id);
@@ -646,6 +722,7 @@ impl Store {
             .run_assignment(lead, &w, policy, controls, notify)
             .await;
         self.controls.lock().unwrap().remove(&w.id);
+        self.cancel_preparing_directions(Some(lead), Some(w.id))?;
         if let Err(e) = result {
             self.block_worker(w.id, &format!("{e:#}"))?;
             notify(provider::ReplyUpdate::WorkersChanged);
@@ -663,13 +740,13 @@ impl Store {
     }
     fn check_patch(&self, lead: &Attempt) -> Result<()> {
         let work = self.work(lead.id);
-        let (tree, _) = git::capture(&work, &lead.base)?;
+        let tree = git::working_tree(&work)?;
         git::git(&work, &["diff", "--check", &lead.base, &tree])?;
         Ok(())
     }
     async fn verify_combined(&self, lead: &Attempt, settings: &Settings) -> Result<()> {
         let work = self.work(lead.id);
-        let (tree, _) = git::capture(&work, &lead.base)?;
+        let tree = git::working_tree(&work)?;
         if self.verified(lead.id, &tree, settings)? {
             return Ok(());
         }
@@ -681,7 +758,7 @@ impl Store {
             .await
             .context("Project check timed out after five minutes")??;
             ensure!(
-                git::capture(&work, &lead.base)?.0 == tree,
+                git::working_tree(&work)? == tree,
                 "The check modified the files being verified"
             );
         } else {
@@ -699,9 +776,9 @@ impl Store {
     }
     pub(crate) fn has_open_blocker(&self, id: i64) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row(
-            "SELECT COALESCE((SELECT kind='workshop/blocker' FROM events WHERE attempt=?1
-             AND kind IN ('workshop/blocker','workshop/blocker_resolved') ORDER BY id DESC LIMIT 1),0)",
-            [id], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM open_workshop_blockers WHERE attempt=?1)",
+            [id],
+            |row| row.get(0),
         )?)
     }
     pub fn candidate_ready(&self, a: &Attempt, workers: &[Worker]) -> Result<bool> {
@@ -808,7 +885,13 @@ impl Store {
                     [w.id],
                 )?;
                 let (tx, rx) = provider::channel();
-                self.controls.lock().unwrap().insert(w.id, tx);
+                self.controls.lock().unwrap().insert(
+                    w.id,
+                    WorkerControl {
+                        input: tx,
+                        preparing: Some(Vec::new()),
+                    },
+                );
                 running.push(self.drive_worker(lead.id, w.clone(), &policy, rx, notify));
             }
             notify(provider::ReplyUpdate::WorkersChanged);
