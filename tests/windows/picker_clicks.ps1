@@ -557,6 +557,8 @@ function Test-DeleteChats {
 function Test-TranscriptScroll {
     $hold = Join-Path $root 'scroll.hold'
     [void](New-Item -ItemType File -Path $hold)
+    $toolHold = Join-Path $root 'tool.hold'
+    [void](New-Item -ItemType File -Path $toolHold)
     $field = 'Message Codex'
     function DraftText($text) { (Named $field).GetCurrentPattern($valuePattern).SetValue($text) }
     function BottomGap($name) {
@@ -568,6 +570,7 @@ function Test-TranscriptScroll {
         $inputRect = (Named $field).Current.BoundingRectangle
         $x = [int]($inputRect.Left + $inputRect.Width/2)
         $y = [int]($inputRect.Top - 120)
+        if ($status = Named 'Codex is working') { $y = [int]($status.Current.BoundingRectangle.Top - 120) }
         $point = [WorkshopPointer+Point]::new()
         $point.X = $x; $point.Y = $y
         [void][WorkshopPointer]::ScreenToClient($appWindow, [ref]$point)
@@ -576,7 +579,10 @@ function Test-TranscriptScroll {
     }
     DraftText 'Send a long reply'
     Click 'Send message'
-    Wait-For { (Named 'part-15.zip') -and (BottomGap 'part-15.zip') -gt 0 -and (BottomGap 'part-15.zip') -lt 160 } 'bottom of the streaming reply'
+    Wait-For { (Named 'Codex is working') -and (Named 'Running JavaScript…') } 'working indicator names the active tool'
+    Remove-Item -LiteralPath $toolHold
+    Wait-For { (Named 'Codex is working') -and (Named 'part-15.zip') -and (BottomGap 'part-15.zip') -lt 230 -and
+        (Named 'part-15.zip').Current.BoundingRectangle.Bottom -le (Named 'Codex is working').Current.BoundingRectangle.Top } 'streaming reply above the working indicator'
     $gap = BottomGap 'part-15.zip'
     $inputTop = (Named $field).Current.BoundingRectangle.Top
     DraftText ((1..7 | ForEach-Object { "Draft line $_" }) -join [Environment]::NewLine)
@@ -584,13 +590,16 @@ function Test-TranscriptScroll {
     DraftText ''
     Wait-For { [Math]::Abs((Named $field).Current.BoundingRectangle.Top - $inputTop) -lt 4 -and [Math]::Abs((BottomGap 'part-15.zip') - $gap) -lt 4 } 'shrinking the composer stays at the bottom'
     $anchor = 'part-13.zip'
+    $statusTop = (Named 'Codex is working').Current.BoundingRectangle.Top
     $before = (Named $anchor).Current.BoundingRectangle.Top
     Wheel 240
     Wait-For { (Named $anchor).Current.BoundingRectangle.Top -gt $before + 12 } 'manually scrolling up in the transcript'
+    if ([Math]::Abs((Named 'Codex is working').Current.BoundingRectangle.Top - $statusTop) -gt 2) { throw 'Working indicator scrolled away with the transcript' }
+    Save-PrivateWindow (Join-Path $root 'chat-working.png')
     Start-Sleep -Milliseconds 400
     $reading = (Named $anchor).Current.BoundingRectangle.Top
     Remove-Item -LiteralPath $hold
-    Wait-For { !(Named 'Stop response') -and (Named $anchor) } 'stream finalized while reading'
+    Wait-For { !(Named 'Codex is working') -and !(Named 'Stop response') -and (Named $anchor) } 'stream finalized while reading'
     if ([Math]::Abs((Named $anchor).Current.BoundingRectangle.Top - $reading) -gt 4) { throw 'Finalizing the reply moved the reading position' }
     Wheel -2400
     Wait-For { (Named 'finished.zip') -and (BottomGap 'finished.zip') -gt 0 -and (BottomGap 'finished.zip') -lt 160 } 'scrolling back to the newest message'
@@ -1364,7 +1373,7 @@ try {
         (Named 'Message Claude').GetCurrentPattern($valuePattern).SetValue('Usage fixture greeting')
         Set-Content (Join-Path $root 'thinking.hold') 'thinking'
         Click 'Send message'
-        Wait-For { (Named 'Thinking…') -and (Named 'Stop response') } 'live Claude thinking status'
+        Wait-For { (Named 'Claude is working') -and (Named 'Thinking…') -and (Named 'Stop response') } 'live Claude thinking status'
         Save-PrivateWindow (Join-Path $root 'thinking.png')
         Remove-Item -LiteralPath (Join-Path $root 'thinking.hold')
         Wait-For { (Named 'New chat').Current.IsEnabled -and (Named '73%') } 'context after a Claude turn'

@@ -222,6 +222,7 @@ impl Message {
 }
 fn tool_activity(name: &str) -> &str {
     match name.rsplit("__").next().unwrap_or(name) {
+        "js" => "Running JavaScript…",
         "generate_image" | "image_generation" | "imagegen" => "Generating an image…",
         "workshop_delegate" => "Dispatching subagents…",
         "workshop_generate_asset" => "Preparing the asset…",

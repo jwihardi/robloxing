@@ -776,6 +776,7 @@ impl App {
             }
             rows.push(turn);
         }
+        ui.set_active_worker_count(workers.iter().filter(|w| w.running).count() as i32);
         ui.set_workers(ModelRc::new(VecModel::from(workers)));
         if switching {
             self.turns.set_vec(rows);

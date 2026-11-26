@@ -2,12 +2,15 @@ import { ProgressIndicator } from "std-widgets.slint";
 
 export component ActivityLine inherits HorizontalLayout {
     in property <string> label;
+    in property <string> heading;
     spacing: 8px;
     height: 24px;
     VerticalLayout {
         width: 24px; alignment: center;
         ProgressIndicator { indeterminate: true; height: 4px; }
     }
+    if root.heading != "": Text { text: root.heading; color: Theme.text; font-size: 14px; font-weight: 600;
+        vertical-alignment: center; horizontal-stretch: 0; }
     Text { text: root.label; color: Theme.muted; font-size: 14px; min-width: 0px;
         horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
 }

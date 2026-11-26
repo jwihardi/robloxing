@@ -456,6 +456,8 @@ class FixtureProvider {
                     continue;
                 }
                 if (Mode("scroll.hold")) {
+                    Send(new {method="item/started",@params=new {threadId=session,turnId=turn,item=new {type="mcpToolCall",tool="js"}}});
+                    while (Mode("tool.hold")) Thread.Sleep(30);
                     var reply = new System.Text.StringBuilder();
                     for (int i=0; i<16; i++) reply.AppendFormat("[Part {0}](part-{0}.zip)\n\n", i);
                     Send(new {method="item/agentMessage/delta",@params=new {threadId=session,turnId=turn,itemId="reply",delta=reply.ToString()}});

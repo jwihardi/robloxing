@@ -368,6 +368,7 @@ export component Desk inherits Window {
     in property <[SettingRow]> settings-rows;
     in property <string> settings-status;
     in property <string> live-activity;
+    in property <int> active-worker-count;
     in property <bool> settings-working;
     in property <string> settings-working-id;
     in property <bool> more-plugins;
@@ -710,7 +711,7 @@ export component Desk inherits Window {
                 }
             }
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: goal-summary.y + goal-summary.height; width: pane.measure;
-            height: max(0px, queue-strip.y - self.y - 18px);
+            height: max(0px, work-status.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 18px; padding-bottom: 10px; spacing: 24px; alignment: start;
@@ -801,7 +802,6 @@ export component Desk inherits Window {
                 if !root.later-messages && root.running && root.partial != "": ReplyView {
                     provider: root.chat-provider; body: root.partial; streaming: true;
                 }
-                if !root.later-messages && root.running && root.live-activity != "": ActivityLine { label: root.live-activity; }
                 if root.show-chat-status: HorizontalLayout {
                     spacing: 12px;
                     Rectangle { width: 3px; border-radius: 1.5px;
@@ -815,6 +815,16 @@ export component Desk inherits Window {
                             accessible-label: "Task status details"; }
                     }
                 }
+            }
+        }
+        work-status := Rectangle {
+            x: composer.x; width: composer.width;
+            height: root.running ? 32px : 0px;
+            y: queue-strip.y - self.height;
+            if root.running: ActivityLine {
+                width: parent.width; heading: root.chat-provider + " is working";
+                label: root.live-activity != "" ? root.live-activity : root.active-worker-count == 1 ? "1 active subagent"
+                    : root.active-worker-count > 1 ? root.active-worker-count + " active subagents" : "";
             }
         }
         queue-strip := VerticalLayout {
