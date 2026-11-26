@@ -1279,6 +1279,13 @@ impl App {
             ui.set_context_meter(context_meter(store.context_usage(a)?, false));
             ui.set_state_label(title(&a.state).into());
             ui.set_action(a.action.as_str().into());
+            ui.set_blocker_detail(
+                a.action
+                    .strip_prefix("Task blocked:")
+                    .unwrap_or_default()
+                    .trim()
+                    .into(),
+            );
             ui.set_model_name(model_label(&self.catalog.borrow(), &a.model).into());
             let done = matches!(
                 a.state.as_str(),

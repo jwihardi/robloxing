@@ -469,7 +469,8 @@ class FixtureProvider {
                 }
                 if (Mode("blocker")) {
                     File.WriteAllText("answer.txt","partial");
-                    Send(new {id="block",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="block",tool="workshop_blocked",arguments=new {reason="Missing release input"}}});
+                    var reason = File.ReadAllText(Path.Combine(Dir, "blocker")).Trim();
+                    Send(new {id="block",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="block",tool="workshop_blocked",arguments=new {reason=reason.Length > 0 ? reason : "Missing release input"}}});
                     continue;
                 }
                 if (Mode("runner-error")) {

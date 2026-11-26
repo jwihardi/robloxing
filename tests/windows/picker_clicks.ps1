@@ -1445,11 +1445,23 @@ try {
         Click 'Work queue'
         Wait-For { Named 'No open work.' } 'empty work queue'
         Click 'Back to chats'
-        Set-Content (Join-Path $root 'blocker') 'missing fixture input'
+        $reason = 'Which group should get access to the playtest? Two groups match the name you gave. Send the group link so I can share the build with the right players.'
+        Set-Content (Join-Path $root 'blocker') $reason
         (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Prepare the release')
         Click 'Send message'
         $cli = Join-Path (Split-Path -Parent $exe) 'workshop-cli.exe'
         Wait-For { ((& $cli --project $project status --json) -join ' ') -match 'Needs attention' } 'recorded blocker' 20
+        Wait-For { ($detail = Named 'Task status details') -and $detail.GetCurrentPattern($valuePattern).Current.Value -eq $reason } 'complete blocker in the transcript'
+        if (!(Named 'Needs attention')) { throw 'Blocker heading is missing' }
+        $footer = Named 'Status message'
+        if ($footer -and $footer.GetCurrentPattern($valuePattern).Current.Value.Contains($reason)) { throw 'Blocker duplicated below the composer' }
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('I have the group link.')
+        Save-PrivateWindow (Join-Path $root 'chat-blocked.png')
+        $scale = [WorkshopPointer]::GetDpiForWindow($appWindow) / 96.0
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](680*$scale),[int](620*$scale),0x16)
+        Wait-For { (Named 'Show sidebar') -and (Named 'Task status details').Current.BoundingRectangle.Bottom -lt (Named 'Message Codex').Current.BoundingRectangle.Top } 'blocker fits above the compact reply field'
+        Save-PrivateWindow (Join-Path $root 'chat-blocked-compact.png')
+        [void][WorkshopPointer]::SetWindowPos($appWindow,0,0,0,[int](1150*$scale),[int](760*$scale),0x16)
         Click 'Work queue'
         Wait-For { Named 'Needs attention' } 'blocked chat in queue'
         $items = @((& $cli --project $project status --json) | ConvertFrom-Json)

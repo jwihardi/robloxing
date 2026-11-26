@@ -451,6 +451,9 @@ export component Desk inherits Window {
     in property <string> chat-provider: "Codex";
     in property <string> model-name;
     in property <string> action;
+    in property <string> blocker-detail;
+    private property <bool> show-chat-status: !root.home && !root.later-messages && root.action != ""
+        && (root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled");
     in property <bool> can-review;
     in property <bool> can-discard;
     in property <bool> can-resume;
@@ -461,7 +464,8 @@ export component Desk inherits Window {
     in property <bool> running;
     in-out property <string> draft;
     in property <string> notice;
-    private property <string> feedback-text: root.notice != "" ? root.notice : root.catalog-status;
+    private property <string> feedback-text: root.notice != "" && !(root.show-chat-status && root.notice == root.action)
+        ? root.notice : root.catalog-status;
     callback open-project();
     callback select-row(int);
     callback operate(string);
@@ -798,8 +802,18 @@ export component Desk inherits Window {
                     provider: root.chat-provider; body: root.partial; streaming: true;
                 }
                 if !root.later-messages && root.running && root.live-activity != "": ActivityLine { label: root.live-activity; }
-                if !root.home && (root.state-label == "Failed" || root.state-label == "Interrupted" || root.state-label == "Cancelled"): Text {
-                    text: root.action; color: Theme.state-color(root.state-label); font-size: 14px; wrap: word-wrap;
+                if root.show-chat-status: HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle { width: 3px; border-radius: 1.5px;
+                        background: root.blocker-detail != "" ? Theme.halfway : Theme.state-color(root.state-label);
+                    }
+                    VerticalLayout { spacing: 5px; padding-top: 2px; padding-bottom: 2px;
+                        Text { text: root.blocker-detail != "" ? "Needs attention" : root.state-label;
+                            color: Theme.text; font-size: 14px; font-weight: 600; }
+                        TextInput { text: root.blocker-detail != "" ? root.blocker-detail : root.action;
+                            read-only: true; single-line: false; wrap: word-wrap; color: Theme.muted; font-size: 14px;
+                            accessible-label: "Task status details"; }
+                    }
                 }
             }
         }
