@@ -27,6 +27,8 @@ class FixtureProvider {
         Send(new { method="turn/completed", @params=new {threadId=session,turn=new {id=turn,status="completed"}} });
     }
     static object Assignment(string key, params string[] dependencies) {
+        if (key == "left" && Mode("level-design"))
+            return new {key=key, specialty="level_design", title="Write left", deliverable="Block out the map", acceptance="File contains its name", files=new[]{"left.txt"}, depends_on=dependencies};
         return new {key=key,title="Write "+key,deliverable="Write "+key+".txt",acceptance="File contains its name",files=new[]{File.Exists(Path.Combine(Dir,"overlap"))?".":key+".txt"},depends_on=dependencies};
     }
     static bool Mode(string name) { return File.Exists(Path.Combine(Dir, name)); }

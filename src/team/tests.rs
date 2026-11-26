@@ -204,6 +204,7 @@ fn posted_image_survives_project_edits_and_restricts_sources_to_the_working_copy
 
 fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
     Assignment {
+        specialty: None,
         key: key.into(),
         model: String::new(),
         effort: String::new(),
@@ -796,6 +797,73 @@ fn worker_launch_enforces_model_list_and_supported_effort_ceiling() -> Result<()
 }
 
 #[tokio::test]
+async fn design_workers_apply_the_specialty_and_chat_limits_together() -> Result<()> {
+    use crate::studio::settings::TaskSettings;
+    let tmp = tempdir()?;
+    let home = tmp.path().join("home");
+    let store = Store::open(&tmp.path().join("project"), &home)?;
+    let lead = store.prepare("Build a level", "", None)?;
+    let models = ["gpt-6.2-astra", "gpt-6.2-sol", "claude:sonnet"];
+    store.cache_worker_catalog(&provider::Catalog {
+        models: serde_json::from_value(json!(models.map(|model| json!({
+            "model": model, "isDefault": model == models[0], "defaultReasoningEffort": "high",
+            "supportedReasoningEfforts": [{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
+        }))))?,
+        default_model: models[0].into(),
+        default_effort: "high".into(),
+    });
+    let general = WorkerPolicy {
+        models: models.into_iter().map(str::to_owned).collect(),
+        max_effort: "high".into(),
+    };
+    store.save_worker_defaults(&general)?;
+    let mut design = TaskSettings::default();
+    design.agent.models = vec!["claude:sonnet".into()];
+    design.agent.max_effort = "medium".into();
+    design.save(&home, "LevelDesign")?;
+    let mut level = assignment("blockout", &[], &[]);
+    level.specialty = Some(WorkerSpecialty::LevelDesign);
+    let routine = assignment("scoreboard", &[], &[]);
+    store.queue(lead.id, &[level.clone(), routine.clone()])?;
+    for w in store.workers(lead.id)? {
+        let limits = w.limits.unwrap();
+        let routing = w.assignment.routing();
+        let chosen = store
+            .select_inference(TaskRole::Workers, &limits, "", "", "codex", routing)
+            .await?;
+        if w.assignment == level {
+            assert_eq!(limits.policy, design.agent);
+            assert_eq!(chosen, ("claude:sonnet".into(), "medium".into()));
+            assert!(
+                store
+                    .select_inference(TaskRole::Workers, &limits, models[0], "", "codex", routing)
+                    .await
+                    .is_err()
+            );
+        } else {
+            assert_eq!(limits.policy, general);
+            assert_eq!(chosen, ("gpt-6.2-sol".into(), "low".into()));
+        }
+    }
+    let policy = WorkerPolicy {
+        models: vec!["claude:sonnet".into()],
+        max_effort: "low".into(),
+    };
+    let base = InferenceLimits::load(&home, TaskRole::Workers, &policy)?;
+    assert_eq!(level.limits(&base, &design.agent)?.policy, policy);
+    let disjoint = WorkerPolicy {
+        models: vec![models[0].into()],
+        ..Default::default()
+    };
+    assert!(level.limits(&base, &disjoint).is_err());
+    let mut legacy = assignment("Level layout", &[], &[]);
+    assert!(legacy.routing() == Routing::LevelDesign);
+    legacy.specialty = Some(WorkerSpecialty::General);
+    assert!(legacy.routing() == Routing::Worker);
+    Ok(())
+}
+
+#[tokio::test]
 async fn inherited_route_skips_unavailable_providers_but_keeps_native_defaults() -> Result<()> {
     use crate::provider_permissions::{ProviderPermissions, TaskRole};
     use crate::worker_policy::WorkerPolicy;
@@ -867,7 +935,7 @@ async fn provider_roles_apply_to_inherited_workers_and_saved_studio_choices() ->
                 "claude"
             )
             .await?,
-        ("".into(), "".into())
+        ("fixture".into(), "low".into())
     );
     let pinned = WorkerPolicy {
         models: vec!["claude:default".into()],

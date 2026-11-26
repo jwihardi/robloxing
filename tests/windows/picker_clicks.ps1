@@ -257,6 +257,16 @@ function Test-ProviderTasks {
     Click 'Workers'
     Wait-For { (Named 'Maximum worker effort') -and (Named 'fixture-fast') } 'worker model and effort defaults'
     if ((Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -ne 'Off') { throw 'Image allowlist leaked into workers' }
+    Click 'Level design'
+    Wait-For { (Named 'Maximum level design effort') -and (Named 'fixture-deep') } 'level design worker settings'
+    Click 'fixture-deep'
+    Wait-For { (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'level design model saved'
+    Click 'General'
+    Wait-For { (Named 'Maximum worker effort') -and (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'Off' } 'general worker selection stays independent'
+    Click 'Level design'
+    Wait-For { (Named 'fixture-deep').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'level design choice survives switching sections'
+    Save-PrivateWindow (Join-Path $root 'worker-level-design.png')
+    Click 'General'
     $auto = 'Auto-delegate project tasks'
     Wait-For { (Named $auto).GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'default automatic delegation'
     Click $auto
@@ -340,8 +350,9 @@ function Test-TaskModelLayout {
     Click 'Use ElevenLabs SFX v3'
     Wait-For { !(Named 'Maximum task effort') -and !(Named 'Claude Code for Sound effects') } 'hosted sound renderer selected'
     Click 'Workers'
+    Wait-For { Named 'Maximum worker effort' } 'workers tab opened'
     Click 'Sound effects'
-    Wait-For { (Named 'Use ElevenLabs SFX v3').GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'sound engine persisted'
+    Wait-For { ($control = Named 'Use ElevenLabs SFX v3') -and $control.GetCurrentPattern($toggle).Current.ToggleState -eq 'On' } 'sound engine persisted'
     Click 'Use ElevenLabs SFX v3'
     Click 'Decompilation'
     Click 'Generate an AI summary'
@@ -760,7 +771,7 @@ function Test-Delivery {
         Wait-For { (Named 'Dispatched 2 subagents') -and (Test-Path (Join-Path $root 'waiting-worker')) } 'running worker'
         Click 'Dispatched 2 subagents'
         Wait-For { Named 'Write left' } 'dispatched workers'
-        if ($DeliveryOnly) { Wait-For { Named 'Model · fixture-deep     Effort · High' } 'worker model and confirmed effort on the collapsed worker' }
+        if ($DeliveryOnly) { Wait-For { Named 'Model · fixture-fast     Effort · Low' } 'worker model and confirmed effort on the collapsed worker' }
         Click 'Write left'
         if ($DeliveryOnly) { Wait-For { Named 'Allowed models · Any available     Maximum effort · Any' } 'worker dispatch limits' }
         Wait-For { Named 'Send direction' } 'worker controls'

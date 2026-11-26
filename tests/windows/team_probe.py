@@ -493,6 +493,21 @@ def model_effort(case):
     assert other_policy() == global_policy
 
 
+def level_design_routing(case):
+    (case.root / "level-design").touch()
+    with sqlite3.connect(case.home / "preferences.sqlite") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS studio_defaults(area TEXT PRIMARY KEY,settings TEXT NOT NULL)")
+        policy = {"models": ["claude:sonnet"], "max_effort": "low"}
+        db.execute("INSERT INTO studio_defaults VALUES (?, ?)", ("LevelDesign", json.dumps({"agent": policy})))
+    case.call("run", "--provider", "codex", "delegate")
+    with sqlite3.connect(case.db) as db:
+        rows = db.execute("SELECT name, model, effort, state FROM workers ORDER BY name").fetchall()
+    assert rows == [("left", "claude:sonnet", "low", "finished"),
+                    ("right", "fixture-fast", "low", "finished")], rows
+    for key in ("left", "right"):
+        assert (case.project / (key + ".txt")).read_text().strip() == key
+
+
 def claude_worker_stop_and_resume(case):
     case.call("team", "--lead-model", "claude:default", "--worker-model", "claude:default")
     stop_one(case)
@@ -730,7 +745,7 @@ def main():
         for test in (shared_blender_connection, interrupted_goal, interrupted_directions, rejected_codex_direction, late_codex_receipt, autonomous_release, direct_repair, foreign_git_environment, unavailable_runner,
                      small_talk, chat_goals, manual_recheck, external_blocker, mixed_plan, conflict,
                      stop_one, stop_preparing_worker, steer_preparing_worker, interrupted_worker_directions, cancel_check, steer_during_check, overlap,
-                     repeated_check, model_effort, read_only_models, claude_worker_stop_and_resume,
+                     repeated_check, model_effort, level_design_routing, read_only_models, claude_worker_stop_and_resume,
                      mixed_provider_conflict, claude_without_codex):
             test(Case(base / test.__name__, args.cli.resolve(), fixture))
             print(test.__name__ + " passed", flush=True)

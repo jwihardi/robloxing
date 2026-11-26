@@ -36,10 +36,50 @@ impl InferenceLimits {
                 .collect(),
         })
     }
+    pub(crate) fn restrict_to_level_design(&mut self, design: &WorkerPolicy) -> Result<()> {
+        design.validate()?;
+        if !design.models.is_empty() {
+            let models: Vec<_> = design
+                .models
+                .iter()
+                .filter(|id| self.policy.models.is_empty() || self.policy.models.contains(id))
+                .cloned()
+                .collect();
+            ensure!(
+                !models.is_empty(),
+                "Level design and this chat have no worker models in common. Choose a shared model in Settings → Tasks → Workers → Level design or change the chat’s subagent settings."
+            );
+            self.policy.models = models;
+        }
+        let rank = |e: &str| EFFORTS.iter().position(|v| *v == e).unwrap_or(usize::MAX);
+        if rank(&design.max_effort) < rank(&self.policy.max_effort) {
+            self.policy.max_effort.clone_from(&design.max_effort);
+        }
+        Ok(())
+    }
+
     pub fn permits_provider(&self, model: &str) -> bool {
         self.providers
             .iter()
             .any(|p| p == provider::provider_for(model))
+    }
+}
+
+/// Automatic worker choices are soft preferences. Explicit selections and policy limits win.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Routing {
+    TaskDefault,
+    Worker,
+    LevelDesign,
+}
+
+impl Routing {
+    fn target(self) -> Option<&'static str> {
+        match self {
+            Self::TaskDefault => None,
+            Self::Worker => Some("low"),
+            Self::LevelDesign => Some("medium"),
+        }
     }
 }
 
@@ -100,6 +140,8 @@ impl WorkerPolicy {
         effort: &str,
         catalog: &provider::Catalog,
         source: &str,
+        routing: Routing,
+        claude_only: bool,
     ) -> Result<(String, String)> {
         self.validate()?;
         let allowed = |id: &str| {
@@ -115,6 +157,9 @@ impl WorkerPolicy {
         };
         let eligible = |m: &provider::CatalogModel| {
             allowed(&m.model)
+                && (!claude_only
+                    || source == "claude"
+                    || m.model.starts_with("antigravity:claude-"))
                 && (requested == usize::MAX
                     || m.supported_reasoning_efforts
                         .iter()
@@ -124,14 +169,20 @@ impl WorkerPolicy {
             catalog
                 .models
                 .iter()
-                .find(|m| m.model == catalog.default_model && eligible(m))
-                .or_else(|| {
-                    catalog
-                        .models
-                        .iter()
-                        .find(|m| m.model.ends_with(":default") && eligible(m))
+                .filter(|m| eligible(m))
+                .min_by_key(|m| {
+                    let id = m.resolved_model.as_deref().unwrap_or(&m.model);
+                    let balanced = id
+                        .split(['-', ':'])
+                        .any(|part| matches!(part, "sol" | "sonnet" | "flash"));
+                    let economical = routing != Routing::TaskDefault
+                        && (effort.is_empty() || rank(effort) <= rank("medium"));
+                    (
+                        economical && !balanced,
+                        m.model != catalog.default_model,
+                        !m.model.ends_with(":default"),
+                    )
                 })
-                .or_else(|| catalog.models.iter().find(|m| eligible(m)))
                 .context("No available model matches the allowed models and effort limit")?
         } else {
             ensure!(
@@ -144,15 +195,27 @@ impl WorkerPolicy {
                 .find(|m| m.model == model_id)
                 .with_context(|| format!("Model {model_id} is unavailable"))?
         };
-        if self.max_effort.is_empty() && effort.is_empty() {
+        if self.max_effort.is_empty()
+            && effort.is_empty()
+            && (routing == Routing::TaskDefault || model.supported_reasoning_efforts.is_empty())
+        {
             return Ok((model.model.clone(), String::new()));
         }
+        let target = if effort.is_empty() {
+            routing
+                .target()
+                .and_then(rank)
+                .unwrap_or(requested)
+                .min(requested)
+        } else {
+            requested
+        };
         let effort = model
             .supported_reasoning_efforts
             .iter()
             .filter_map(|e| Some((rank(&e.reasoning_effort)?, &e.reasoning_effort)))
             .filter(|(rank, _)| *rank <= requested)
-            .max_by_key(|(rank, _)| *rank)
+            .min_by_key(|(rank, _)| (*rank > target, rank.abs_diff(target)))
             .with_context(|| {
                 format!(
                     "{} has no supported reasoning effort within this limit",
@@ -274,8 +337,19 @@ impl Store {
         preferred: &str,
     ) -> Result<(String, String)> {
         let limits = InferenceLimits::load(&self.preferences_home, role, policy)?;
-        self.select_inference(role, &limits, model, effort, preferred)
-            .await
+        self.select_inference(
+            role,
+            &limits,
+            model,
+            effort,
+            preferred,
+            if role == TaskRole::Workers {
+                Routing::Worker
+            } else {
+                Routing::TaskDefault
+            },
+        )
+        .await
     }
 
     pub(crate) async fn select_inference(
@@ -285,6 +359,7 @@ impl Store {
         model: &str,
         effort: &str,
         preferred: &str,
+        routing: Routing,
     ) -> Result<(String, String)> {
         let task = role.label();
         let policy = &limits.policy;
@@ -313,11 +388,15 @@ impl Store {
             "The allowed models for {task} do not match an enabled provider. Check the model choices and Settings → Providers."
         );
         let inherited_model = policy.models.is_empty() && model.is_empty();
-        if inherited_model && sources.contains(&preferred) {
+        if routing != Routing::TaskDefault {
+            sources.sort_by_key(|p| *p != preferred);
+        } else if inherited_model && sources.contains(&preferred) {
             sources.retain(|p| *p == preferred);
         }
-        let use_native_default =
-            inherited_model && effort.is_empty() && policy.max_effort.is_empty();
+        let use_native_default = routing == Routing::TaskDefault
+            && inherited_model
+            && effort.is_empty()
+            && policy.max_effort.is_empty();
         let native_default = |source: &str| {
             let selection = if source == "codex" {
                 String::new()
@@ -331,13 +410,33 @@ impl Store {
         }
         let cache = self.worker_catalog.lock().unwrap().clone();
         let mut errors = Vec::new();
-        for source in sources {
+        let design_sources = ["claude", "antigravity"].into_iter().filter(|p| {
+            routing == Routing::LevelDesign
+                && model.is_empty()
+                && sources.contains(p)
+                && (*p == "claude"
+                    || policy.models.is_empty()
+                    || policy
+                        .models
+                        .iter()
+                        .any(|m| m.starts_with("antigravity:claude-")))
+        });
+        let routes = design_sources.map(|p| (p, true)).chain(
+            sources
+                .iter()
+                .copied()
+                .filter(|p| {
+                    !(routing == Routing::LevelDesign && model.is_empty() && *p == "claude")
+                })
+                .map(|p| (p, false)),
+        );
+        for (source, claude_only) in routes {
             let choice = cache.get(&self.project, source).await.and_then(|catalog| {
                 if use_native_default {
                     ensure!(!catalog.models.is_empty(), "Provider returned no models");
                     Ok(native_default(source))
                 } else {
-                    policy.resolve(model, effort, catalog, source)
+                    policy.resolve(model, effort, catalog, source, routing, claude_only)
                 }
             });
             match choice {

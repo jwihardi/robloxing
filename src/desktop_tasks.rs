@@ -14,7 +14,7 @@ use workshop::{
 
 fn task_role(area: &str) -> Result<TaskRole> {
     Ok(match area {
-        "Workers" => TaskRole::Workers,
+        "Workers" | "LevelDesign" => TaskRole::Workers,
         "Images" => TaskRole::Images,
         "Models" => TaskRole::Models,
         "Sounds" => TaskRole::Sounds,
@@ -156,7 +156,7 @@ impl App {
             !run || role != TaskRole::Workers,
             "Use chat subagent settings for worker overrides."
         );
-        let defaults = if role == TaskRole::Workers {
+        let defaults = if area == "Workers" {
             TaskSettings {
                 agent: WorkerPolicy::global(&home)?.unwrap_or_default(),
                 ..Default::default()
@@ -194,7 +194,7 @@ impl App {
                     "Turn off Use task defaults to edit this run."
                 );
                 drafts.insert(area.clone(), setting.clone());
-            } else if role == TaskRole::Workers {
+            } else if area == "Workers" {
                 setting.agent.save_global(&home)?;
                 self.clear_sessions();
                 if let Some(store) = self.store.borrow().as_ref() {
@@ -207,7 +207,13 @@ impl App {
         controls.set_inherited(run && !drafts.contains_key(&area));
         let permissions = self.permissions.borrow();
         let choices = policy_choices(&setting.agent, &self.catalog.borrow(), &permissions, role);
-        set_task_models(&controls, choices, &permissions, role, run);
+        set_task_models(
+            &controls,
+            choices,
+            &permissions,
+            role,
+            run || area == "LevelDesign",
+        );
         controls.set_function_limit(i32::from(setting.function_limit));
         controls.set_seconds(i32::from(setting.seconds_per_function));
         controls.set_summary(setting.summarize);

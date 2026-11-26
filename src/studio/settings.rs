@@ -39,7 +39,10 @@ impl TaskSettings {
     }
     fn preferences(home: &Path, area: &str) -> Result<Connection> {
         ensure!(
-            matches!(area, "Images" | "Models" | "Sounds" | "Ghidra"),
+            matches!(
+                area,
+                "Images" | "Models" | "Sounds" | "Ghidra" | "LevelDesign"
+            ),
             "Unknown Studio task."
         );
         fs::create_dir_all(home)?;

@@ -1,5 +1,7 @@
 use crate::{
-    Attempt, Store, git, provider, provider_permissions::TaskRole, worker_policy::InferenceLimits,
+    Attempt, Store, git, provider,
+    provider_permissions::TaskRole,
+    worker_policy::{InferenceLimits, Routing, WorkerPolicy},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -27,6 +29,8 @@ pub struct Settings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Assignment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialty: Option<WorkerSpecialty>,
     pub key: String,
     pub title: String,
     pub deliverable: String,
@@ -37,6 +41,47 @@ pub struct Assignment {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerSpecialty {
+    General,
+    LevelDesign,
+}
+
+impl Assignment {
+    fn routing(&self) -> Routing {
+        // Existing provider sessions can still have the older delegation schema.
+        let design = self.specialty.map_or_else(
+            || {
+                let title = self.title.to_ascii_lowercase().replace('-', " ");
+                [
+                    "level design",
+                    "level layout",
+                    "map layout",
+                    "level blockout",
+                    "encounter pacing",
+                ]
+                .iter()
+                .any(|term| title.contains(term))
+            },
+            |s| s == WorkerSpecialty::LevelDesign,
+        );
+        if design {
+            Routing::LevelDesign
+        } else {
+            Routing::Worker
+        }
+    }
+
+    fn limits(&self, general: &InferenceLimits, design: &WorkerPolicy) -> Result<InferenceLimits> {
+        let mut limits = general.clone();
+        if self.routing() == Routing::LevelDesign {
+            limits.restrict_to_level_design(design)?;
+        }
+        Ok(limits)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -340,15 +385,15 @@ impl Store {
             );
         }
         let policy = self.effective_worker_policy(lead)?;
-        let limits = serde_json::to_string(&InferenceLimits::load(
-            &self.preferences_home,
-            TaskRole::Workers,
-            &policy,
-        )?)?;
+        let general = InferenceLimits::load(&self.preferences_home, TaskRole::Workers, &policy)?;
+        let design =
+            crate::studio::settings::TaskSettings::defaults(&self.preferences_home, "LevelDesign")?
+                .agent;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let mut dispatched = Vec::new();
         for a in assignments {
+            let limits = serde_json::to_string(&a.limits(&general, &design)?)?;
             let next_id = crate::chat_history::next_worker_id(&tx)?;
             let id = tx
                 .query_row(
@@ -521,7 +566,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         {"type":"function","name":"workshop_send_image","description":"Show an existing or locally rendered project image in chat. Use a path inside the current project copy and a short descriptive caption.","inputSchema":{"type":"object","properties":{"path":string,"caption":string},"required":["path","caption"],"additionalProperties":false}},
         {"type":"function","name":"workshop_find_assets","description":"Find saved images, sound effects and models in this project. Use the result ID to revise or import a finished asset.","inputSchema":{"type":"object","properties":{"area":{"type":"string","enum":["Images","Models","Sounds"]},"query":{"type":"string","description":"Part of the asset title, or empty for recent assets."}},"required":["area","query"],"additionalProperties":false}},
         {"type":"function","name":"workshop_import_asset","description":"Bring a saved WAV, PNG or GLB into this chat's isolated working copy at the requested project-relative path for review and acceptance.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"destination":{"type":"string"}},"required":["id","destination"],"additionalProperties":false}},
-        {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Workshop workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
+        {"type":"function","name":"workshop_delegate","description":"Submit one plan of scoped Workshop workers. Independent tasks can run in parallel. Use depends_on to build chains, forks, or joins. A task starts after its prerequisites are integrated and checked and its edit scope is free. Reuse the same key to retry a blocked assignment or recover an interrupted batch.","inputSchema":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"key":string,"title":string,"deliverable":string,"acceptance":string,"files":strings,"depends_on":strings,"specialty":{"type":"string","enum":["general","level_design"],"description":"Use level_design for playable spaces, map layouts, blockouts, traversal routes and encounter pacing."},"model":string,"effort":string},"required":["key","title","deliverable","acceptance","files","depends_on"],"additionalProperties":false}}},"required":["tasks"],"additionalProperties":false}},
         {"type":"function","name":"workshop_resolve","description":"After you repair or complete a blocked worker's assignment yourself in the integration copy, verify the combined state and record the resolution. Supply your actual fix and verification.","inputSchema":{"type":"object","properties":{"key":string,"resolution":string},"required":["key","resolution"],"additionalProperties":false}},
         {"type":"function","name":"workshop_goal_result","description":"Report the outcome of the current chat goal. Use progress for a concrete new result that leaves work to do. Use complete only when the whole objective is satisfied and verified. Include the relevant evidence. Workshop checks the project before recording completion.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["progress","complete"]},"evidence":string},"required":["status","evidence"],"additionalProperties":false}},
         {"type":"function","name":"workshop_blocked","description":"Report a genuine external blocker, including a decision only the creator can make, when work cannot continue. State the specific input or capability you need and any saved progress. Workshop can notify the creator. This ends autonomous repair for this request.","inputSchema":{"type":"object","properties":{"reason":string},"required":["reason"],"additionalProperties":false}},
@@ -643,7 +688,15 @@ impl Store {
         let lead_provider = self.attempt(lead)?.provider;
         let mut directions = String::new();
         let mut files = std::collections::BTreeSet::new();
-        let limits = InferenceLimits::load(&self.preferences_home, TaskRole::Workers, policy)?;
+        let mut limits = InferenceLimits::load(&self.preferences_home, TaskRole::Workers, policy)?;
+        let routing = w.assignment.routing();
+        if routing == Routing::LevelDesign {
+            let design = crate::studio::settings::TaskSettings::defaults(
+                &self.preferences_home,
+                "LevelDesign",
+            )?;
+            limits.restrict_to_level_design(&design.agent)?;
+        }
         self.db.lock().unwrap().execute(
             "UPDATE workers SET inference_limits=?2 WHERE id=?1",
             params![w.id, serde_json::to_string(&limits)?],
@@ -651,7 +704,7 @@ impl Store {
         let (model, effort) = tokio::select! {
             biased;
             _ = controls.recv() => anyhow::bail!("Worker stopped during preparation"),
-            result = self.select_inference(TaskRole::Workers, &limits, &w.assignment.model, &w.assignment.effort, &lead_provider) => result?,
+            result = self.select_inference(TaskRole::Workers, &limits, &w.assignment.model, &w.assignment.effort, &lead_provider, routing) => result?,
         };
         let preparing = self
             .controls
