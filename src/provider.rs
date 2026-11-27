@@ -275,6 +275,9 @@ fn instructions(store: &Store, a: &Attempt) -> Result<String> {
         instructions.push_str(" For an explicit request to inspect or edit the connected Blender scene, use its Blender MCP tools when available. When the creator asks for a new or revised asset in this chat, call workshop_generate_asset. Use kind=sound for synthesized game audio. You choose the generator, give it a complete brief, and can select the model and effort within the creator's settings. Omit those fields to route automatically. Use reference_image=chat when revising a posted image or sketch, or source_asset to revise a saved design. Only the lead can call this tool. For a standalone asset, call it directly as the specialist assignment, including when automatic project delegation is enabled. The tool verifies and delivers the finished file. Use its result as evidence of delivery. Delegate additional project work when the request calls for it. Continue the conversation here. Use workshop_send_image for an existing project image. Use workshop_import_asset when the request also needs the file in the project.");
     }
     instructions.push_str(" For questions about compiled game modules, check workshop_find_reports first and use workshop_read_report to inspect any saved result. Report partial coverage and the run ID when relevant.");
+    instructions.push_str("\n\n");
+    instructions.push_str(include_str!("provider/studio-sessions.md"));
+    instructions.push('\n');
     instructions.push_str(" For Blender art packs or a matching project prop, use workshop_asset_pack. Inspect the pack's art direction and individual preview images, reuse an existing member when suitable, and publish finished members when asked to build a pack. Pass style_pack when generating a matching model. The library is shared by project chats and workers.");
     let skill = bundled_skills::game_ui_taste(&store.preferences_home)?.join("SKILL.md");
     instructions.push_str(&format!(

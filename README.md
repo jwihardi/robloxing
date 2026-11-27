@@ -24,6 +24,8 @@ For automation, pass `--headless` first to run a command in the desktop executab
 
 ## Working with agents
 
+For live Roblox Studio checks, Workshop instructs the lead to coordinate one operator, reuse the matching place, and close temporary windows after testing. Workers can continue file-based checks in parallel. Windows you already had open stay yours.
+
 Workshop includes Game UI Taste for in-game menus, HUDs and other player interfaces. Ask the lead or a worker to design or review a screen, or mention `game-ui-taste` by name. The Windows binaries include the instructions, references, review template and Python review script for offline use. [Skill files and license](skills/game-ui-taste/)
 
 To delete a conversation, hover over its row in **Chats** and click the trash icon, or choose **Chat options → Delete chat**. Confirm the title to remove the conversation and its private working copies. Accepted project files, saved assets and album screenshots stay available. From the CLI, use `workshop-cli --project PATH delete-chat ID` with the ID from `list`.
