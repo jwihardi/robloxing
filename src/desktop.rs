@@ -1088,6 +1088,7 @@ impl App {
         ui.set_settings_status(
             match action.as_str() {
                 "login" => "Finish signing in with your provider…",
+                "install" if tab == "Providers" => "Running the official CLI installer…",
                 "remove" => "Uninstalling…",
                 "recommend" => "Installing recommendation…",
                 "connect-mcp" | "locate-mcp" | "test-mcp" => "Checking Blender MCP tools…",
@@ -1115,7 +1116,7 @@ impl App {
                 result,
                 provider: p,
                 account_changed: tab == "Providers"
-                    && matches!(action.as_str(), "login" | "logout"),
+                    && matches!(action.as_str(), "install" | "login" | "logout"),
                 recommendation: action == "recommend",
                 changed: action != "test-mcp",
             });

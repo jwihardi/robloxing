@@ -237,7 +237,11 @@ class FixtureProvider {
                 new {id="gemini-weekly",window="weekly",remaining_fraction=0.42}
             }}}}} }); return;
         }
+        if (args.Length == 2 && args[0] == "acp" && args[1] == "--login") {
+            File.WriteAllText(Path.Combine(Dir, "antigravity.session"), "fixture"); return;
+        }
         if (args.Length == 4 && args[0] == "-p" && args[1] == "/model") {
+            if (Mode("provider-setup") && !File.Exists(Path.Combine(Dir, "antigravity.session"))) return;
             Send(new { command=new {data=new {id="gemini-test-high"}} }); return;
         }
         if (args.Length == 3 && args[0] == "models" && args[1] == "-o" && args[2] == "json") {

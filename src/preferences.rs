@@ -1,3 +1,4 @@
+mod provider_setup;
 mod recommended;
 use crate::PluginSection;
 use anyhow::{Context, Result, bail, ensure};
@@ -66,7 +67,7 @@ impl Provider {
         Ok(match self {
             Self::Antigravity => workshop::provider::antigravity::program()?.into_os_string(),
             Self::Codex => workshop::provider::codex_program().into(),
-            Self::Claude => env::var_os("WORKSHOP_CLAUDE").unwrap_or_else(|| "claude".into()),
+            Self::Claude => workshop::provider::claude_program().into(),
         })
     }
 }
@@ -101,7 +102,7 @@ async fn account(p: Provider) -> Row {
     if p == Provider::Antigravity {
         let installed = workshop::provider::antigravity::program().is_ok();
         let (detail, action, button) = if !installed {
-            ("Install Antigravity CLI, then refresh", "", "")
+            p.missing_cli()
         } else if workshop::provider::antigravity::connected().await {
             ("Signed in with Google", "logout", "Sign out")
         } else {
@@ -129,7 +130,7 @@ async fn account(p: Provider) -> Row {
             if e.downcast_ref::<std::io::Error>()
                 .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
         {
-            ("CLI not installed or missing from PATH", "", "")
+            p.missing_cli()
         }
         Ok(out) => {
             let text = format!(
@@ -724,6 +725,10 @@ pub async fn change(
             return Ok("Connected to Gemini CLI.".into());
         }
         let provider = Provider::from_label(arg);
+        ensure!(provider.label() == arg, "Unknown provider");
+        if act == "install" {
+            return provider.install().await;
+        }
         let mut cmd = command(provider.program()?);
         if provider == Provider::Antigravity {
             if act == "logout" {

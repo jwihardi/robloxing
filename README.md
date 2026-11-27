@@ -6,7 +6,7 @@ Workshop is a Windows desktop chat for working on a Git project with Codex, Clau
 
 **[Download Workshop for Windows x64](https://github.com/jwihardi/robloxing/releases/latest/download/workshop-windows-x64.zip)**. Extract the ZIP to a folder and open `workshop.exe`. Keep `workshop-cli.exe` beside it for terminal commands and automation. [All releases and checksums](https://github.com/jwihardi/robloxing/releases)
 
-Install Git and the CLI for each provider you want to use. Open **Settings → Providers** to sign in. Workshop starts the selected CLI and streams replies over its native protocol. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation.
+Install Git, then open **Settings → Providers**. Choose **Install** beside Codex, Claude Code or Antigravity to run its official CLI installer. Choose **Sign in** to connect your account through the provider. Existing CLI sign-ins are picked up automatically. Workshop starts the selected CLI and streams replies over its native protocol. Set `WORKSHOP_CODEX` to the full path to a standalone `codex.exe` to select another installation.
 
 To build from source, install stable Rust with its C/C++ build tools and run the following command in the repository folder.
 
@@ -88,7 +88,7 @@ Workshop reads hex colors (`#rgb` or `#rrggbb`) from CSS custom properties. Past
 
 **Settings → Providers** shows the installed providers and opens their sign-in flows. Accounts and extensions are shared with the corresponding CLI. Codex, Claude, Antigravity, and Gemini CLI can each lead a chat or run its workers. With unrestricted subagent settings, an assignment that omits its model uses the lead’s provider. Select a single allowed worker model to fix the team pairing. Use `WORKSHOP_CLAUDE` to select a specific Claude Code executable.
 
-For a personal Google account, install Antigravity CLI and sign in under **Settings → Providers → Antigravity**. Workshop detects the standard Windows installation even when `agy` is outside PATH. The picker reads your signed-in catalog and groups each Gemini family’s effort variants on one slider. Google-hosted Claude and GPT models appear under their own Antigravity names. The usage meter follows the selected model’s quota group. Set `WORKSHOP_ANTIGRAVITY` to use another executable. [Antigravity CLI](https://antigravity.google/docs/cli/acp/)
+For a personal Google account, install Antigravity CLI and sign in directly under **Settings → Providers → Antigravity**. Workshop detects the standard Windows installation even when `agy` is outside PATH. The picker reads your signed-in catalog and groups each Gemini family’s effort variants on one slider. Google-hosted Claude and GPT models appear under their own Antigravity names. The usage meter follows the selected model’s quota group. Set `WORKSHOP_ANTIGRAVITY` to use another executable. [Antigravity CLI](https://antigravity.google/docs/cli/acp/)
 
 For a headless chat, run `workshop-cli models --provider antigravity`, then `workshop-cli run --provider antigravity "Describe this project"`. Choose a family and effort with `--model gemini-3.8-flash --effort low` if your account lists that model. The same model choices are available for worker and task settings.
 

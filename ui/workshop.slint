@@ -1050,8 +1050,8 @@ export component Desk inherits Window {
                         }
                         VerticalLayout { alignment: center; width: root.recommendations ? 115px : 100px;
                             if root.recommendations && row.action == "": Text { text: row.button; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
-                            if row.action != "": Action { label: root.settings-working && root.settings-working-id == row.id && (row.action == "recommend" || row.action == "install") ? "Installing…" : root.confirm-id == row.id ? "Confirm" : row.button;
-                                accessible-label: root.recommendations ? self.label + " " + row.label
+                            if row.action != "": Action { label: root.settings-working && root.settings-working-id == row.id && (row.action == "recommend" || row.action == "install") ? "Installing…" : root.settings-working && root.settings-working-id == row.id && row.action == "login" ? "Signing in…" : root.confirm-id == row.id ? "Confirm" : row.button;
+                                accessible-label: root.recommendations || (item.account && row.action == "install") ? self.label + " " + row.label
                                     : item.account && root.confirm-id != row.id ? self.label + (row.action == "logout" ? " of " : " to ") + (row.id == "Gemini CLI" ? "Gemini" : row.label) : self.label;
                                 accessible-description: row.button + " " + row.label; width: root.recommendations ? 112px : 98px; height: root.recommendations ? 36px : 32px; selected: true;
                                 enabled: !root.settings-working; activate => {

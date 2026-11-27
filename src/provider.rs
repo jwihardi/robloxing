@@ -70,7 +70,36 @@ pub enum Control {
 }
 pub type Controls = mpsc::UnboundedReceiver<Control>;
 pub fn codex_program() -> String {
-    std::env::var("WORKSHOP_CODEX").unwrap_or_else(|_| "codex".into())
+    provider_program("WORKSHOP_CODEX", "codex")
+}
+
+pub fn claude_program() -> String {
+    provider_program("WORKSHOP_CLAUDE", "claude")
+}
+
+fn provider_program(setting: &str, name: &str) -> String {
+    if let Ok(program) = std::env::var(setting) {
+        return program;
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let local_bin = std::env::home_dir().map(|home| home.join(".local/bin"));
+    let codex_bin = if cfg!(windows) && name == "codex" {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|dir| PathBuf::from(dir).join("Programs/OpenAI/Codex/bin"))
+    } else {
+        None
+    };
+    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&path)
+        .chain(codex_bin)
+        .chain(local_bin)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(&exe))
+        .find(|exe| exe.is_file())
+        .map_or_else(
+            || name.to_owned(),
+            |path| path.to_string_lossy().into_owned(),
+        )
 }
 pub fn channel() -> (mpsc::UnboundedSender<Control>, Controls) {
     mpsc::unbounded_channel()

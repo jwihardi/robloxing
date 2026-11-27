@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$DeleteChatsOnly, [switch]$HarnessOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderSetupOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$DeleteChatsOnly, [switch]$HarnessOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -7,6 +7,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($DeleteChatsOnly) { $parameters.DeleteChatsOnly = $true }
     if ($HarnessOnly) { $parameters.HarnessOnly = $true }
     if ($NavigationOnly) { $parameters.NavigationOnly = $true }
+    if ($ProviderSetupOnly) { $parameters.ProviderSetupOnly = $true }
     if ($ProviderTasksOnly) { $parameters.ProviderTasksOnly = $true }
     if ($PackFixture) { $parameters.PackFixture = (Resolve-Path -LiteralPath $PackFixture).Path }
     if ($StudioOnly) { $parameters.StudioOnly = $true }
@@ -1285,9 +1286,44 @@ try {
 } finally { $headless.Dispose() }
 if ($UsageOnly) { [void](New-Item -ItemType File -Path (Join-Path $root 'catalog.hold')) }
 if ($ProviderTasksOnly) { [void](New-Item -ItemType File -Path (Join-Path $root 'large-task-catalog')) }
+if ($ProviderSetupOnly) {
+    # Simulate a fresh desktop session, including PATH from before installation.
+    $env:LOCALAPPDATA = (New-Item -ItemType Directory -Path (Join-Path $root 'appdata')).FullName
+    $env:PATH = @((Split-Path (Get-Command git.exe).Source), "$env:WINDIR/System32", "$env:WINDIR") -join ';'
+    $env:WORKSHOP_CODEX = $env:WORKSHOP_CLAUDE = $env:WORKSHOP_ANTIGRAVITY = $null
+    $env:HTTPS_PROXY = 'http://127.0.0.1:1'
+    $env:NO_PROXY = $null
+    [void](New-Item -ItemType File -Path (Join-Path $root 'provider-setup'))
+}
 $proc = [TestDesktop]::StartApp($fixtureApp, $project)
 try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
+    if ($ProviderSetupOnly) {
+        Click 'Settings'
+        $accounts = @('Codex','Claude Code','Antigravity')
+        foreach ($name in $accounts) {
+            Wait-For { Named "Install $name" } "missing $name offers installation"
+        }
+        Click 'Install Codex'
+        Wait-For {
+            $window = [System.Windows.Automation.AutomationElement]::FromHandle($appWindow)
+            $text = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            ($text | Where-Object { $_.Current.Name -like 'Download installer*' }) -and (Named 'Install Codex').Current.IsEnabled
+        } 'failed download explains the error and allows retry'
+        $bins = @("$env:LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe", "$env:USERPROFILE/.local/bin/claude.exe", "$env:LOCALAPPDATA/agy/bin/agy.exe")
+        foreach ($bin in $bins) {
+            [void](New-Item -ItemType Directory -Path (Split-Path $bin) -Force)
+            Copy-Item (Join-Path $root 'provider.exe') $bin
+        }
+        Click 'Refresh'
+        foreach ($name in $accounts) {
+            Wait-For { Named "Sign in to $name" } "$name discovered without restart"
+            Click "Sign in to $name"
+            Wait-For { Named "Sign out of $name" } "$name signed in"
+        }
+        Write-Output 'Provider installation actions, retry and sign-in passed on the private desktop.'
+        return
+    }
     if ($UsageOnly) {
         Wait-For { (Named '100%') -and (Named '88%') -and (Named '31%') } 'empty-chat context and account usage before model discovery finishes'
         Wait-For { (Named 'Chat model and effort').Current.IsEnabled } 'other providers ready while Codex discovery is blocked'

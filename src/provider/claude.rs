@@ -12,7 +12,7 @@ const STREAM: &[&str] = &[
 ];
 
 fn spawn(cwd: &Path, args: &[&str], stderr: File) -> Result<Connection> {
-    let program = std::env::var("WORKSHOP_CLAUDE").unwrap_or_else(|_| "claude".into());
+    let program = claude_program();
     let mut child = managed(&program, args, cwd, Stdio::piped(), stderr)?;
     let stdin = child.stdin().take().context("Claude stdin")?;
     let stdout = child.stdout().take().context("Claude stdout")?;
