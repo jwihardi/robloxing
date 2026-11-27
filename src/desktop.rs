@@ -518,6 +518,7 @@ fn worker_row(w: workshop::team::Worker, catalog: &provider::Catalog) -> WorkerR
         stats.push(format!("{tokens} tokens"));
     }
     WorkerRow {
+        block_reason: w.block_reason().unwrap_or_default().into(),
         id: w.id as i32,
         title: w.assignment.title.into(),
         state: match w.state.as_str() {

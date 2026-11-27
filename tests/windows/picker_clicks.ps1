@@ -1494,6 +1494,20 @@ try {
         Click 'Close settings'
         Click 'New chat'
         Remove-Item -LiteralPath (Join-Path $root 'blocker')
+        Set-Content (Join-Path $root 'autonomous') 'test'
+        Set-Content (Join-Path $root 'repair.hold') 'test'
+        (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('Deliver a release bundle with two outputs and a checked release note.')
+        Click 'Send message'
+        Wait-For { Named 'Dispatched 4 subagents' } 'review batch dispatched' 20
+        Click 'Dispatched 4 subagents'
+        Wait-For { Named 'right.txt contains rigth; expected right' } 'blocked reason visible on the collapsed worker' 40
+        Save-PrivateWindow (Join-Path $root 'blocked-worker.png')
+        Click 'Write audit'
+        Wait-For { ($reasonField = Named 'Reason Write audit was blocked') -and $reasonField.GetCurrentPattern($valuePattern).Current.Value -like '*Read both joined files*' } 'expanded worker report includes supporting evidence'
+        Remove-Item -LiteralPath (Join-Path $root 'repair.hold')
+        Wait-For { (Test-Path -LiteralPath (Join-Path $project 'publish.txt')) -and !(Named 'Stop response') } 'lead repaired the reported issue' 40
+        Remove-Item -LiteralPath (Join-Path $root 'autonomous')
+        Click 'New chat'
         Set-Content (Join-Path $root 'goal-mode') 'test'
         Set-Content (Join-Path $root 'goal.hold') 'hold'
         (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue('/goal Reopen the saved goal')

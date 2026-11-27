@@ -99,7 +99,9 @@ class FixtureProvider {
             if (task == "audit") {
                 if (!prompt.Contains("REPORT-LEFT-42")) throw new InvalidDataException("Missing prerequisite handoff");
                 bool passed = File.ReadAllText("right.txt").Trim() == "right";
-                Report(passed ? "complete" : "needs_changes", passed ? "Joined outputs pass acceptance" : "right.txt contains rigth; expected right");
+                if (passed) Report("complete", "Joined outputs pass acceptance");
+                else Send(new {id="report",method="item/tool/call",@params=new {threadId=session,turnId=turn,callId="report",tool="workshop_report_result",
+                    arguments=new {status="needs_changes",reason="right.txt contains rigth; expected right",summary="Read both joined files and compared their contents with their names."}}});
                 return;
             }
             if (task == "fix-right") {File.WriteAllText("right.txt","right\n"); Done("Corrected spelling"); return;}
@@ -293,7 +295,11 @@ class FixtureProvider {
             var msg=Json.Deserialize<Dictionary<string,object>>(line);
             if(!msg.ContainsKey("method")){
                 if(Mode("delivery-mode") && Convert.ToString(msg["id"])=="assignment") File.WriteAllText(Path.Combine(Dir,"lead-feedback"),line);
-                if(Convert.ToString(msg["id"])=="assignment") Done("Worker batch returned.");
+                if(Convert.ToString(msg["id"])=="assignment") {
+                    if (Mode("autonomous") && !Object.Equals(((Dictionary<string,object>)msg["result"])["success"],true)
+                        && !line.Contains("right.txt contains rigth")) throw new InvalidDataException("Missing worker reason in dispatch result");
+                    Done("Worker batch returned.");
+                }
                 if(Convert.ToString(msg["id"])=="report") Done("Finished assignment.");
                 if(Convert.ToString(msg["id"])=="posted-image") Done("Here is the revised layout.");
                 if(Convert.ToString(msg["id"])=="pack-inspect") {
@@ -487,6 +493,7 @@ class FixtureProvider {
                 if (Mode("autonomous")) {
                     if (message.StartsWith("Workshop verification")) {
                         if (!message.Contains("right.txt contains rigth")) throw new InvalidDataException("Missing review finding in repair turn");
+                        while (Mode("repair.hold")) Thread.Sleep(30);
                         var fix = new {key="fix-right",title="Write fix-right",deliverable="Fix spelling",acceptance="right.txt contains right",files=new[]{"right.txt"},depends_on=new string[0]};
                         Delegate(new List<object>{fix, Audit("left","right","fix-right")});
                     } else {

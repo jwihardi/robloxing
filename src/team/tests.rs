@@ -217,6 +217,29 @@ fn assignment(key: &str, deps: &[&str], files: &[&str]) -> Assignment {
 }
 
 #[test]
+fn blocked_worker_keeps_the_cause_in_short_lead_feedback() -> Result<()> {
+    let tmp = tempdir()?;
+    let store = Store::open(&tmp.path().join("project"), &tmp.path().join("data"))?;
+    let lead = store.prepare("Check the build", "", None)?;
+    store.queue(lead.id, &[assignment("verify", &[], &[])])?;
+    let mut w = store.workers(lead.id)?.remove(0);
+    assert_eq!(w.block_reason(), None);
+    w.state = "blocked".into();
+    let reason = "The live build version could not be verified.";
+    let evidence = "Verified local check. ".repeat(90);
+    for detail in [
+        format!("Worker acceptance criteria unmet: {evidence}Remaining: {reason}"),
+        format!("Worker acceptance criteria unmet: Reason: {reason}\n\n{evidence}"),
+        reason.to_string(),
+    ] {
+        w.detail = detail;
+        assert_eq!(w.block_reason(), Some(reason));
+        assert!(w.feedback(300).contains(reason));
+    }
+    Ok(())
+}
+
+#[test]
 fn lead_and_worker_can_find_and_page_preexisting_reports() -> Result<()> {
     let tmp = tempdir()?;
     let project = tmp.path().join("game");

@@ -99,6 +99,44 @@ pub struct Worker {
     pub limits: Option<InferenceLimits>,
 }
 
+impl Worker {
+    pub fn block_reason(&self) -> Option<&str> {
+        if self.state != "blocked" {
+            return None;
+        }
+        let detail = self.detail.trim();
+        let report = detail.strip_prefix("Worker acceptance criteria unmet: ");
+        let mut reason = report.unwrap_or(detail);
+        if let Some(text) = reason.strip_prefix("Reason: ") {
+            reason = text;
+        } else if report.is_some() {
+            // Older review reports sometimes put the outstanding checks after the evidence.
+            if let Some((_, rest)) = reason.rsplit_once(" Remaining: ") {
+                reason = rest;
+            } else if let Some(pos) = reason.rfind(". Still need ") {
+                reason = &reason[pos + 2..];
+            }
+        }
+        Some(
+            reason
+                .lines()
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("No reason was recorded for this worker."),
+        )
+    }
+
+    fn feedback(&self, limit: usize) -> String {
+        let detail = clipped(&self.detail, limit);
+        match self.block_reason() {
+            Some(reason) if !detail.contains(reason) => {
+                clipped(&format!("{reason}\n{}", self.detail), limit)
+            }
+            _ => detail,
+        }
+    }
+}
+
 pub(crate) struct WorkerControl {
     input: tokio::sync::mpsc::UnboundedSender<provider::Control>,
     // Taken when discovery finishes so later directions use live steering.
@@ -477,8 +515,9 @@ impl Store {
         drop(q);
         drop(db);
         let mut text = rows.join("\n");
-        for w in self
-            .workers(lead)?
+        let mut workers = self.workers(lead)?;
+        workers.sort_by_key(|w| w.state != "blocked");
+        for w in workers
             .into_iter()
             .filter(|w| w.state != "finished")
             .take(16)
@@ -487,8 +526,8 @@ impl Store {
                 "\n{} [{}]: {} — {}",
                 w.assignment.key,
                 w.state,
-                w.assignment.deliverable,
-                clipped(&w.detail, 300)
+                w.feedback(300),
+                clipped(&w.assignment.deliverable, 500)
             ));
         }
         Ok(clipped(&text, 10000))
@@ -558,7 +597,7 @@ pub(crate) fn tools(worker: bool) -> Value {
         json!({"type":"function","name":"workshop_read_report","description":"Read saved pseudocode, the optional AI summary, the complete function index or a log by run ID. Use a function byte offset from search or next_offset for subsequent pages.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"part":{"type":"string","enum":["report","functions","log","tool-log","summary"]},"offset":{"type":"integer","minimum":0}},"required":["id","part"],"additionalProperties":false}}),
     ];
     if worker {
-        available.push(json!({"type":"function","name":"workshop_report_result","description":"Report your assignment outcome, verification and actionable findings to the lead and dependent workers. Use needs_changes for a blocker or failed acceptance review.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["complete","needs_changes"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}}));
+        available.push(json!({"type":"function","name":"workshop_report_result","description":"Report your assignment outcome, verification and actionable findings to the lead and dependent workers. Use needs_changes for a blocker or failed acceptance review.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["complete","needs_changes"]},"summary":{"type":"string"},"reason":{"type":"string","description":"For needs_changes, give the specific failed check, missing evidence or dependency in one short sentence. Put supporting evidence in summary."}},"required":["status","summary"],"additionalProperties":false}}));
         return Value::Array(available);
     }
     let lead_tools = json!([
@@ -906,14 +945,7 @@ impl Store {
         let pending = workers
             .iter()
             .filter(|w| w.state != "finished")
-            .map(|w| {
-                format!(
-                    "{} [{}]: {}",
-                    w.assignment.key,
-                    w.state,
-                    clipped(&w.detail, 1200)
-                )
-            })
+            .map(|w| format!("{} [{}]: {}", w.assignment.key, w.state, w.feedback(1200)))
             .collect::<Vec<_>>();
         ensure!(
             pending.is_empty(),
@@ -1002,8 +1034,9 @@ impl Store {
             }
         }
         notify(provider::ReplyUpdate::WorkersChanged);
-        let output = self
-            .workers(lead.id)?
+        let mut outcomes = self.workers(lead.id)?;
+        outcomes.sort_by_key(|w| w.state != "blocked");
+        let output = outcomes
             .iter()
             .map(|w| {
                 format!(
@@ -1011,7 +1044,7 @@ impl Store {
                     w.assignment.key,
                     w.state,
                     w.assignment.title,
-                    clipped(&w.detail, 1200)
+                    w.feedback(1200)
                 )
             })
             .collect::<Vec<_>>()
@@ -1030,7 +1063,7 @@ impl Store {
         };
         let output = clipped(&output, 24000);
         ensure!(
-            self.workers(lead.id)?.iter().all(|w| w.state == "finished"),
+            outcomes.iter().all(|w| w.state == "finished"),
             "Worker feedback:\n{output}\nRetry the owning key. After two identical failures or four runs, repair directly and use workshop_resolve or report the blocker."
         );
         Ok(output)
@@ -1135,7 +1168,13 @@ async fn dispatch(
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .context("Describe the result and verification.")?;
-            store.event(lead.id, kind, Some(&clipped(summary, 4000)))?;
+            let detail = match args["reason"].as_str().map(str::trim) {
+                Some(reason) if kind == "worker/needs_changes" && !reason.is_empty() => {
+                    format!("Reason: {reason}\n\n{summary}")
+                }
+                _ => summary.to_owned(),
+            };
+            store.event(lead.id, kind, Some(&clipped(&detail, 4000)))?;
             return Ok("Assignment result recorded.".into());
         }
         Some("workshop_find_reports") => {
