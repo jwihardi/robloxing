@@ -86,6 +86,39 @@ pub struct ChatMessage {
 }
 
 impl Store {
+    pub fn prompt_history(&self, chat: i64) -> Result<Vec<String>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare(
+            "SELECT prompt,files FROM (
+                SELECT 0 AS seq,t.prompt,(SELECT group_concat(path,char(10) ORDER BY rowid)
+                    FROM task_attachments WHERE task=t.id) AS files
+                    FROM tasks t JOIN attempts a ON a.task=t.id WHERE a.id=?1
+                UNION ALL SELECT e.id,e.summary,(SELECT group_concat(path,char(10) ORDER BY rowid)
+                    FROM event_files WHERE event=e.id) FROM delivered_user_inputs e WHERE e.attempt=?1
+             ) ORDER BY seq")?;
+        let mut prompts = Vec::new();
+        for row in q.query_map([chat], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })? {
+            let (text, files) = row?;
+            let caption = match (
+                provider::Message::split_attachments(&text),
+                files.as_deref(),
+            ) {
+                (Some((caption, listed)), Some(stored))
+                    if !listed.is_empty()
+                        && listed.lines().all(|p| stored.lines().any(|file| file == p)) =>
+                {
+                    caption
+                }
+                _ => &text,
+            };
+            if !caption.trim().is_empty() {
+                prompts.push(caption.to_owned());
+            }
+        }
+        Ok(prompts)
+    }
     pub fn messages_after(&self, attempt: i64, after: i64) -> Result<Vec<ChatMessage>> {
         self.message_range(attempt, after, i64::MAX, -1, false)
     }

@@ -13,6 +13,8 @@ $project = Join-Path $root 'project'
 [void](New-Item -ItemType Directory -Path $project -Force)
 $fixtureApp = Join-Path $root 'Workshop-test.exe'
 Copy-Item -LiteralPath $exe -Destination $fixtureApp
+$loader = Join-Path (Split-Path $exe) 'WebView2Loader.dll'
+if (Test-Path -LiteralPath $loader) { Copy-Item -LiteralPath $loader -Destination $root }
 $env:WORKSHOP_HOME = Join-Path $root 'data'
 $env:WORKSHOP_PROBE_DIR = $root
 $env:WORKSHOP_CODEX = Join-Path $root 'provider.exe'

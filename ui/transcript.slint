@@ -1,6 +1,6 @@
 import { Action, Theme, ThemeColors } from "common.slint";
 
-export enum BlockKind { prose, rich, heading, code, image, attachment, table-row }
+export enum BlockKind { prose, rich, heading, code, image, video, attachment, table-row }
 export struct ReplyBlock { kind: BlockKind, text: string, language: string, styled: styled-text,
     target: string, remote: bool, cells: [styled-text], header: bool }
 export global Transcript {
@@ -14,6 +14,10 @@ export global Transcript {
     callback clear-previews();
     callback received(string, string, image);
     callback open(string, string);
+    callback open-image(string, string);
+    in-out property <string> video-title;
+    callback close-video();
+    callback position-video(float, float, float, float, bool);
 }
 
 component CodeSnippet inherits Rectangle {
@@ -70,7 +74,7 @@ component EmbeddedImage inherits VerticalLayout {
         icon-only: root.loaded; leading: true; glyph: root.loaded ? "" : "\u{eb9f}";
         accessible-description: root.loaded ? "Image preview" : root.source;
         clip: true; border-radius: 10px; background: Theme.surface;
-        activate => { if root.block.remote && !root.requested {root.load();} else {Transcript.open(Transcript.directory, root.source);} }
+        activate => { if root.block.remote && !root.requested {root.load();} else {Transcript.open-image(Transcript.directory, root.source);} }
         if root.loaded: Image { width: parent.width; height: parent.height; source: root.pixels; image-fit: contain; }
     }
 }
@@ -86,6 +90,7 @@ export component ReplyView inherits VerticalLayout {
     }
     for block in Transcript.blocks(root.body): VerticalLayout {
         if block.kind == BlockKind.image: EmbeddedImage { block: block; }
+        if block.kind == BlockKind.video: Action { label: block.text; detail: "Play video"; glyph: "\u{e768}"; leading: true; height: 56px; max-width: 440px; background: Theme.surface; accessible-label: "Play " + block.text; activate => { Transcript.open(Transcript.directory, block.target); } }
         if block.kind == BlockKind.attachment: Action {
             label: block.text; detail: block.language; glyph: "\u{e8a5}"; glyph-color: Theme.symbol;
             leading: true; height: 48px; max-width: 420px; background: Theme.surface;

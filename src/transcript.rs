@@ -21,13 +21,59 @@ pub fn connect(ui: &Desk) {
 }
 
 fn formatted(text: &str) -> bool {
-    Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).any(|event| {
-        matches!(event, Event::Start(ref tag) if !matches!(tag, Tag::Paragraph))
-            || matches!(event, Event::Code(_) | Event::InlineHtml(_) | Event::Rule)
+    text.lines().any(|line| bare_media(line).is_some())
+        || Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).any(
+            |event| {
+                matches!(event, Event::Start(ref tag) if !matches!(tag, Tag::Paragraph))
+                    || matches!(event, Event::Code(_) | Event::InlineHtml(_) | Event::Rule)
+            },
+        )
+}
+
+fn bare_media(line: &str) -> Option<ReplyBlock> {
+    let target = line.trim().trim_matches('`').trim_matches('"');
+    if !(std::path::Path::new(target).is_absolute()
+        || target.starts_with("./")
+        || target.starts_with("https://")
+        || target.starts_with("http://")
+        || target.starts_with("file:///"))
+    {
+        return None;
+    }
+    let (name, kind) = media::attachment(target)?;
+    if !matches!(kind.as_str(), "Image" | "Video") {
+        return None;
+    }
+    Some(ReplyBlock {
+        kind: if kind == "Image" {
+            BlockKind::Image
+        } else {
+            BlockKind::Video
+        },
+        text: name.into(),
+        target: target.into(),
+        remote: target.starts_with("http://") || target.starts_with("https://"),
+        ..Default::default()
     })
 }
 
 fn prose(text: &str, blocks: &mut Vec<ReplyBlock>) {
+    let mut remaining = text;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(media) = bare_media(line) {
+            markdown_prose(&remaining[..offset], blocks);
+            blocks.push(media);
+            remaining = &remaining[offset + line.len()..];
+            offset = 0;
+        } else {
+            offset += line.len();
+        }
+    }
+    markdown_prose(remaining, blocks);
+}
+
+fn markdown_prose(text: &str, blocks: &mut Vec<ReplyBlock>) {
     let text = text.trim_matches(['\r', '\n']);
     if text.is_empty() {
         return;
@@ -56,6 +102,8 @@ fn prose(text: &str, blocks: &mut Vec<ReplyBlock>) {
                     attachments.push(ReplyBlock {
                         kind: if kind == "Image" {
                             BlockKind::Image
+                        } else if kind == "Video" {
+                            BlockKind::Video
                         } else {
                             BlockKind::Attachment
                         },
@@ -136,7 +184,15 @@ fn blocks(source: &str) -> Vec<ReplyBlock> {
         let (kind, language, end) = match event {
             Event::Start(Tag::Image { dest_url, .. }) => {
                 target = dest_url.into_string();
-                (BlockKind::Image, String::new(), TagEnd::Image)
+                (
+                    if media::attachment(&target).is_some_and(|(_, k)| k == "Video") {
+                        BlockKind::Video
+                    } else {
+                        BlockKind::Image
+                    },
+                    String::new(),
+                    TagEnd::Image,
+                )
             }
             Event::Start(Tag::CodeBlock(info)) => {
                 let name = match info {
@@ -315,6 +371,22 @@ mod tests {
             StyledText::from_plain_text("Types")
         );
         assert_eq!(blocks("```md\n![no embed](a.png)\n```").len(), 1);
+    }
+
+    #[test]
+    fn media_links_paths_and_fenced_examples_are_distinct() {
+        let reply = "[Play](<videos/First clip.mp4>)\n\n![Clip](https://example.com/a.webm)\n\n./capture.png\n\n~~~text\n./other.png\n~~~";
+        let parsed = blocks(reply);
+        let embeds: Vec<_> = parsed
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::Video | BlockKind::Image))
+            .collect();
+        assert_eq!(embeds.len(), 3);
+        assert_eq!(embeds[0].kind, BlockKind::Video);
+        assert_eq!(embeds[1].kind, BlockKind::Video);
+        assert!(embeds[1].remote);
+        assert_eq!(embeds[2].target.as_str(), "./capture.png");
+        assert_eq!(parsed.last().unwrap().kind, BlockKind::Code);
     }
 
     #[test]

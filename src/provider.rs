@@ -191,6 +191,11 @@ impl Message {
         }
         Ok(())
     }
+    /// Split the visible text produced by compose. Callers verify the paths against stored files.
+    pub fn split_attachments(text: &str) -> Option<(&str, &str)> {
+        text.rsplit_once("\n\nAttachments\n")
+            .or_else(|| text.strip_prefix("Attachments\n").map(|files| ("", files)))
+    }
     pub fn compose(text: &str, files: Vec<PathBuf>) -> Self {
         let mut text = text.to_owned();
         if !files.is_empty() {

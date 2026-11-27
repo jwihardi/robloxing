@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod appearance;
 mod capture;
+#[cfg(windows)]
+mod chat_video;
 mod clipboard;
 mod desktop_packs;
 mod desktop_studio;
@@ -85,7 +87,13 @@ impl Updates {
         Ok(())
     }
 }
+struct PromptRecall {
+    prompts: Vec<String>,
+    index: usize,
+    draft: String,
+}
 struct App {
+    recall: RefCell<Option<PromptRecall>>,
     pending_notification: RefCell<Option<notifications::Target>>,
     sound_timer: slint::Timer,
     inspector: RefCell<Option<inspector::Inspector>>,
@@ -690,6 +698,7 @@ impl App {
         let transcript = ui.global::<Transcript>();
         let directory = store.work(attempt.id);
         if transcript.get_directory().as_str() != directory.to_string_lossy() {
+            transcript.invoke_close_video();
             transcript.invoke_clear_previews();
             transcript.set_directory(directory.to_string_lossy().as_ref().into());
         }
@@ -1258,6 +1267,7 @@ impl App {
             (ui.get_draft().to_string(), ui.get_goal_mode()),
         );
         self.id.set(selected);
+        self.end_recall();
         self.render_attachments();
         self.displayed.set(None);
         let (text, goal_mode) = drafts.remove(&selected).unwrap_or_default();
@@ -1296,6 +1306,12 @@ impl App {
             selected.is_some_and(|i| rows[i].state == "running") && self.control.borrow().is_some(),
         );
         if selected.is_none() {
+            let transcript = ui.global::<Transcript>();
+            if !transcript.get_directory().is_empty() {
+                transcript.invoke_close_video();
+                transcript.invoke_clear_previews();
+                transcript.set_directory("".into());
+            }
             ui.set_queued(Default::default());
             self.turns.set_vec(self.preceding_shots(store, None)?);
             ui.set_context_meter(context_meter(ContextUsage::default(), true));
@@ -1639,6 +1655,7 @@ impl App {
                     self.usage.borrow_mut().clear();
                     ui.set_usage_meters(usage_meters(Vec::new()));
                     self.id.set(None);
+                    self.end_recall();
                     self.chat_offset.set(0);
                     self.displayed.set(None);
                     self.drafts.borrow_mut().clear();
@@ -1728,6 +1745,7 @@ impl App {
                         ui.invoke_position_transcript(true);
                     }
                     self.id.set(Some(id));
+                    self.end_recall();
                     self.render_attachments();
                     self.render()?;
                     ui.set_live_activity(
@@ -1939,7 +1957,12 @@ impl App {
             .set_queued(ModelRc::new(VecModel::from(rows)));
         Ok(())
     }
+    fn end_recall(&self) {
+        self.recall.take();
+        self.ui.unwrap().set_recalling(false);
+    }
     fn clear_draft(&self) {
+        self.end_recall();
         self.attachments.borrow_mut().remove(&self.id.get());
         self.sketches.borrow_mut().remove(&self.id.get());
         self.render_attachments();
@@ -2215,6 +2238,7 @@ fn main() -> Result<()> {
         settings_generation: Default::default(),
         login_code: Default::default(),
         cancel_login: Default::default(),
+        recall: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
         settings_page: Default::default(),
@@ -2409,6 +2433,60 @@ fn main() -> Result<()> {
         if let Err(e) = a.poll() {
             a.ui.unwrap().set_notice(format!("{e:#}").into());
         }
+    });
+    let a = app.clone();
+    ui.on_end_recall(move || {
+        a.end_recall();
+    });
+    let a = app.clone();
+    ui.on_recall_prompt(move |older| {
+        let ui = a.ui.unwrap();
+        let mut recall = a.recall.borrow_mut();
+        if recall.is_none() {
+            if !older {
+                return false;
+            }
+            let Some(chat) = a.id.get() else {
+                return false;
+            };
+            let store = a.store.borrow();
+            let Some(store) = store.as_ref() else {
+                return false;
+            };
+            match store.prompt_history(chat) {
+                Ok(prompts) if !prompts.is_empty() => {
+                    *recall = Some(PromptRecall {
+                        index: prompts.len(),
+                        prompts,
+                        draft: ui.get_draft().to_string(),
+                    });
+                }
+                Ok(_) => return false,
+                Err(error) => {
+                    ui.set_notice(error.to_string().into());
+                    return false;
+                }
+            }
+        }
+        let state = recall.as_mut().unwrap();
+        state.index = if older {
+            state.index.saturating_sub(1)
+        } else {
+            (state.index + 1).min(state.prompts.len())
+        };
+        let next = state
+            .prompts
+            .get(state.index)
+            .unwrap_or(&state.draft)
+            .clone();
+        if state.index == state.prompts.len() {
+            recall.take();
+        }
+        let browsing = recall.is_some();
+        drop(recall);
+        ui.set_draft(next.into());
+        ui.set_recalling(browsing);
+        true
     });
     let a = app.clone();
     ui.on_paste_attachments(move || {

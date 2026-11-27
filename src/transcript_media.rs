@@ -58,7 +58,7 @@ pub(super) fn attachment(target: &str) -> Option<(String, String)> {
         "pdf" | "docx" => "Document",
         "png" | "jpg" | "jpeg" | "webp" => "Image",
         "wav" | "ogg" | "mp3" => "Audio",
-        "mp4" | "webm" => "Video",
+        "mp4" | "m4v" | "mov" | "webm" | "ogv" => "Video",
         _ => return None,
     };
     Some((name.into_owned(), kind.to_owned()))
@@ -133,6 +133,11 @@ fn open(directory: &str, target: &str) -> Result<()> {
 }
 
 fn thumbnail(source: Destination) -> Result<image::RgbaImage> {
+    let size = if matches!(source, Destination::Web(_)) {
+        (1600, 900)
+    } else {
+        (720, 360)
+    };
     let tmp;
     let path = match source {
         Destination::File(path) => path,
@@ -174,16 +179,91 @@ fn thumbnail(source: Destination) -> Result<image::RgbaImage> {
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     reader.limits(limits);
-    Ok(reader.decode()?.thumbnail(720, 360).into_rgba8())
+    Ok(reader.decode()?.thumbnail(size.0, size.1).into_rgba8())
 }
 
 pub(super) fn connect(ui: &Desk) {
+    #[cfg(windows)]
+    let player = Rc::new(RefCell::new(None::<crate::chat_video::Player>));
+    let panel = ui.global::<Transcript>();
+    #[cfg(windows)]
+    {
+        let player = player.clone();
+        let weak = ui.as_weak();
+        panel.on_position_video(move |x, y, w, h, visible| {
+            if let Some(view) = player.borrow().as_ref()
+                && let Err(error) = view.position(x, y, w, h, visible)
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.set_notice(error.to_string().into());
+            }
+        });
+    }
     let weak = ui.as_weak();
-    ui.global::<Transcript>().on_open(move |dir, target| {
-        if let Err(e) = open(&dir, &target)
-            && let Some(ui) = weak.upgrade()
-        {
-            ui.set_notice(format!("{e:#}").into());
+    #[cfg(windows)]
+    let closing = player.clone();
+    panel.on_close_video(move || {
+        #[cfg(windows)]
+        closing.borrow_mut().take();
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<Transcript>().set_video_title("".into());
+        }
+    });
+    let weak = ui.as_weak();
+    panel.on_open_image(move |dir, target| {
+        let Some(ui) = weak.upgrade() else { return };
+        match destination(&dir, &target) {
+            Ok(Destination::File(path)) if path.is_file() => {
+                ui.invoke_view_image(path.to_string_lossy().as_ref().into(), 0);
+            }
+            Ok(Destination::Web(_)) => {
+                ui.global::<Transcript>()
+                    .invoke_load_preview(dir, target.clone());
+                ui.invoke_view_image(target, 0);
+            }
+            _ => ui.set_notice(format!("Image unavailable: {target}").into()),
+        }
+    });
+    let weak = ui.as_weak();
+    panel.on_open(move |dir, target| {
+        let Some(ui) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            let Some((name, kind)) = attachment(&target) else {
+                return open(&dir, &target);
+            };
+            if !matches!(kind.as_str(), "Video" | "Image") {
+                return open(&dir, &target);
+            }
+            let panel = ui.global::<Transcript>();
+            match (kind.as_str(), destination(&dir, &target)?) {
+                ("Image", _) => panel.invoke_open_image(dir, target),
+                (_, source) => {
+                    #[cfg(windows)]
+                    {
+                        let url = match source {
+                            Destination::File(path) => {
+                                ensure!(path.is_file(), "Video unavailable: {}", path.display());
+                                Url::from_file_path(path)
+                                    .map_err(|_| anyhow::anyhow!("Invalid video path"))?
+                            }
+                            Destination::Web(url) => url,
+                        };
+                        let view = crate::chat_video::Player::new(ui.window(), url)?;
+                        player.replace(Some(view));
+                        panel.set_video_title(name.into());
+                        ui.invoke_position_player();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let _ = (name, source);
+                        bail!("Embedded video playback requires Windows");
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            ui.set_notice(format!("{error:#}").into());
         }
     });
     // The cache belongs to the UI thread. Only encoded files and pixel bytes cross threads.

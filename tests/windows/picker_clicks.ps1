@@ -1,4 +1,4 @@
-﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderSetupOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$DeleteChatsOnly, [switch]$HarnessOnly)
+﻿param([string]$Binary = ".\target\release\workshop.exe", [string]$PackFixture, [switch]$StudioOnly, [switch]$SketchOnly, [switch]$RecommendedOnly, [switch]$DeliveryOnly, [switch]$ChatMediaOnly, [switch]$TranscriptOnly, [switch]$UsageOnly, [switch]$ProviderSetupOnly, [switch]$ProviderTasksOnly, [switch]$NavigationOnly, [switch]$GoalOnly, [switch]$DeleteChatsOnly, [switch]$HarnessOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestDesktop.ps1')
 if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
@@ -14,6 +14,7 @@ if (![TestDesktop]::CurrentName().StartsWith('WorkshopTest-')) {
     if ($SketchOnly) { $parameters.SketchOnly = $true }
     if ($RecommendedOnly) { $parameters.RecommendedOnly = $true }
     if ($DeliveryOnly) { $parameters.DeliveryOnly = $true }
+    if ($ChatMediaOnly) { $parameters.ChatMediaOnly = $true }
     if ($TranscriptOnly) { $parameters.TranscriptOnly = $true }
     if ($UsageOnly) { $parameters.UsageOnly = $true }
     Invoke-WorkshopUiTest -Script $PSCommandPath -Parameters $parameters
@@ -72,6 +73,8 @@ $project = Join-Path $root 'project'
 [void](New-Item -ItemType Directory -Path $project -Force)
 $fixtureApp = Join-Path $root 'Workshop-test.exe'
 Copy-Item -LiteralPath $exe -Destination $fixtureApp
+$loader = Join-Path (Split-Path $exe) 'WebView2Loader.dll'
+if (Test-Path -LiteralPath $loader) { Copy-Item -LiteralPath $loader -Destination $root }
 $env:WORKSHOP_HOME = Join-Path $root 'data'
 $env:WORKSHOP_PROBE_DIR = $root
 $env:WORKSHOP_TEST_NOTICE_DIR = (New-Item -ItemType Directory -Path (Join-Path $root 'notifications')).FullName
@@ -1295,6 +1298,11 @@ if ($ProviderSetupOnly) {
     $env:NO_PROXY = $null
     [void](New-Item -ItemType File -Path (Join-Path $root 'provider-setup'))
 }
+if ($ChatMediaOnly) {
+    Copy-Item (Join-Path $PSScriptRoot 'clip.webm') (Join-Path $root 'clip.webm')
+    Copy-Item $env:WORKSHOP_TEST_CAPTURE_IMAGE (Join-Path $root 'photo.png')
+    [void](New-Item -ItemType File -Path (Join-Path $root 'chat-media'))
+}
 $proc = [TestDesktop]::StartApp($fixtureApp, $project)
 try {
     $appWindow = [TestDesktop]::WaitForWindow($proc)
@@ -1464,6 +1472,49 @@ try {
         return
     }
     if ($DeliveryOnly) { Test-Delivery; return }
+    if ($ChatMediaOnly) {
+        $first = "First line" + [char]10 + "Second line"
+        $second = 'Show the clip again'
+        $draft = 'An unsent thought'
+        function Set-Draft($text) { (Named 'Message Codex').GetCurrentPattern($valuePattern).SetValue($text) }
+        function Recall([int]$key,$expected) {
+            [void][WorkshopPointer]::PostMessage($appWindow,0x100,$key,1)
+            [void][WorkshopPointer]::PostMessage($appWindow,0x101,$key,1)
+            Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq $expected } "prompt history '$expected'"
+        }
+        Set-Draft $first
+        Click 'Send message'
+        Wait-For { (Named 'Play clip.webm') -and (Named 'photo.png').Current.BoundingRectangle.Height -gt 40 } 'embedded media'
+        Click 'photo.png'
+        Wait-For { Named 'Full image' } 'in-app photo viewer'
+        Click 'Back'
+        Click 'Play clip.webm'
+        Wait-For { Named 'Close video' } 'video in chat' 20
+        Wait-For { (Named 'Playing video, 64 by 48') -or (Named 'Finished video, 64 by 48') } 'decoded video playing inside chat' 15
+        Click 'Close video'
+        Set-Draft $second
+        Click 'Send message'
+        Wait-For { (Test-Path (Join-Path $root 'media-followup')) -and (Named 'New chat').Current.IsEnabled } 'second prompt'
+        Set-Draft $draft
+        Click 'Message Codex'
+        Recall 38 $second
+        Recall 38 $first
+        Recall 40 $second
+        Recall 40 $draft
+        $multiline = "Keep this line" + [char]10 + "and this one"
+        Set-Draft $multiline
+        Click 'Message Codex'
+        Recall 40 $multiline
+        Recall 38 $multiline
+        Recall 38 $second
+        Recall 40 $multiline
+        Click 'New chat'
+        Wait-For { (Named 'Message Codex').GetCurrentPattern($valuePattern).Current.Value -eq '' } 'fresh composer'
+        Click 'Message Codex'
+        Recall 38 ''
+        'Photo enlargement, decoded in-chat video, prompt recall and draft restoration passed.'
+        return
+    }
     if ($TranscriptOnly) {
         Save-PrivateWindow (Join-Path $root 'welcome.png')
         Test-TranscriptScroll

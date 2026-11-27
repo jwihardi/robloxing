@@ -490,6 +490,13 @@ class FixtureProvider {
                     FinishCodexReply(reply.ToString() + "## Delivery\n\n[Final file](finished.zip)");
                     continue;
                 }
+                if (Mode("chat-media")) {
+                    if (message.Contains("Show the clip again")) File.WriteAllText(Path.Combine(Dir, "media-followup"), "yes");
+                    var photo = new Uri(Path.Combine(Dir, "photo.png")).AbsoluteUri;
+                    var clip = new Uri(Path.Combine(Dir, "clip.webm")).AbsoluteUri;
+                    Done("[Photo](" + photo + ")\n\n[Playtest](" + clip + ")");
+                    continue;
+                }
                 if (Mode("formatted-reply")) {
                     Done("## Project structure\n\nThe app opens the **current folder** and remembers the last active chat.\n\n```rust\nfn workspace_title(name: &str) -> String {\n    // Keep the folder name in the title bar.\n    format!(\"Workshop / {}\", name)\n}\n```\n\nCall `workspace_title` when the selected project changes.");
                     continue;

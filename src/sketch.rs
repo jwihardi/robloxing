@@ -10,6 +10,20 @@ pub(crate) fn set_turn_image(turn: &mut crate::ChatTurn, path: Option<std::path:
     {
         turn.sketch = image;
         turn.image_path = path.to_string_lossy().as_ref().into();
+        if turn.from_user
+            && let Some((caption, attachments)) =
+                workshop::provider::Message::split_attachments(&turn.body)
+            && attachments.lines().any(|file| Path::new(file) == path)
+        {
+            let other = attachments
+                .lines()
+                .filter(|file| Path::new(file) != path)
+                .map(std::path::PathBuf::from)
+                .collect();
+            turn.body = workshop::provider::Message::compose(caption, other)
+                .text
+                .into();
+        }
     }
 }
 

@@ -177,6 +177,9 @@ component Composer inherits Rectangle {
     in property <[DraftAttachment]> attachments;
     callback remove-attachment(int);
     callback paste-attachments() -> bool;
+    in property <bool> recalling;
+    callback recall-prompt(bool) -> bool;
+    callback end-recall();
     callback open-add(length,length,length,length);
     in property <PickerData> choices;
     in property <bool> picking;
@@ -244,6 +247,13 @@ component Composer inherits Rectangle {
                     if root.paste-attachments() { return accept; }
                 }
                 if self.preedit-text == "" && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt {
+                    if !root.goal-mode && root.recipient == "" && (
+                        (e.text == Key.UpArrow && (root.recalling || self.text == "" || self.cursor-y < 12px)) ||
+                        (e.text == Key.DownArrow && (root.recalling || self.text == "" || self.cursor-y + 26px >= self.preferred-height))) {
+                        if root.recall-prompt(e.text == Key.UpArrow) {
+                            self.set-selection-offsets(2147483647,2147483647); return accept;
+                        }
+                    }
                     if root.suggesting-goal && (e.text == Key.Tab || e.text == Key.Return) {
                         root.accept-goal(); return accept;
                     }
@@ -252,12 +262,16 @@ component Composer inherits Rectangle {
                         if root.goal-mode { root.cancel-goal(); return accept; }
                     }
                 }
+                if root.recalling { root.end-recall(); }
                 if e.text == Key.Return && !e.modifiers.shift && self.preedit-text == "" {
                     if root.can-send { root.send(); } return accept;
                 }
                 return reject;
             }
+            private property <length> cursor-y;
+            edited => {root.end-recall();}
             cursor-position-changed(pos) => {
+                self.cursor-y = pos.y;
                 if pos.y + scroller.content-y < 0px { scroller.content-y = -pos.y; }
                 else if pos.y + scroller.content-y > scroller.visible-height - 20px {
                     scroller.content-y = min(0px, scroller.visible-height - pos.y - 20px);
@@ -358,6 +372,9 @@ export component Desk inherits Window {
     callback attach(bool);
     callback remove-attachment(int);
     callback paste-attachments() -> bool;
+    in property <bool> recalling;
+    callback recall-prompt(bool) -> bool;
+    callback end-recall();
     in-out property <bool> settings-open;
     in property <bool> attention-enabled;
     callback save-attention(bool);
@@ -524,7 +541,7 @@ export component Desk inherits Window {
         root.open-panel = OpenPanel.closed;
         root.viewing-shot = key;
     }
-    function view-image(path: string, asset: int) {
+    public function view-image(path: string, asset: int) {
         root.view-shot(path); root.viewing-image = true; root.viewing-asset = asset;
     }
     function close-shot() {
@@ -555,6 +572,7 @@ export component Desk inherits Window {
         transcript.follow-bottom = bottom;
         transcript.content-y = bottom ? transcript.end-y : 0px;
     }
+    public function position-player() { Transcript.position-video(video-panel.placement.x,video-panel.placement.y,video-panel.placement.w,video-panel.placement.h,video-panel.placement.show); }
     public function focus-draft() {composer.focus-input();}
     function send-message() {
         if root.suggesting-goal { root.begin-goal-draft(); }
@@ -574,6 +592,7 @@ export component Desk inherits Window {
     private property <bool> hide-context;
     private property <bool> compact-context;
     private property <bool> chat-screen: !Comparison.visible && !Studio.inspecting && !root.studio-open && !root.settings-open && !root.album-open && !root.work-open && root.viewing-shot == "";
+    changed chat-screen => { if !root.chat-screen && Transcript.video-title != "" { Transcript.close-video(); } }
     private property <bool> has-context: root.settings-open || (root.project != "" && !Comparison.visible && root.viewing-shot == "" && !root.album-open && !root.work-open && !Studio.inspecting);
     private property <bool> context-visible: root.has-context && (root.compact ? root.compact-context : !root.hide-context);
     private property <string> chat-query;
@@ -734,7 +753,7 @@ export component Desk inherits Window {
                 }
             }
             visible: !root.home || root.turns.length > 0; x: (parent.width - self.width) / 2; y: goal-summary.y + goal-summary.height; width: pane.measure;
-            height: max(0px, work-status.y - self.y - 18px);
+            height: max(0px, video-panel.y - self.y - 18px);
             content-width: self.visible-width; content-height: turns-layout.preferred-height;
             turns-layout := VerticalLayout {
                 width: transcript.visible-width; padding-right: 8px; padding-top: 18px; padding-bottom: 10px; spacing: 24px; alignment: start;
@@ -840,6 +859,22 @@ export component Desk inherits Window {
                 }
             }
         }
+        video-panel := Rectangle {
+            visible: Transcript.video-title != "";
+            x: composer.x; width: composer.width; y: work-status.y - self.height;
+            height: self.visible ? min(320px, max(0px,(work-status.y - transcript.y) * 0.6)) : 0px;
+            clip: true; border-radius: 12px; background: Theme.surface;
+            Text { x:14px; width: parent.width - 60px; height: 36px; text: Transcript.video-title;
+                vertical-alignment:center; overflow:elide; color:Theme.text; font-size:14px; }
+            Action { x:parent.width - 37px; width:32px; height:32px; y:2px; icon-only:true; glyph:"\u{e711}"; label:"Close video"; activate=>{Transcript.close-video();composer.focus-input();} }
+            player := Rectangle { x:1px; y:36px; width:parent.width - 2px; height:max(0px,parent.height - self.y - 1px); background: #111; }
+            out property <{x:float,y:float,w:float,h:float,show:bool}> placement: {
+                x: player.absolute-position.x / 1px, y: player.absolute-position.y / 1px,
+                w: player.width / 1px, h: player.height / 1px,
+                show: self.visible && root.chat-screen && root.open-panel == OpenPanel.closed && !root.editing-goal && root.delete-id == ""
+            };
+            changed placement => { Transcript.position-video(self.placement.x,self.placement.y,self.placement.w,self.placement.h,self.placement.show); }
+        }
         work-status := Rectangle {
             x: composer.x; width: composer.width;
             height: root.running ? 32px : 0px;
@@ -880,6 +915,7 @@ export component Desk inherits Window {
             goal-mode: root.goal-mode; suggesting-goal: root.suggesting-goal;
             accept-goal => {root.begin-goal-draft();} cancel-goal => {root.leave-goal-draft();} dismiss-suggestion => {root.dismissed-goal = true;}
             value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.writable && (!root.goal-mode || !root.busy) && !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || (!root.goal-mode && (root.attachments.length > 0 || Sketch.has-content)));
+            recalling: root.recalling; recall-prompt(older) => {return root.recall-prompt(older);} end-recall => {root.end-recall();}
             attachments: root.attachments; paste-attachments => {return root.paste-attachments();} remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
@@ -971,9 +1007,9 @@ export component Desk inherits Window {
         escape => {root.close-shot();} init => {back.focus();}
         back := Action { x: 20px; y: 18px; width: 90px; label: "Back"; glyph: "\u{e72b}"; activate => {root.close-shot();} }
         if root.viewing-image && root.viewing-asset > 0: Action { x: parent.width - 250px; y: 18px; width: 100px; label: "Save image"; activate => {Studio.asset-action(root.viewing-asset,"export");} }
-        Action { x: parent.width - 140px; y: 18px; width: 120px; label: "Annotate"; glyph: "\u{e104}"; selected: true; enabled: root.project != "" && (!root.busy || root.running); activate => {Sketch.annotate(root.viewing-shot,!root.viewing-image);} }
+        if !(root.viewing-image && (root.viewing-shot.starts-with("https://") || root.viewing-shot.starts-with("http://"))): Action { x: parent.width - 140px; y: 18px; width: 120px; label: "Annotate"; glyph: "\u{e104}"; selected: true; enabled: root.project != "" && (!root.busy || root.running); activate => {Sketch.annotate(root.viewing-shot,!root.viewing-image);} }
         Image { x: 20px; y: 68px; width: parent.width - 40px; height: parent.height - 92px; image-fit: contain;
-            source: root.viewing-image ? root.file-image(root.viewing-shot) : root.shot-image(root.viewing-shot,true); accessible-label: root.viewing-image ? "Full image" : "Full screenshot"; }
+            source: root.viewing-image && (root.viewing-shot.starts-with("https://") || root.viewing-shot.starts-with("http://")) ? Transcript.preview(Transcript.directory,root.viewing-shot,Transcript.revision) : root.viewing-image ? root.file-image(root.viewing-shot) : root.shot-image(root.viewing-shot,true); accessible-label: root.viewing-image ? "Full image" : "Full screenshot"; }
     }
     if Comparison.visible: ComparisonPage {
         visible: !root.settings-open;
