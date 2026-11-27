@@ -1,14 +1,15 @@
 [package]
 name = "workshop"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2024"
 default-run = "workshop"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:slint", "dep:rfd", "dep:gltf", "dep:glam", "dep:windows-sys", "dep:pulldown-cmark", "dep:syntect", "dep:webbrowser", "dep:url", "dep:percent-encoding"]
+desktop = ["dep:arboard", "dep:slint", "dep:rfd", "dep:gltf", "dep:glam", "dep:windows-sys", "dep:pulldown-cmark", "dep:syntect", "dep:webbrowser", "dep:url", "dep:percent-encoding"]
 
 [dependencies]
+arboard = { version = "3.7", features = ["image-data"], optional = true }
 anyhow = "1"
 base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

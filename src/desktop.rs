@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod appearance;
 mod capture;
+mod clipboard;
 mod desktop_packs;
 mod desktop_studio;
 mod desktop_tasks;
@@ -32,7 +33,7 @@ use workshop::{
     worker_policy::{EFFORTS, WorkerPolicy},
 };
 
-slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, Sketch, Studio, StudioItem, AssetPacks, PackRow, PackMember, TaskControls, TaskProvider, TaskModelPage, PolicyChoices, ChatTurn, WorkerRow, WorkRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
+slint::slint! { #[edition = "1.19"] export {Appearance, ThemeChoice, ThemeColors, Comparison, Desk, DraftAttachment, Sketch, Studio, StudioItem, AssetPacks, PackRow, PackMember, TaskControls, TaskProvider, TaskModelPage, PolicyChoices, ChatTurn, WorkerRow, WorkRow, PickerData, PickerOption, MeterData, PolicyModel, SettingRow, PluginSection, AlbumItem, OutputItem, Transcript, BlockKind, ReplyBlock} from "ui/workshop.slint"; }
 
 enum Update {
     Attention(notifications::Target, &'static str, String),
@@ -1843,20 +1844,44 @@ impl App {
             Ok(String::new())
         });
     }
+    fn add_attachments(&self, paths: Vec<PathBuf>) {
+        let mut all = self.attachments.borrow_mut();
+        let draft = all.entry(self.id.get()).or_default();
+        for path in paths {
+            if !draft.contains(&path) {
+                draft.push(path);
+            }
+        }
+        drop(all);
+        self.render_attachments();
+    }
     fn render_attachments(&self) {
         let attachments = self.attachments.borrow();
         let rows: Vec<_> = attachments
             .get(&self.id.get())
             .into_iter()
             .flatten()
-            .map(|p| PickerOption {
-                label: p
-                    .file_name()
-                    .unwrap_or(p.as_os_str())
-                    .to_string_lossy()
-                    .as_ref()
-                    .into(),
-                value: p.to_string_lossy().as_ref().into(),
+            .map(|path| {
+                let image = self.store.borrow().as_ref().is_some_and(|store| {
+                    path.parent() == Some(store.dir.join("chat-images").as_path())
+                });
+                DraftAttachment {
+                    label: if image {
+                        "Pasted image".into()
+                    } else {
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                            .as_ref()
+                            .into()
+                    },
+                    value: path.to_string_lossy().as_ref().into(),
+                    preview: if image {
+                        slint::Image::load_from_path(path).unwrap_or_default()
+                    } else {
+                        Default::default()
+                    },
+                }
             })
             .collect();
         self.ui
@@ -2386,6 +2411,22 @@ fn main() -> Result<()> {
         }
     });
     let a = app.clone();
+    ui.on_paste_attachments(move || {
+        let store = a.store.borrow();
+        match clipboard::attachments(store.as_deref()) {
+            Ok(Some(paths)) => {
+                a.add_attachments(paths);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                a.ui.unwrap()
+                    .set_notice(format!("Paste failed: {e:#}").into());
+                true
+            }
+        }
+    });
+    let a = app.clone();
     ui.on_attach(move |folder| {
         let picker = rfd::FileDialog::new();
         let paths = if folder {
@@ -2397,15 +2438,7 @@ fn main() -> Result<()> {
             picker.set_title("Attach files").pick_files()
         };
         if let Some(paths) = paths {
-            let mut all = a.attachments.borrow_mut();
-            let draft = all.entry(a.id.get()).or_default();
-            for path in paths {
-                if !draft.contains(&path) {
-                    draft.push(path);
-                }
-            }
-            drop(all);
-            a.render_attachments();
+            a.add_attachments(paths);
             a.ui.unwrap().invoke_focus_draft();
         }
     });

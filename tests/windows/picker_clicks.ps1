@@ -1646,7 +1646,7 @@ try {
     Wait-For { Named 'Context window' } 'usage details'
     if ((Named 'Add to message').Current.BoundingRectangle.Right -gt (Named 'Subagents').Current.BoundingRectangle.X -or (Named 'Subagents').Current.BoundingRectangle.Right -gt (Named 'Chat model and effort').Current.BoundingRectangle.X) { throw 'Expected Add and Subagents on the left, model on the right' }
     Click 'Add to message'
-    Wait-For { Named 'Paste text' } 'add menu'
+    Wait-For { Named 'Paste from clipboard' } 'add menu'
     Test-ProviderTasks
     Click 'Settings'
     Wait-For { Named 'Sign in to Codex' } 'provider accounts'

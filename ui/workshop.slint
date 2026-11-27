@@ -171,10 +171,12 @@ component InferencePicker inherits Rectangle {
     } }
 }
 
+export struct DraftAttachment { value: string, label: string, preview: image }
 component Composer inherits Rectangle {
     in property <string> chat-provider: "Codex";
-    in property <[PickerOption]> attachments;
+    in property <[DraftAttachment]> attachments;
     callback remove-attachment(int);
+    callback paste-attachments() -> bool;
     callback open-add(length,length,length,length);
     in property <PickerData> choices;
     in property <bool> picking;
@@ -208,7 +210,7 @@ component Composer inherits Rectangle {
     border-width: 1px; border-color: input.has-focus ? Theme.accent.mix(Theme.line,0.65) : Theme.line;
     public function focus-input() { input.focus(); }
     public function focus-add() { plus.focus(); }
-    public function paste-text() { input.focus(); input.paste(); }
+    public function paste-content() { input.focus(); if !root.paste-attachments() {input.paste();} }
     public function focus-picker() { inference.focus(); }
     public function focus-subagents() { subagent-button.focus(); }
     public function focus-delivery() { delivery-button.focus(); }
@@ -221,7 +223,8 @@ component Composer inherits Rectangle {
         x: 14px; y: 9px + root.recipient-height; width: parent.width - 28px; height: root.attachment-height;
         for file[i] in root.attachments: HorizontalLayout {
             width: attached.visible-width - 4px; height: 32px; spacing: 8px;
-            Text { width: 20px; text: "\u{e723}"; font-family: "Segoe MDL2 Assets"; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
+            if file.preview.width > 0: Image { width: 28px; height: 28px; source: file.preview; image-fit: contain; accessible-label: "Attached image"; }
+            if file.preview.width == 0: Text { width: 20px; text: "\u{e723}"; font-family: "Segoe MDL2 Assets"; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; accessible-role: none; }
             Text { text: file.label; accessible-description: file.value; horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; overflow: elide; font-size: 13px; color: Theme.text; }
             Action { label: "Remove " + file.label; accessible-description: file.value; icon-only: true; glyph: "\u{e711}"; width: 32px; height: 32px; enabled: root.enabled;
                 activate => {root.remove-attachment(i);} }
@@ -237,6 +240,9 @@ component Composer inherits Rectangle {
             vertical-alignment: top; enabled: root.enabled;
             accessible-label: root.goal-mode ? "Goal objective" : "Message " + root.chat-provider;
             key-pressed(e) => {
+                if self.preedit-text == "" && !e.modifiers.alt && ((e.modifiers.control && !e.modifiers.shift && (e.text == "v" || e.text == "V")) || (e.modifiers.shift && e.text == Key.Insert)) {
+                    if root.paste-attachments() { return accept; }
+                }
                 if self.preedit-text == "" && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt {
                     if root.suggesting-goal && (e.text == Key.Tab || e.text == Key.Return) {
                         root.accept-goal(); return accept;
@@ -348,9 +354,10 @@ export component Desk inherits Window {
     pure callback shot-image(string,bool) -> image;
     pure callback file-image(string) -> image;
     in-out property <bool> official-only: true;
-    in property <[PickerOption]> attachments;
+    in property <[DraftAttachment]> attachments;
     callback attach(bool);
     callback remove-attachment(int);
+    callback paste-attachments() -> bool;
     in-out property <bool> settings-open;
     in property <bool> attention-enabled;
     callback save-attention(bool);
@@ -873,7 +880,7 @@ export component Desk inherits Window {
             goal-mode: root.goal-mode; suggesting-goal: root.suggesting-goal;
             accept-goal => {root.begin-goal-draft();} cancel-goal => {root.leave-goal-draft();} dismiss-suggestion => {root.dismissed-goal = true;}
             value <=> root.draft; running: root.running; enabled: !root.busy || root.running; can-send: root.writable && (!root.goal-mode || !root.busy) && !root.capturing && !Sketch.replacing && (root.has-content(root.draft) || (!root.goal-mode && (root.attachments.length > 0 || Sketch.has-content)));
-            attachments: root.attachments; remove-attachment(i) => {root.remove-attachment(i);}
+            attachments: root.attachments; paste-attachments => {return root.paste-attachments();} remove-attachment(i) => {root.remove-attachment(i);}
             open-add(x,y,w,h) => {root.show-panel(OpenPanel.add,x,y,w,h);}
             choices: root.chat-choices; picking: !root.busy && root.catalog-ready;
             open-picker(x,y,w,h) => { root.show-panel(OpenPanel.effort, x, y, w, h); }
@@ -1196,7 +1203,7 @@ export component Desk inherits Window {
             files := RowAction { label: "Attach files…"; glyph: "\u{e723}"; activate => {root.dismiss-panel(); root.attach(false);} }
             RowAction { label: "Attach folder…"; glyph: "\u{e8b7}"; activate => {root.dismiss-panel(); root.attach(true);} }
             Rectangle { height: 1px; background: Theme.line; }
-            RowAction { label: "Paste text"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-text();} }
+            RowAction { label: "Paste from clipboard"; glyph: "\u{e77f}"; activate => {root.dismiss-panel(); composer.paste-content();} }
             RowAction { label:root.goal-objective == "" ? "Set a goal" : "Chat goal"; glyph:"\u{e7c1}"; enabled:!root.busy || root.goal-objective != "";
                 activate=>{if root.goal-objective == "" {root.begin-goal-draft();} else {root.open-goal();}}
                 Text { x:parent.width - 56px; width:44px; height:parent.height; text:"/goal"; color:Theme.muted; font-family:Theme.mono; font-size:12px; horizontal-alignment:right; vertical-alignment:center; accessible-role:none; }

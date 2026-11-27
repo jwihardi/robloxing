@@ -60,16 +60,61 @@ fn output(cmd: &mut Command) -> Result<Vec<u8>> {
     let out = cmd
         .output()
         .context("Run Git. Install Git and make it available on PATH.")?;
-    ensure!(
-        out.status.success(),
-        "Git: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
+    if !out.status.success() {
+        // diff --check writes file and line diagnostics to stdout, even on failure.
+        let patch_check = cmd
+            .get_args()
+            .zip(cmd.get_args().skip(1))
+            .any(|(command, flag)| command == "diff" && flag == "--check");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = if patch_check && !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        let operation = if patch_check {
+            "Git diff --check"
+        } else {
+            "Git"
+        };
+        if detail.is_empty() {
+            bail!("{operation} failed ({})", out.status);
+        }
+        bail!(
+            "{operation}: {}",
+            detail.chars().take(4000).collect::<String>()
+        );
+    }
     Ok(out.stdout)
 }
 
 fn string(bytes: Vec<u8>) -> Result<String> {
     Ok(String::from_utf8(bytes)?.trim().to_owned())
+}
+
+#[cfg(test)]
+#[test]
+fn patch_check_includes_the_file_line_and_stdout_diagnostic() -> Result<()> {
+    let dir = tempdir()?;
+    git(dir.path(), &["init"])?;
+    fs::write(dir.path().join("layout.txt"), "gate  \n")?;
+    git(dir.path(), &["add", "layout.txt"])?;
+    let error = git(
+        dir.path(),
+        &[
+            "-c",
+            "core.whitespace=trailing-space",
+            "diff",
+            "--check",
+            "--cached",
+        ],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("layout.txt:1:"), "{error}");
+    assert!(error.starts_with("Git diff --check:"), "{error}");
+    Ok(())
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
