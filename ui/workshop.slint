@@ -152,7 +152,8 @@ component InferencePicker inherits Rectangle {
         height: parent.height; spacing: 7px;
         Text { text: root.choices.current-model; color: root.enabled ? Theme.symbol : Theme.muted; overflow: elide; horizontal-stretch: 1;
             font-family: Theme.mono; font-size: 13px; vertical-alignment: center; min-width: 0px; accessible-role: none; }
-        Text { text: root.choices.current-effort; color: Theme.muted; font-size: 12px; vertical-alignment: center; accessible-role: none; }
+        Text { text: root.choices.current-effort; color: Theme.muted; font-family: Theme.mono;
+            font-size: 13px; vertical-alignment: center; accessible-role: none; }
     }
     Text { x: parent.width - 22px; width: 14px; vertical-alignment: center; text: "\u{e70d}"; font-family: "Segoe MDL2 Assets"; color: Theme.muted; font-size: 10px; accessible-role: none; }
     hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { trigger.focus(); root.open(); } }

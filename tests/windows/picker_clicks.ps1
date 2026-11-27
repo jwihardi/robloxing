@@ -304,6 +304,7 @@ function Test-TaskModelLayout {
     Click 'Tasks'
     Click 'Image generation'
     Wait-For { (Named 'fixture-option-28') -and (Named 'Gemini Test') -and !(Named 'Next models') } 'the entire catalog on one wide page'
+    if (@(PanelControls ([System.Windows.Automation.ControlType]::CheckBox) | Where-Object { $_.Current.Name -match '\bdefault\b' }).Count) { throw 'Task models include a default placeholder' }
     $panel = (Named 'Image generation models').Current.BoundingRectangle
     if ($panel.Width / $scale -lt 820) { throw "Task settings stopped short of the available width ($panel)" }
     $first = (Named 'fixture-fast').Current.BoundingRectangle
@@ -1339,6 +1340,7 @@ try {
     if ($StudioOnly) { Test-ChatAssets; return }
     if ($GoalOnly) { Test-ChatGoals; return }
     if ($ProviderTasksOnly) {
+        Save-PrivateWindow (Join-Path $root 'composer-model-effort.png')
         Test-ProviderTasks
         Test-TaskModelLayout
         Write-Output "Provider task settings passed. Screenshot in $root"

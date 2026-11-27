@@ -33,13 +33,19 @@ fn set_task_models(
     let models = choices
         .models
         .iter()
-        .map(|mut model| {
-            if workshop::provider::provider_for(&model.value) == "antigravity"
+        .filter_map(|mut model| {
+            if model.value == "default" || model.value.ends_with(":default") {
+                // Keep an existing provider-choice rule visible until the user clears it.
+                if !model.selected {
+                    return None;
+                }
+                model.label = "Provider choice".into();
+            } else if workshop::provider::provider_for(&model.value) == "antigravity"
                 && let Some(name) = model.label.strip_suffix(" (Antigravity)")
             {
                 model.label = name.into();
             }
-            model
+            Some(model)
         })
         .collect::<Vec<_>>();
     let groups = PROVIDERS
