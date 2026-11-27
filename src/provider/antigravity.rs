@@ -282,6 +282,7 @@ async fn output(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 pub(super) async fn models(dir: &Path) -> Result<Catalog> {
+    require_signin().await?;
     let (out, current) = tokio::join!(output(dir, &["models"]), current_model(dir));
     let out = out?;
     let entries: Vec<_> = out
@@ -331,11 +332,30 @@ async fn current_model(dir: &Path) -> Result<String> {
         .context("Antigravity did not report its current model")
 }
 
+// Print-mode commands can launch a browser when the CLI has no credentials.
+// ACP returns Authentication required without starting an interactive login.
+async fn require_signin() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let mut io = gemini::spawn_cli(
+            dir.path(),
+            &["acp", "--stdio", "--include-default-customizations=false"],
+            tempfile::tempfile()?,
+            (program()?, None),
+            "Antigravity",
+        )?;
+        gemini::initialize(&mut io.stdin).await?;
+        gemini::studio_response("Antigravity", &mut io, 1, None, false).await?;
+        gemini::rpc(&mut io.stdin, 2, "session/list", json!({"cwd":dir.path()})).await?;
+        gemini::studio_response("Antigravity", &mut io, 2, None, false).await?;
+        Ok(())
+    })
+    .await
+    .context("Antigravity account check timed out")?
+}
+
 pub async fn connected() -> bool {
-    let Ok(dir) = tempfile::tempdir() else {
-        return false;
-    };
-    current_model(dir.path()).await.is_ok()
+    require_signin().await.is_ok()
 }
 
 pub fn usage_key(model: &str) -> &str {
@@ -347,6 +367,7 @@ pub fn usage_key(model: &str) -> &str {
 }
 
 pub(super) async fn account_limits_with_default(project: &Path) -> Result<AccountLimits> {
+    require_signin().await?;
     let (limits, model) = tokio::join!(account_limits(), current_model(project));
     let mut limits = limits?;
     if let Ok(id) = model

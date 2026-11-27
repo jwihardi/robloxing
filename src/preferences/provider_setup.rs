@@ -1,7 +1,70 @@
 use super::{Provider, command};
 use anyhow::{Context, Result, bail, ensure};
+use std::process::Stdio;
 use std::{env, path::Path, process::Output, time::Duration};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::oneshot;
+
+pub async fn antigravity_login(
+    mut input: oneshot::Receiver<String>,
+    mut cancelled: oneshot::Receiver<()>,
+    mut publish_link: impl FnMut(String),
+) -> Result<String> {
+    let dir = tempfile::tempdir()?;
+    let mut child = command(Provider::Antigravity.program()?)
+        .args(["acp", "--login"])
+        .env("ANTIGRAVITY_REMOTE_OOB_AUTH", "true")
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Could not start Antigravity sign-in")?;
+    let mut input_pipe = child.stdin.take();
+    let mut stdout = BufReader::new(child.stdout.take().context("Missing sign-in output")?).lines();
+    let mut stderr =
+        BufReader::new(child.stderr.take().context("Missing sign-in diagnostics")?).lines();
+    let (mut out_open, mut err_open) = (true, true);
+    tokio::time::timeout(Duration::from_secs(600), async {
+        loop {
+            let line = tokio::select! {
+                _ = &mut cancelled => bail!("Sign-in cancelled."),
+                status = child.wait() => {
+                    ensure!(status?.success(), "Antigravity could not finish sign-in. Start again for a fresh code.");
+                    return Ok("Sign-in finished.".into());
+                }
+                code = &mut input, if input_pipe.is_some() => {
+                    let mut stdin = input_pipe.take().context("Missing sign-in input")?;
+                    let code = code.context("Sign-in cancelled")?;
+                    stdin.write_all(code.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.shutdown().await?;
+                    continue;
+                }
+                line = stdout.next_line(), if out_open => { let line = line?; out_open = line.is_some(); line }
+                line = stderr.next_line(), if err_open => { let line = line?; err_open = line.is_some(); line }
+            };
+            if let Some(url) = line.as_deref().and_then(signin_url) {
+                publish_link(url);
+            }
+        }
+    }).await.context("Sign-in timed out. Start again for a fresh code.")?
+}
+
+fn signin_url(line: &str) -> Option<String> {
+    line.split_whitespace().find_map(|word| {
+        let url = url::Url::parse(word).ok()?;
+        let host = url.host_str()?;
+        (url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && (host == "accounts.google.com"
+                || host == "antigravity.google"
+                || host.ends_with(".antigravity.google")))
+        .then(|| url.to_string())
+    })
+}
 
 impl Provider {
     fn override_name(self) -> &'static str {

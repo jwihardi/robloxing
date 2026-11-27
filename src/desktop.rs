@@ -45,6 +45,7 @@ enum Update {
     PackImported(PathBuf, Result<String>),
     Captured(PathBuf, Option<i64>, Option<String>, Result<bool>),
     Preferences(u64, Result<Vec<preferences::Row>>, String),
+    AntigravityLink(String),
     PreferenceChanged {
         result: Result<String>,
         provider: preferences::Provider,
@@ -90,6 +91,8 @@ struct App {
     task_overrides:
         RefCell<std::collections::HashMap<String, workshop::studio::settings::TaskSettings>>,
     studio_cancel: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
+    login_code: RefCell<Option<tokio::sync::oneshot::Sender<String>>>,
+    cancel_login: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_generation: Cell<u64>,
     settings_read: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     settings_page: RefCell<Option<(String, preferences::Provider, PluginSection)>>,
@@ -1080,6 +1083,16 @@ impl App {
             };
             arg = path.to_string_lossy().into_owned();
         }
+        let login = if tab == "Providers" && arg == "Antigravity" && action == "login" {
+            let (code, input) = tokio::sync::oneshot::channel();
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            self.login_code.replace(Some(code));
+            self.cancel_login.replace(Some(cancel));
+            ui.set_antigravity_signin(true);
+            Some((input, cancelled))
+        } else {
+            None
+        };
         ui.set_settings_working(true);
         ui.set_settings_working_id(arg.as_str().into());
         self.settings_read.take();
@@ -1104,6 +1117,15 @@ impl App {
                 .build()
                 .map_err(anyhow::Error::from)
                 .and_then(|rt| {
+                    if let Some((input, cancelled)) = login {
+                        return rt.block_on(preferences::antigravity_login(
+                            input,
+                            cancelled,
+                            |url| {
+                                let _ = tx.send(Update::AntigravityLink(url));
+                            },
+                        ));
+                    }
                     rt.block_on(preferences::change(
                         &tab,
                         p,
@@ -1523,6 +1545,11 @@ impl App {
                     }
                 }
                 Update::Preferences(..) => {}
+                Update::AntigravityLink(url) => {
+                    if ui.get_antigravity_signin() {
+                        ui.set_antigravity_link(url.into());
+                    }
+                }
                 Update::PreferenceChanged {
                     result,
                     provider,
@@ -1530,6 +1557,11 @@ impl App {
                     recommendation,
                     changed,
                 } => {
+                    self.login_code.take();
+                    self.cancel_login.take();
+                    ui.set_antigravity_signin(false);
+                    ui.set_antigravity_link("".into());
+                    ui.set_code_submitted(false);
                     ui.set_settings_working(false);
                     let id = ui.get_settings_working_id();
                     ui.set_settings_working_id("".into());
@@ -2156,6 +2188,8 @@ fn main() -> Result<()> {
         task_overrides: Default::default(),
         studio_cancel: Default::default(),
         settings_generation: Default::default(),
+        login_code: Default::default(),
+        cancel_login: Default::default(),
         settings_read: Default::default(),
         settings_rows: Default::default(),
         settings_page: Default::default(),
@@ -2221,6 +2255,35 @@ fn main() -> Result<()> {
     ui.on_show_more_plugins(move || {
         a.plugin_limit.set(a.plugin_limit.get() + PLUGINS_PER_PAGE);
         a.filter_preferences(&a.ui.unwrap().get_settings_query());
+    });
+    let a = app.clone();
+    ui.on_submit_login_code(move |code| {
+        let code = code.trim();
+        if code.is_empty() || code.len() > 8192 || code.chars().any(char::is_control) {
+            a.ui.unwrap()
+                .set_settings_status("Paste a single sign-in code or callback URL.".into());
+            return;
+        }
+        if let Some(sender) = a.login_code.take()
+            && sender.send(code.to_owned()).is_ok()
+        {
+            let ui = a.ui.unwrap();
+            ui.set_code_submitted(true);
+            ui.set_settings_status("Verifying your code...".into());
+        }
+    });
+    let a = app.clone();
+    ui.on_cancel_signin(move || {
+        if let Some(cancel) = a.cancel_login.take() {
+            let _ = cancel.send(());
+        }
+    });
+    let a = app.clone();
+    ui.on_open_signin_link(move || {
+        let ui = a.ui.unwrap();
+        if let Err(error) = webbrowser::open(&ui.get_antigravity_link()) {
+            ui.set_settings_status(format!("Could not open your browser: {error}").into());
+        }
     });
     let a = app.clone();
     ui.on_settings_action(move |action, arg| {

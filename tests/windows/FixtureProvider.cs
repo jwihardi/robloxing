@@ -188,6 +188,13 @@ class FixtureProvider {
             var id=frame["id"]; var p=(Dictionary<string,object>)frame["params"];
             switch(Convert.ToString(frame["method"])) {
                 case "initialize": WaitForInit(); Send(new {id=id,result=new {protocolVersion=1}}); break;
+                case "session/list":
+                    if (Mode("provider-setup") && !File.Exists(Path.Combine(Dir, "antigravity.session"))) {
+                        Send(new {id=id,error=new {code=-32000,message="Authentication required"}});
+                    } else {
+                        Send(new {id=id,result=new {sessions=new object[0]}});
+                    }
+                    break;
                 case "session/new": case "session/load":
                     if(Mode("capture-mcp") && line.Contains("workshop"))
                         File.WriteAllText(Path.Combine(Dir,"mcp-"+provider+".json"),Json.Serialize(p["mcpServers"]));
@@ -225,7 +232,11 @@ class FixtureProvider {
             }
             return;
         }
-        if(Array.IndexOf(args,"--acp")>=0 || (args.Length>=2 && args[0]=="acp" && Array.IndexOf(args,"--stdio")>=0 && Array.IndexOf(args,"--dangerously-skip-permissions")>=0)){Acp(args[0]=="acp" ? "antigravity" : "gemini");return;}
+        if(Array.IndexOf(args,"--acp")>=0 || (args.Length>=2 && args[0]=="acp" && Array.IndexOf(args,"--stdio")>=0)){Acp(args[0]=="acp" ? "antigravity" : "gemini");return;}
+        if (Mode("provider-setup") && !Mode("antigravity.session") &&
+            (args.Length == 1 && args[0] == "models" || args.Length == 4 && args[0] == "-p" && (args[1] == "/model" || args[1] == "/usage"))) {
+            File.WriteAllText(Path.Combine(Dir, "unexpected-auth-probe"), "1");
+        }
         if (args.Length == 1 && args[0] == "models") {
             Console.WriteLine("gemini-test-high    Gemini Test (High)");
             Console.WriteLine("gemini-test-low     Gemini Test (Low)");
@@ -238,6 +249,10 @@ class FixtureProvider {
             }}}}} }); return;
         }
         if (args.Length == 2 && args[0] == "acp" && args[1] == "--login") {
+            File.AppendAllText(Path.Combine(Dir, "agy-login-count"), "1");
+            Console.Error.WriteLine("Open this link in a browser to log in with Google:");
+            Console.Error.WriteLine("https://accounts.google.com/o/oauth2/auth?state=fixture");
+            if (Console.ReadLine() != "fixture-code") { Environment.Exit(1); return; }
             File.WriteAllText(Path.Combine(Dir, "antigravity.session"), "fixture"); return;
         }
         if (args.Length == 4 && args[0] == "-p" && args[1] == "/model") {

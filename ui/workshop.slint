@@ -379,6 +379,12 @@ export component Desk inherits Window {
     in property <string> settings-status;
     in property <string> live-activity;
     in property <int> active-worker-count;
+    in property <bool> antigravity-signin;
+    in property <string> antigravity-link;
+    in property <bool> code-submitted;
+    callback submit-login-code(string);
+    callback cancel-signin();
+    callback open-signin-link();
     in property <bool> settings-working;
     in property <string> settings-working-id;
     in property <bool> more-plugins;
@@ -388,7 +394,7 @@ export component Desk inherits Window {
     private property <string> source-input;
     private property <bool> source-open;
     private property <string> confirm-id;
-    changed settings-open => { root.confirm-id = ""; }
+    changed settings-open => { root.confirm-id = ""; if !root.settings-open && root.antigravity-signin {root.cancel-signin();} }
     callback load-settings(bool);
     callback settings-action(string,string);
     callback search-settings(string);
@@ -1068,6 +1074,23 @@ export component Desk inherits Window {
                         }
                     }
                     Rectangle { height: 1px; background: Theme.line; }
+                }
+            }
+            if root.settings-tab == "Providers" && root.antigravity-signin: VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    Text { text: "Sign in to Antigravity"; color: Theme.text; font-size: 16px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                    Action { label: "Cancel"; width: 76px; height: 32px; activate => {root.cancel-signin();} }
+                }
+                Text { text: "Paste the code from Google. If the page didn’t open, use the sign-in link."; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+                HorizontalLayout { spacing: 8px; height: 36px;
+                    Action { label: "Open Google sign-in"; width: 148px; enabled: root.antigravity-link != "" && !root.code-submitted; activate => {root.open-signin-link();} }
+                    code := LineEdit { placeholder-text: "Authorization code"; accessible-label: "Antigravity authorization code"; input-type: password;
+                        horizontal-stretch: 1; enabled: !root.code-submitted;
+                        accepted => { if self.text != "" {root.submit-login-code(self.text); self.text = "";} }
+                    }
+                    Action { label: "Verify"; width: 74px; selected: true; enabled: code.text != "" && !root.code-submitted;
+                        activate => {root.submit-login-code(code.text); code.text = "";} }
                 }
             }
             if root.settings-tab != "Tasks" && root.settings-tab != "Appearance" && root.settings-tab != "Notifications": HorizontalLayout {

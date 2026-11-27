@@ -1,4 +1,5 @@
 mod provider_setup;
+pub use provider_setup::antigravity_login;
 mod recommended;
 use crate::PluginSection;
 use anyhow::{Context, Result, bail, ensure};
@@ -731,25 +732,18 @@ pub async fn change(
         }
         let mut cmd = command(provider.program()?);
         if provider == Provider::Antigravity {
-            if act == "logout" {
-                workshop::provider::antigravity::sign_out().await?;
-                return Ok("Signed out of Antigravity.".into());
-            }
-            ensure!(act == "login", "Unknown Antigravity account action");
-            cmd.arg("acp");
+            ensure!(act == "logout", "Use the Antigravity sign-in form");
+            workshop::provider::antigravity::sign_out().await?;
+            return Ok("Signed out of Antigravity.".into());
         } else if provider == Provider::Claude {
             cmd.arg("auth");
         }
         match act {
             "login" => {
-                cmd.arg(if provider == Provider::Antigravity {
-                    "--login"
-                } else {
-                    "login"
-                })
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
+                cmd.arg("login")
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
                 #[cfg(windows)]
                 cmd.creation_flags(0x00000010); // The provider may prompt for a browser code.
                 let status = tokio::time::timeout(Duration::from_secs(600), cmd.status())

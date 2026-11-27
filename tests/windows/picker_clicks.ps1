@@ -1319,7 +1319,25 @@ try {
         foreach ($name in $accounts) {
             Wait-For { Named "Sign in to $name" } "$name discovered without restart"
             Click "Sign in to $name"
+            if ($name -eq 'Antigravity') {
+                Wait-For { (Named 'Open Google sign-in').Current.IsEnabled } 'Google URL from the active CLI'
+                Click 'Cancel'
+                Wait-For { (Named 'Sign in to Antigravity').Current.IsEnabled } 'cancel sign-in'
+                Click 'Sign in to Antigravity'
+                Wait-For { (Named 'Open Google sign-in').Current.IsEnabled } 'new Google URL after cancel'
+                (Named 'Antigravity authorization code').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('expired-fixture')
+                Click 'Verify'
+                Wait-For { (Named 'Antigravity could not finish sign-in. Start again for a fresh code.') -and (Named 'Sign in to Antigravity').Current.IsEnabled } 'rejected code allows fresh sign-in'
+                Click 'Sign in to Antigravity'
+                Wait-For { (Named 'Open Google sign-in').Current.IsEnabled } 'fresh Google URL after rejected code'
+                $inputElement = Named 'Antigravity authorization code'
+                $inputElement.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('fixture-code')
+                Click 'Verify'
+            }
             Wait-For { Named "Sign out of $name" } "$name signed in"
+        }
+        if ((Get-Content (Join-Path $root 'agy-login-count') -Raw) -ne '111' -or (Test-Path (Join-Path $root 'unexpected-auth-probe'))) {
+            throw 'Antigravity started an extra login or interactive account probe'
         }
         Write-Output 'Provider installation actions, retry and sign-in passed on the private desktop.'
         return
